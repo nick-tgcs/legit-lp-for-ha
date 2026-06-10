@@ -1,0 +1,27 @@
+[
+  [
+    {
+      "entity_id": "climate.ac_0",
+      "state": "unavailable",
+      "attributes": {
+        "hvac_modes": [
+          "cool",
+          "fan_only",
+          "dry",
+          "heat",
+          "auto",
+          "off"
+        ],
+        "min_temp": 7,
+        "max_temp": 35,
+        "fan_modes": [
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "last_changed": "2026-06-09T14:00:00+00:00",
+      "last_updated": "2026-06-09T14:00:00+00:00"
+    }
+  ]
+]

@@ -1,0 +1,37 @@
+[
+  [
+    {
+      "entity_id": "binary_sensor.indoor_comfort_hot_water_running",
+      "state": "off",
+      "attributes": {
+        "friendly_name": "Indoor comfort hot water running"
+      },
+      "last_changed": "2026-06-09T14:00:00+00:00",
+      "last_updated": "2026-06-09T14:00:00+00:00"
+    },
+    {
+      "state": "unavailable",
+      "last_changed": "2026-06-09T23:51:31.658142+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T23:51:32.251211+00:00"
+    },
+    {
+      "state": "unavailable",
+      "last_changed": "2026-06-09T23:56:51.652750+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T23:56:52.286942+00:00"
+    },
+    {
+      "state": "unavailable",
+      "last_changed": "2026-06-10T02:30:49.156879+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-10T02:30:49.769559+00:00"
+    }
+  ]
+]

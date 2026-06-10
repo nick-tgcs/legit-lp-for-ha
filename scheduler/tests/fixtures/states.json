@@ -1,0 +1,415 @@
+{
+  "sensor.current_grid_cost": {
+    "entity_id": "sensor.current_grid_cost",
+    "state": "0.204",
+    "attributes": {
+      "state_class": "measurement",
+      "unit_of_measurement": "AUD/kWh",
+      "friendly_name": "Grid power rate import current"
+    },
+    "last_changed": "2026-06-10T07:35:20.766773+00:00",
+    "last_reported": "2026-06-10T07:35:20.766773+00:00",
+    "last_updated": "2026-06-10T07:35:20.766773+00:00",
+    "context": {
+      "id": "01KTR7A2DW14BEWMR9KG5NG42M",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.amber_electric_feedin": {
+    "entity_id": "sensor.amber_electric_feedin",
+    "state": "[-0.168,-0.177,-0.181,-0.182,-0.181,-0.179,-0.193,-0.182,-0.179,-0.182,-0.189]",
+    "attributes": {
+      "friendly_name": "Amber Electric FeedIn"
+    },
+    "last_changed": "2026-06-10T07:35:20.742321+00:00",
+    "last_reported": "2026-06-10T07:35:30.581948+00:00",
+    "last_updated": "2026-06-10T07:35:20.742321+00:00",
+    "context": {
+      "id": "01KTR7A2D6CD9QB0EZ6ZD7MW26",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.current_sonnen_consumption": {
+    "entity_id": "sensor.current_sonnen_consumption",
+    "state": "1807.0",
+    "attributes": {
+      "unit_of_measurement": "W",
+      "device_class": "power",
+      "friendly_name": "Current Sonnen Consumption"
+    },
+    "last_changed": "2026-06-10T07:36:18.536371+00:00",
+    "last_reported": "2026-06-10T07:36:18.536371+00:00",
+    "last_updated": "2026-06-10T07:36:18.536371+00:00",
+    "context": {
+      "id": "01KTR7BTTP2K606TVPJH76Z4WQ",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.current_sonnen_production": {
+    "entity_id": "sensor.current_sonnen_production",
+    "state": "0.0",
+    "attributes": {
+      "unit_of_measurement": "W",
+      "device_class": "power",
+      "friendly_name": "Current Sonnen Production"
+    },
+    "last_changed": "2026-06-10T07:33:08.430760+00:00",
+    "last_reported": "2026-06-10T07:33:08.430760+00:00",
+    "last_updated": "2026-06-10T07:33:08.430760+00:00",
+    "context": {
+      "id": "01KTR7615XV38YBEJSK04V73RG",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.energy_production_today": {
+    "entity_id": "sensor.energy_production_today",
+    "state": "4.412",
+    "attributes": {
+      "unit_of_measurement": "kWh",
+      "device_class": "energy",
+      "friendly_name": "Garage Solar Forecast Estimated energy production - today"
+    },
+    "last_changed": "2026-06-10T00:12:55.601535+00:00",
+    "last_reported": "2026-06-10T00:12:55.601535+00:00",
+    "last_updated": "2026-06-10T00:12:55.601535+00:00",
+    "context": {
+      "id": "01KTQDZZDHKEC5J2D4AWD5VV9A",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.energy_production_tomorrow": {
+    "entity_id": "sensor.energy_production_tomorrow",
+    "state": "13.832",
+    "attributes": {
+      "unit_of_measurement": "kWh",
+      "device_class": "energy",
+      "friendly_name": "Garage Solar Forecast Estimated energy production - tomorrow"
+    },
+    "last_changed": "2026-06-09T23:12:45.057445+00:00",
+    "last_reported": "2026-06-09T23:12:45.057445+00:00",
+    "last_updated": "2026-06-09T23:12:45.057445+00:00",
+    "context": {
+      "id": "01KTQAHSG1C1G85ZCX6MRAHPMB",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.power_production_now": {
+    "entity_id": "sensor.power_production_now",
+    "state": "0",
+    "attributes": {
+      "state_class": "measurement",
+      "unit_of_measurement": "W",
+      "device_class": "power",
+      "friendly_name": "Garage Solar Forecast Estimated power production - now"
+    },
+    "last_changed": "2026-06-10T07:13:04.396571+00:00",
+    "last_reported": "2026-06-10T07:13:04.396571+00:00",
+    "last_updated": "2026-06-10T07:13:04.396571+00:00",
+    "context": {
+      "id": "01KTR619CCVG20Y23HRF2Q82JC",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "binary_sensor.hot_water_automated": {
+    "entity_id": "binary_sensor.hot_water_automated",
+    "state": "off",
+    "attributes": {
+      "icon": "mdi:robot",
+      "friendly_name": "Hot water automated"
+    },
+    "last_changed": "2026-06-10T02:30:49.247044+00:00",
+    "last_reported": "2026-06-10T02:30:49.247044+00:00",
+    "last_updated": "2026-06-10T02:30:49.247044+00:00",
+    "context": {
+      "id": "01KTQNWF4ZTGA2AFNAQS0SJ23E",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "binary_sensor.dehumidifier_automated": {
+    "entity_id": "binary_sensor.dehumidifier_automated",
+    "state": "off",
+    "attributes": {
+      "icon": "mdi:robot",
+      "friendly_name": "Dehumidifier automated"
+    },
+    "last_changed": "2026-06-10T02:30:49.245411+00:00",
+    "last_reported": "2026-06-10T02:30:49.245411+00:00",
+    "last_updated": "2026-06-10T02:30:49.245411+00:00",
+    "context": {
+      "id": "01KTQNWF4X215CAW8T2G5VVWH1",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "binary_sensor.aircon_automated": {
+    "entity_id": "binary_sensor.aircon_automated",
+    "state": "off",
+    "attributes": {
+      "icon": "mdi:robot",
+      "friendly_name": "Aircon automated"
+    },
+    "last_changed": "2026-06-10T02:30:49.243533+00:00",
+    "last_reported": "2026-06-10T02:30:49.243533+00:00",
+    "last_updated": "2026-06-10T02:30:49.243533+00:00",
+    "context": {
+      "id": "01KTQNWF4VMMP0MQ59PKYG3377",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "binary_sensor.indoor_comfort_hot_water_running": {
+    "entity_id": "binary_sensor.indoor_comfort_hot_water_running",
+    "state": "off",
+    "attributes": {
+      "friendly_name": "Indoor comfort hot water running"
+    },
+    "last_changed": "2026-06-10T02:30:49.769559+00:00",
+    "last_reported": "2026-06-10T02:30:49.769559+00:00",
+    "last_updated": "2026-06-10T02:30:49.769559+00:00",
+    "context": {
+      "id": "01KTQNWFN9Z1GZQQBMBZA5QPGZ",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "binary_sensor.indoor_comfort_dehumidifiers_running": {
+    "entity_id": "binary_sensor.indoor_comfort_dehumidifiers_running",
+    "state": "off",
+    "attributes": {
+      "friendly_name": "Indoor comfort dehumidifiers running"
+    },
+    "last_changed": "2026-06-10T02:33:23.928210+00:00",
+    "last_reported": "2026-06-10T02:33:23.928210+00:00",
+    "last_updated": "2026-06-10T02:33:23.928210+00:00",
+    "context": {
+      "id": "01KTQP12P8NPFVAGBT0Q3E36EN",
+      "parent_id": "01KTQP12P68DHN73W8YRGDN844",
+      "user_id": null
+    }
+  },
+  "climate.ac_0": {
+    "entity_id": "climate.ac_0",
+    "state": "unavailable",
+    "attributes": {
+      "restored": true,
+      "hvac_modes": [
+        "cool",
+        "fan_only",
+        "dry",
+        "heat",
+        "auto",
+        "off"
+      ],
+      "min_temp": 7,
+      "max_temp": 35,
+      "fan_modes": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "supported_features": 393
+    },
+    "last_changed": "2026-06-08T12:33:54.386518+00:00",
+    "last_reported": "2026-06-08T12:33:54.386518+00:00",
+    "last_updated": "2026-06-08T12:33:54.386518+00:00",
+    "context": {
+      "id": "01KTKKKA6JGFCQ7R3VP45NJ068",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.humidity_average_inside": {
+    "entity_id": "sensor.humidity_average_inside",
+    "state": "71.6",
+    "attributes": {
+      "icon": "mdi:cloud-percent",
+      "friendly_name": "Average humidity inside"
+    },
+    "last_changed": "2026-06-10T07:35:00.236630+00:00",
+    "last_reported": "2026-06-10T07:35:00.236630+00:00",
+    "last_updated": "2026-06-10T07:35:00.236630+00:00",
+    "context": {
+      "id": "01KTR79EC7RHW3K73TCYZ8ESMW",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.temp_average_inside": {
+    "entity_id": "sensor.temp_average_inside",
+    "state": "18.2",
+    "attributes": {
+      "icon": "mdi:temperature-celsius",
+      "friendly_name": "Average temperature inside"
+    },
+    "last_changed": "2026-06-10T07:35:00.120897+00:00",
+    "last_reported": "2026-06-10T07:35:00.120897+00:00",
+    "last_updated": "2026-06-10T07:35:00.120897+00:00",
+    "context": {
+      "id": "01KTR79E8JTHED92EY7TP6V8P1",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "sensor.temp_outside": {
+    "entity_id": "sensor.temp_outside",
+    "state": "17.5",
+    "attributes": {
+      "icon": "mdi:temperature-celsius",
+      "friendly_name": "Temperature outside"
+    },
+    "last_changed": "2026-06-10T06:55:00.368077+00:00",
+    "last_reported": "2026-06-10T06:55:00.368077+00:00",
+    "last_updated": "2026-06-10T06:55:00.368077+00:00",
+    "context": {
+      "id": "01KTR506QPBRFQWYA57WBAMMW6",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_hot_water_runtime": {
+    "entity_id": "input_number.input_number_hot_water_runtime",
+    "state": "6.0",
+    "attributes": {
+      "initial": 6.0,
+      "editable": false,
+      "min": 0.0,
+      "max": 24.0,
+      "step": 0.1,
+      "mode": "slider",
+      "unit_of_measurement": "hours",
+      "icon": "mdi:timer-outline",
+      "friendly_name": "Hot Water Runtime"
+    },
+    "last_changed": "2026-06-08T12:33:22.285164+00:00",
+    "last_reported": "2026-06-08T12:33:22.285164+00:00",
+    "last_updated": "2026-06-08T12:33:22.285164+00:00",
+    "context": {
+      "id": "01KTKKJAVDY3NB386VX9BP88QY",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_climate_aircon_target_temp": {
+    "entity_id": "input_number.input_number_climate_aircon_target_temp",
+    "state": "20.0",
+    "attributes": {
+      "initial": null,
+      "editable": false,
+      "min": 16.0,
+      "max": 32.0,
+      "step": 1.0,
+      "mode": "slider",
+      "unit_of_measurement": "\u00b0C",
+      "icon": "mdi:temperature-celsius",
+      "friendly_name": "Target temperature for airconditioning"
+    },
+    "last_changed": "2026-06-08T12:33:22.292896+00:00",
+    "last_reported": "2026-06-08T12:33:22.292896+00:00",
+    "last_updated": "2026-06-08T12:33:22.292896+00:00",
+    "context": {
+      "id": "01KTKKJAVMCH7TW661MGWZPYVP",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_climate_aircon_run_below_price_kwh": {
+    "entity_id": "input_number.input_number_climate_aircon_run_below_price_kwh",
+    "state": "0.03",
+    "attributes": {
+      "initial": null,
+      "editable": false,
+      "min": 0.0,
+      "max": 0.2,
+      "step": 0.001,
+      "mode": "box",
+      "unit_of_measurement": "AUD/kWh",
+      "icon": "mdi:transmission-tower-import",
+      "friendly_name": "Grid power price to run airconditioning below"
+    },
+    "last_changed": "2026-06-08T12:33:22.292615+00:00",
+    "last_reported": "2026-06-08T12:33:22.292615+00:00",
+    "last_updated": "2026-06-08T12:33:22.292615+00:00",
+    "context": {
+      "id": "01KTKKJAVM033NRR4B80HMERS6",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_indoor_comfort_dehumidifier_max_price_kwh": {
+    "entity_id": "input_number.input_number_indoor_comfort_dehumidifier_max_price_kwh",
+    "state": "0.15",
+    "attributes": {
+      "initial": 0.15,
+      "editable": false,
+      "min": -1.0,
+      "max": 1.0,
+      "step": 0.001,
+      "mode": "box",
+      "unit_of_measurement": "AUD/kWh",
+      "icon": "mdi:cash-clock",
+      "friendly_name": "Dehumidifier max grid price"
+    },
+    "last_changed": "2026-06-08T12:33:22.287206+00:00",
+    "last_reported": "2026-06-08T12:33:22.287206+00:00",
+    "last_updated": "2026-06-08T12:33:22.287206+00:00",
+    "context": {
+      "id": "01KTKKJAVFC46BMQBJZ66AVKFM",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_indoor_comfort_humidity_target_percent": {
+    "entity_id": "input_number.input_number_indoor_comfort_humidity_target_percent",
+    "state": "50.0",
+    "attributes": {
+      "initial": 50.0,
+      "editable": false,
+      "min": 35.0,
+      "max": 65.0,
+      "step": 1.0,
+      "mode": "slider",
+      "unit_of_measurement": "%",
+      "icon": "mdi:water-percent",
+      "friendly_name": "Target indoor humidity"
+    },
+    "last_changed": "2026-06-08T12:33:22.285721+00:00",
+    "last_reported": "2026-06-08T12:33:22.285721+00:00",
+    "last_updated": "2026-06-08T12:33:22.285721+00:00",
+    "context": {
+      "id": "01KTKKJAVDD5PK7R3HRKQ7W7A6",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "input_number.input_number_indoor_comfort_humidity_start_hysteresis_percent": {
+    "entity_id": "input_number.input_number_indoor_comfort_humidity_start_hysteresis_percent",
+    "state": "5.0",
+    "attributes": {
+      "initial": 5.0,
+      "editable": false,
+      "min": 0.0,
+      "max": 15.0,
+      "step": 1.0,
+      "mode": "slider",
+      "unit_of_measurement": "%",
+      "icon": "mdi:water-percent-alert",
+      "friendly_name": "Humidity start buffer"
+    },
+    "last_changed": "2026-06-08T12:33:22.286040+00:00",
+    "last_reported": "2026-06-08T12:33:22.286040+00:00",
+    "last_updated": "2026-06-08T12:33:22.286040+00:00",
+    "context": {
+      "id": "01KTKKJAVE8A2YTK7MH2J8CVKX",
+      "parent_id": null,
+      "user_id": null
+    }
+  }
+}

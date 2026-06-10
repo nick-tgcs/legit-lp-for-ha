@@ -1,0 +1,125 @@
+[
+  [
+    {
+      "entity_id": "binary_sensor.indoor_comfort_hot_water_running",
+      "state": "off",
+      "attributes": {
+        "friendly_name": "Indoor comfort hot water running"
+      },
+      "last_changed": "2026-06-08T14:00:00+00:00",
+      "last_updated": "2026-06-08T14:00:00+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T00:15:05.116393+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T00:50:01.500042+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T00:50:07.309040+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:05:17.775640+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:05:23.167032+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:10:16.716868+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:10:21.871815+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:15:19.767074+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:15:25.002477+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:20:19.652179+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:20:25.025718+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:52:58.288695+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:53:04.822209+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T01:55:14.760965+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T01:55:23.177093+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T02:35:34.647459+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T02:35:39.869958+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T02:54:39.736264+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T02:54:52.007366+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T02:55:34.696336+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T02:55:42.894923+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T03:09:55.466836+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T03:09:59.981884+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T03:30:29.265018+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T03:30:45.883206+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T04:30:50.280665+00:00"
+    },
+    {
+      "state": "on",
+      "last_changed": "2026-06-09T04:30:54.925138+00:00"
+    },
+    {
+      "state": "off",
+      "last_changed": "2026-06-09T04:50:05.730568+00:00"
+    }
+  ]
+]
