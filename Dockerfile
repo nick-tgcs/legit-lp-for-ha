@@ -30,4 +30,8 @@ LABEL io.hass.type="addon"
 COPY --from=build /src/scheduler/target/release/legit-lp-scheduler /usr/local/bin/legit-lp-scheduler
 COPY addon/run.sh /run.sh
 RUN chmod a+x /run.sh
+# Supervisor uses the container health state (the manifest `watchdog:` key is
+# obsolete). /health is 200 only while the solve loop is live.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s \
+  CMD curl -fsS http://127.0.0.1:8099/health || exit 1
 CMD ["/run.sh"]
