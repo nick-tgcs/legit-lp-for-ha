@@ -62,14 +62,16 @@ impl Grid {
                 "grid_minutes must divide 60, got {step_minutes}"
             )));
         }
-        // Anchor: floor `now` to a step boundary in local wall time. Because
-        // step_minutes divides 60, flooring minutes is enough.
-        let floored_min = now.minute() - now.minute() % step_minutes;
-        let anchor = now
-            .with_minute(floored_min)
-            .and_then(|t| t.with_second(0))
-            .and_then(|t| t.with_nanosecond(0))
-            .expect("flooring minutes/seconds is always valid");
+        // Anchor: floor `now` to a step boundary in local wall time — but do
+        // the arithmetic in ABSOLUTE time (subtract the sub-step remainder of
+        // the wall clock). Resolving a floored *local* time via chrono panics
+        // inside the repeated hour at DST end (ambiguous); subtracting a
+        // duration from the real instant can't (found by proptest).
+        let local = now.naive_local();
+        let into_step = chrono::Duration::minutes(i64::from(local.minute() % step_minutes))
+            + chrono::Duration::seconds(i64::from(local.second()))
+            + chrono::Duration::nanoseconds(i64::from(local.nanosecond()));
+        let anchor = now - into_step;
 
         // Walk in ABSOLUTE time: monotone by construction, DST-safe. Local
         // labels stay on step boundaries because DST shifts are whole hours.
@@ -256,5 +258,86 @@ mod tests {
         assert_eq!(inst.len(), 1);
         assert_eq!(g.steps[inst[0].steps.start], sydney(2026, 6, 10, 22, 0));
         assert_eq!(inst[0].steps.len(), 34); // 8.5h = 34 steps
+    }
+
+    mod invariants {
+        use super::*;
+        use chrono::TimeZone;
+        use proptest::prelude::*;
+
+        prop_compose! {
+            /// Any instant in 2026, built via UTC so DST gaps can't make it
+            /// invalid, then viewed in Sydney local time.
+            fn any_now()(secs in 1_767_225_600i64..1_798_761_600i64) -> DateTime<Tz> {
+                chrono::Utc.timestamp_opt(secs, 0).unwrap().with_timezone(&Sydney)
+            }
+        }
+
+        prop_compose! {
+            fn any_window()(sh in 0u32..24, sm in 0u32..60, eh in 0u32..24, em in 0u32..60)
+                -> Window {
+                Window { start: t(sh, sm), end: t(eh, em) }
+            }
+        }
+
+        fn any_step() -> impl Strategy<Value = u32> {
+            prop::sample::select(vec![5u32, 10, 15, 20, 30, 60])
+        }
+
+        proptest! {
+            /// The grid is strictly monotone and exactly covers the horizon,
+            /// wherever it starts (including DST days) and whatever the step.
+            #[test]
+            fn grid_monotone_and_sized(now in any_now(), step in any_step(), hours in 1u32..48) {
+                let g = Grid::build(now, step, hours).unwrap();
+                prop_assert_eq!(g.steps.len() as u64, u64::from(hours) * 60 / u64::from(step));
+                prop_assert!(g.steps.windows(2).all(|p| p[0] < p[1]));
+                prop_assert!(g.steps[0] <= now);
+                prop_assert!(now < g.steps[0] + chrono::Duration::minutes(i64::from(step)));
+            }
+
+            /// Instances PARTITION the in-window steps: disjoint, sorted,
+            /// contiguous, and their union is exactly the in-window step set.
+            /// Each run is maximal (steps adjacent to a run are out-of-window).
+            #[test]
+            fn instances_partition_in_window_steps(
+                now in any_now(), step in any_step(), win in any_window()
+            ) {
+                let g = Grid::build(now, step, 36).unwrap();
+                let inst = window_instances(&win, &g);
+
+                let mut covered = vec![false; g.steps.len()];
+                let mut prev_end = 0usize;
+                for i in &inst {
+                    prop_assert!(!i.steps.is_empty());
+                    prop_assert!(i.steps.start >= prev_end, "sorted + disjoint");
+                    prev_end = i.steps.end;
+                    for k in i.steps.clone() {
+                        covered[k] = true;
+                    }
+                    // Maximality: neighbours just outside the run are out-of-window.
+                    if i.steps.start > 0 {
+                        prop_assert!(!in_window(g.steps[i.steps.start - 1].time(), &win));
+                    }
+                    if i.steps.end < g.steps.len() {
+                        prop_assert!(!in_window(g.steps[i.steps.end].time(), &win));
+                    }
+                }
+                for (k, s) in g.steps.iter().enumerate() {
+                    prop_assert_eq!(covered[k], in_window(s.time(), &win));
+                }
+            }
+
+            /// Round-up never under-covers, and never over-covers by a full step.
+            #[test]
+            fn round_up_bounds(secs in 0u64..200_000, step in any_step()) {
+                let n = round_up_to_steps(Duration::from_secs(secs), step);
+                let step_secs = u64::from(step) * 60;
+                prop_assert!(u64::from(n) * step_secs >= secs);
+                if n > 0 {
+                    prop_assert!((u64::from(n) - 1) * step_secs < secs);
+                }
+            }
+        }
     }
 }
