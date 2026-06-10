@@ -89,7 +89,7 @@ impl Grid {
 /// (never under-deliver).
 pub fn round_up_to_steps(d: Duration, step_minutes: u32) -> u32 {
     let step_secs = u64::from(step_minutes) * 60;
-    ((d.as_secs() + step_secs - 1) / step_secs) as u32
+    d.as_secs().div_ceil(step_secs) as u32
 }
 
 /// A window instance: a run of consecutive grid steps inside the window,
