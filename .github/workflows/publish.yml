@@ -1,0 +1,52 @@
+# Build + publish the add-on image to GHCR. The package is created by the
+# repo-scoped GITHUB_TOKEN, so it links to this (public) repo and is publicly
+# pullable — which is what the Supervisor needs.
+name: publish
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scheduler
+      - run: make test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: echo "version=$(sed -n 's/^version: \"\(.*\)\"/\1/p' addon/config.yaml)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/nick-tgcs/legit-lp-for-ha:${{ steps.ver.outputs.version }}
+            ghcr.io/nick-tgcs/legit-lp-for-ha:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/nick-tgcs/legit-lp-for-ha
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
