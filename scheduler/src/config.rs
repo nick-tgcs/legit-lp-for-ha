@@ -255,6 +255,31 @@ pub fn hours_to_minutes(hours: f64) -> u32 {
     (hours * 60.0).ceil().max(0.0) as u32
 }
 
+/// The bundled example registry, seeded on first boot: the add-on config dir
+/// starts empty, and crashing on a missing file would make install require a
+/// manual file drop before the panel even comes up. The example is this site's
+/// real contract surface and boots observe-only (authorities/global gate it).
+const SEED_REGISTRY: &str = include_str!("../../addon/example.yaml");
+
+/// Read the registry, writing the bundled example first if none exists yet.
+/// Never overwrites an existing file.
+pub fn load_or_seed(path: &std::path::Path) -> Result<String, SchedulerError> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, SEED_REGISTRY).map_err(|e| {
+                SchedulerError::Config(format!("seed registry {}: {e}", path.display()))
+            })?;
+            tracing::warn!(
+                "registry {} was missing; seeded the bundled example — edit it for this site",
+                path.display()
+            );
+            Ok(SEED_REGISTRY.to_string())
+        }
+        Err(e) => Err(SchedulerError::Config(format!("read registry {}: {e}", path.display()))),
+    }
+}
+
 pub fn parse(yaml: &str) -> Result<RegistryConfig, SchedulerError> {
     let cfg: RegistryConfig =
         serde_yaml::from_str(yaml).map_err(|e| SchedulerError::Config(e.to_string()))?;
@@ -360,6 +385,31 @@ mod tests {
     fn example_yaml() -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
         std::fs::read_to_string(path).expect("read addon/example.yaml")
+    }
+
+    #[test]
+    fn load_or_seed_missing_file_writes_the_bundled_example() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legit_lp.yaml");
+        let yaml = load_or_seed(&path).expect("seeds on first boot");
+        assert!(path.exists(), "registry file was created");
+        parse(&yaml).expect("seeded registry parses + validates");
+        assert_eq!(yaml, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn load_or_seed_existing_file_is_returned_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legit_lp.yaml");
+        std::fs::write(&path, "user: edited").unwrap();
+        let yaml = load_or_seed(&path).expect("reads existing");
+        assert_eq!(yaml, "user: edited", "never overwrites a user registry");
+    }
+
+    #[test]
+    fn load_or_seed_unwritable_dir_errors_without_panic() {
+        let path = std::path::Path::new("/nonexistent-dir/legit_lp.yaml");
+        assert!(load_or_seed(path).is_err());
     }
 
     #[test]

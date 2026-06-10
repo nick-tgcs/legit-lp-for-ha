@@ -38,7 +38,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let ha = HaClient::new(base, token);
 
-    let registry = legit_lp_scheduler::config::parse(&std::fs::read_to_string(&loads_path)?)?;
+    let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_or_seed(
+        std::path::Path::new(&loads_path),
+    )?)?;
     let planner = LpPlanner {
         grid_minutes: registry.global.planning.grid_minutes,
         horizon_hours: registry.global.planning.horizon_hours,

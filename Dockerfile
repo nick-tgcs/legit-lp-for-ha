@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake clang libclang-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY scheduler/ scheduler/
+COPY addon/example.yaml addon/example.yaml
 RUN cargo build --release --manifest-path scheduler/Cargo.toml
 
 # ---- final stage: the per-arch HA Debian base selected above ----
