@@ -17,10 +17,17 @@ if [[ -z "$VERSION" ]]; then
 fi
 echo "verify: release $VERSION"
 
+rm_runtime() {
+  # HA writes root-owned files into the bind mount; a plain rm -rf fails.
+  [[ -d .runtime ]] || return 0
+  docker run --rm -v "$PWD/.runtime:/r" alpine sh -c 'rm -rf /r/ha_config' >/dev/null 2>&1 || true
+  rm -rf .runtime
+}
+
 cleanup() {
   if [[ "${KEEP:-0}" != 1 ]]; then
     docker compose --profile scheduler down -v >/dev/null 2>&1 || true
-    rm -rf .runtime
+    rm_runtime
   else
     echo "KEEP=1: stack left running (docker compose --profile scheduler down -v to stop)"
   fi
@@ -34,7 +41,7 @@ docker pull "$IMAGE:$VERSION" >/dev/null || fail "anonymous pull of $IMAGE:$VERS
 docker image inspect "$IMAGE:$VERSION" --format 'verify:   labels io.hass.version={{index .Config.Labels "io.hass.version"}} io.hass.type={{index .Config.Labels "io.hass.type"}} io.hass.arch={{index .Config.Labels "io.hass.arch"}}'
 
 echo "verify: 2/6 fresh HA from the seed"
-rm -rf .runtime && mkdir -p .runtime
+rm_runtime && mkdir -p .runtime
 cp -r ha_config .runtime/ha_config
 export HA_CONFIG_DIR=./.runtime/ha_config
 export LP_VERSION="$VERSION"

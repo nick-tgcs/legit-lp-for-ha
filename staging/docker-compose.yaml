@@ -21,7 +21,9 @@ services:
     ports: ["8099:8099"]
     environment:
       SCHED_HASS_URL: http://homeassistant:8123
-      SCHED_TOKEN: ${SCHED_TOKEN:?run bootstrap.sh and export SCHED_TOKEN=$(cat .token)}
+      # Empty until bootstrap.sh has minted .token (compose interpolates the
+      # whole file even for other services, so this cannot be a hard :? check).
+      SCHED_TOKEN: ${SCHED_TOKEN:-}
       SCHED_DRY_RUN: ${SCHED_DRY_RUN:-true}
       SCHED_INTERVAL_SECONDS: ${SCHED_INTERVAL_SECONDS:-15}
       SCHED_TIME_ZONE: Australia/Sydney
