@@ -40,7 +40,13 @@ impl SolveReport {
         self.loads
             .iter()
             .map(|l| {
-                let exec = if l.executed { "" } else if self.dry_run { " [dry-run]" } else { "" };
+                let exec = if l.executed {
+                    ""
+                } else if self.dry_run {
+                    " [dry-run]"
+                } else {
+                    ""
+                };
                 format!("{}: {}{exec}", l.id, l.reason)
             })
             .chain(self.diagnostics.iter().map(|d| format!("diag: {d}")))

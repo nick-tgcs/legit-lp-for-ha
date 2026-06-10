@@ -46,10 +46,8 @@ async fn body_of(resp: axum::response::Response) -> String {
 #[tokio::test]
 async fn w1_status_returns_report_json() {
     let (s, _tx, _n) = state();
-    let resp = router(s)
-        .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let resp =
+        router(s).oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
     assert_eq!(v["loads"][0]["id"], "hot_water");
@@ -61,10 +59,8 @@ async fn w3_solve_now_fires_the_notify() {
     let (s, _tx, notify) = state();
     let waiter = notify.clone();
     let waiting = tokio::spawn(async move { waiter.notified().await });
-    let resp = router(s)
-        .oneshot(Request::post("/api/solve").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let resp =
+        router(s).oneshot(Request::post("/api/solve").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await.unwrap().unwrap();
 }
@@ -72,10 +68,8 @@ async fn w3_solve_now_fires_the_notify() {
 #[tokio::test]
 async fn w4_horizon_svg_is_valid_xml_with_plan_blocks() {
     let (s, _tx, _n) = state();
-    let resp = router(s)
-        .oneshot(Request::get("/horizon.svg").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let resp =
+        router(s).oneshot(Request::get("/horizon.svg").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let svg = body_of(resp).await;
     assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
@@ -86,8 +80,7 @@ async fn w4_horizon_svg_is_valid_xml_with_plan_blocks() {
 #[tokio::test]
 async fn w5_index_uses_relative_urls_only() {
     let (s, _tx, _n) = state();
-    let resp =
-        router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
     for needle in ["./api/status", "./api/events", "./api/solve", "./horizon.svg"] {
         assert!(html.contains(needle), "missing {needle}");

@@ -49,9 +49,7 @@ async fn solve_now(State(s): State<WebState>) -> &'static str {
     "solving"
 }
 
-async fn events(
-    State(s): State<WebState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn events(State(s): State<WebState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = s.report.clone();
     let stream = async_stream::stream! {
         loop {

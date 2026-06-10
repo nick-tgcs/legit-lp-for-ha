@@ -8,9 +8,7 @@ use chrono_tz::Tz;
 use crate::config::{self, DemandCfg, LoadTypeCfg, PlanningMode, RegistryConfig, ValueRef};
 use crate::executor::Executor;
 use crate::forecast;
-use crate::ha_client::{
-    fold_history, on_predicate_binary, on_predicate_climate, HaApi, HaState,
-};
+use crate::ha_client::{fold_history, on_predicate_binary, on_predicate_climate, HaApi, HaState};
 use crate::lp::LpPlanner;
 use crate::model::*;
 use crate::profile::Profiles;
@@ -74,7 +72,12 @@ fn current_window_range(w: Window, now: DateTime<Tz>) -> Option<(DateTime<Utc>, 
 }
 
 impl Cycle {
-    pub async fn run<A: HaApi>(&self, ha: &A, profiles: &mut Profiles, now: DateTime<Tz>) -> SolveReport {
+    pub async fn run<A: HaApi>(
+        &self,
+        ha: &A,
+        profiles: &mut Profiles,
+        now: DateTime<Tz>,
+    ) -> SolveReport {
         let started = std::time::Instant::now();
         let mut diags: Vec<String> = Vec::new();
         let g = &self.registry.global;
@@ -126,16 +129,17 @@ impl Cycle {
                 .unwrap_or(false);
             let is_climate = matches!(l.load_type, LoadTypeCfg::Aircon);
             let pred = if is_climate { on_predicate_climate } else { on_predicate_binary };
-            let (running, fold) = match ha.get_history(&l.state.running_entity, midnight_utc, now_utc).await {
-                Ok(rows) => {
-                    let f = fold_history(&rows, midnight_utc, now_utc, pred);
-                    (f.final_on, Some(f))
-                }
-                Err(e) => {
-                    diags.push(format!("{}: history: {e}", l.state.running_entity));
-                    (None, None)
-                }
-            };
+            let (running, fold) =
+                match ha.get_history(&l.state.running_entity, midnight_utc, now_utc).await {
+                    Ok(rows) => {
+                        let f = fold_history(&rows, midnight_utc, now_utc, pred);
+                        (f.final_on, Some(f))
+                    }
+                    Err(e) => {
+                        diags.push(format!("{}: history: {e}", l.state.running_entity));
+                        (None, None)
+                    }
+                };
             let observed = match &l.state.observed_entity {
                 Some(e) => f64_of(ha, e, &mut diags).await,
                 None => None,
@@ -190,8 +194,12 @@ impl Cycle {
                 power_kw: l.capability.power_kw,
                 authority,
                 hard: HardRules {
-                    min_run: std::time::Duration::from_secs(u64::from(l.hard_rules.min_run_minutes) * 60),
-                    min_off: std::time::Duration::from_secs(u64::from(l.hard_rules.min_off_minutes) * 60),
+                    min_run: std::time::Duration::from_secs(
+                        u64::from(l.hard_rules.min_run_minutes) * 60,
+                    ),
+                    min_off: std::time::Duration::from_secs(
+                        u64::from(l.hard_rules.min_off_minutes) * 60,
+                    ),
                     max_starts_per_day: l.hard_rules.max_starts_per_day,
                     windows: l.hard_rules.windows.iter().map(|w| w.parse().unwrap()).collect(),
                 },
@@ -243,11 +251,7 @@ impl Cycle {
                 None => (None, None),
             };
             baseload = profiles.baseload_curve(&grid, p.baseline_kw, cons_now_kw);
-            pv = profiles.pv_curve(
-                &grid,
-                |d| if d == today { t_today } else { t_tom },
-                pv_now_kw,
-            );
+            pv = profiles.pv_curve(&grid, |d| if d == today { t_today } else { t_tom }, pv_now_kw);
             if let Some(path) = &self.profile_path {
                 if let Err(e) = profiles.save(path) {
                     diags.push(format!("profile save: {e}"));
@@ -348,7 +352,9 @@ impl Cycle {
                     kind: DemandKind::HumidityBelow {
                         max: target.unwrap_or(f64::INFINITY),
                         observed: if target.is_some() { observed } else { None },
-                        start_hysteresis: resolve_opt(ha, start_hysteresis, diags).await.unwrap_or(0.0),
+                        start_hysteresis: resolve_opt(ha, start_hysteresis, diags)
+                            .await
+                            .unwrap_or(0.0),
                         drop_per_hour: 0.0,
                         drift_per_hour: 0.0,
                         window: window.as_ref().map(|w| w.parse().unwrap()),
@@ -383,7 +389,9 @@ impl Cycle {
 
 fn demand_window_of(d: &Demand) -> Option<Window> {
     match &d.kind {
-        DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => Some(*window),
+        DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
+            Some(*window)
+        }
         DemandKind::HumidityBelow { window, .. } => *window,
     }
 }

@@ -12,7 +12,13 @@ fn planner() -> LpPlanner {
 }
 
 /// Price series: `base` everywhere, `cheap` on [from, to) step indices.
-fn priced_world(now: chrono::DateTime<chrono_tz::Tz>, base: f64, cheap: f64, from: usize, to: usize) -> WorldState {
+fn priced_world(
+    now: chrono::DateTime<chrono_tz::Tz>,
+    base: f64,
+    cheap: f64,
+    from: usize,
+    to: usize,
+) -> WorldState {
     let mut w = flat_world(now, STEPS, base);
     for t in from..to {
         w.import[t] = Some(cheap);
@@ -155,8 +161,10 @@ fn l6_can_take_valuation_runs_only_below_ceiling_and_within_cap() {
         *completed_minutes = 90;
     }
     let mut world = priced_world(now, 0.20, 0.05, 0, 8); // 10:00-12:00 cheap
-    world.import.truncate(48); world.feedin.truncate(48);
-    world.pv.truncate(48); world.baseload.truncate(48);
+    world.import.truncate(48);
+    world.feedin.truncate(48);
+    world.pv.truncate(48);
+    world.baseload.truncate(48);
     let out = planner.plan(&world, &[c]);
     let plan = &out.plans[0];
     let on_steps: Vec<usize> =

@@ -21,7 +21,11 @@ pub struct Slot {
     pub export_per_kwh: Option<f64>,
 }
 
-fn field<'a>(map: Option<&'a FieldMap>, pick: impl Fn(&'a FieldMap) -> Option<&'a String>, canonical: &'a str) -> &'a str {
+fn field<'a>(
+    map: Option<&'a FieldMap>,
+    pick: impl Fn(&'a FieldMap) -> Option<&'a String>,
+    canonical: &'a str,
+) -> &'a str {
     map.and_then(pick).map(String::as_str).unwrap_or(canonical)
 }
 
@@ -138,10 +142,8 @@ mod tests {
     }
 
     fn schema() -> Value {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../docs/schemas/price-forecast.schema.json"
-        );
+        let path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/schemas/price-forecast.schema.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -195,19 +197,25 @@ mod tests {
         let bad = serde_json::json!([
             {"start": "2026-06-10T10:00:00+00:00", "end": "2026-06-10T10:00:00+00:00", "import_per_kwh": 0.1}
         ]);
-        assert!(matches!(parse_slots(&bad, None), Err(SchedulerError::Config(m)) if m.contains("end <= start")));
+        assert!(
+            matches!(parse_slots(&bad, None), Err(SchedulerError::Config(m)) if m.contains("end <= start"))
+        );
 
         let overlap = serde_json::json!([
             {"start": "2026-06-10T10:00:00+00:00", "end": "2026-06-10T11:00:00+00:00", "import_per_kwh": 0.1},
             {"start": "2026-06-10T10:30:00+00:00", "end": "2026-06-10T12:00:00+00:00", "import_per_kwh": 0.2}
         ]);
-        assert!(matches!(parse_slots(&overlap, None), Err(SchedulerError::Config(m)) if m.contains("overlap")));
+        assert!(
+            matches!(parse_slots(&overlap, None), Err(SchedulerError::Config(m)) if m.contains("overlap"))
+        );
 
         let unsorted = serde_json::json!([
             {"start": "2026-06-10T11:00:00+00:00", "end": "2026-06-10T12:00:00+00:00", "import_per_kwh": 0.1},
             {"start": "2026-06-10T10:00:00+00:00", "end": "2026-06-10T10:30:00+00:00", "import_per_kwh": 0.2}
         ]);
-        assert!(matches!(parse_slots(&unsorted, None), Err(SchedulerError::Config(m)) if m.contains("sorted")));
+        assert!(
+            matches!(parse_slots(&unsorted, None), Err(SchedulerError::Config(m)) if m.contains("sorted"))
+        );
     }
 
     #[test]
@@ -220,12 +228,12 @@ mod tests {
         // Step 0 (18:00) overridden by price_now.
         assert_eq!(s.import[0], Some(0.999));
         assert_eq!(s.import[1], Some(0.28)); // 18:30 slot
-        // 19:00 + 19:30 gap -> flat fill from last slot (0.28).
+                                             // 19:00 + 19:30 gap -> flat fill from last slot (0.28).
         assert_eq!(s.import[2], Some(0.28));
         assert_eq!(s.import[3], Some(0.28));
         assert_eq!(s.import[4], Some(0.18)); // 20:00 slot
-        // feedin: slot export at 18:00 = 0.08; absent in 18:30 slot -> carries
-        // last known (0.08); 20:00 slot -> 0.04.
+                                             // feedin: slot export at 18:00 = 0.08; absent in 18:30 slot -> carries
+                                             // last known (0.08); 20:00 slot -> 0.04.
         assert_eq!(s.feedin[0], 0.08);
         assert_eq!(s.feedin[1], 0.08);
         assert_eq!(s.feedin[4], 0.04);

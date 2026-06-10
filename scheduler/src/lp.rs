@@ -195,7 +195,9 @@ impl LpPlanner {
             let stop: Vec<Variable> = (0..n).map(|_| vars.add(variable().binary())).collect();
             let has_ct = c.can_take.is_some();
             let ct: Vec<Variable> = (0..n)
-                .map(|_| vars.add(if has_ct { variable().binary() } else { variable().min(0).max(0) }))
+                .map(|_| {
+                    vars.add(if has_ct { variable().binary() } else { variable().min(0).max(0) })
+                })
                 .collect();
 
             // Hard windows + per-demand price gate (x <= ok_mh + ct).
@@ -284,16 +286,19 @@ impl LpPlanner {
                         constraints.push(constraint!(x[0] + u >= 1));
                     }
                 }
-                (Planning::Predictive, DemandKind::TemperatureBand {
-                    min,
-                    max,
-                    observed: Some(level0),
-                    change_per_hour,
-                    drift_per_hour,
-                    ambient,
-                    window,
-                    ..
-                }) => {
+                (
+                    Planning::Predictive,
+                    DemandKind::TemperatureBand {
+                        min,
+                        max,
+                        observed: Some(level0),
+                        change_per_hour,
+                        drift_per_hour,
+                        ambient,
+                        window,
+                        ..
+                    },
+                ) => {
                     {
                         let target = (min + max) / 2.0;
                         let run_dir = if *level0 > target { -1.0 } else { 1.0 };
@@ -304,8 +309,7 @@ impl LpPlanner {
                         };
                         let rate = change_per_hour * run_dir * dt_h;
                         let drift = drift_per_hour * drift_dir * dt_h;
-                        let level: Vec<Variable> =
-                            (0..=n).map(|_| vars.add(variable())).collect();
+                        let level: Vec<Variable> = (0..=n).map(|_| vars.add(variable())).collect();
                         constraints.push(constraint!(level[0] == *level0));
                         for t in 0..n {
                             constraints.push(constraint!(
@@ -337,8 +341,7 @@ impl LpPlanner {
                         } else {
                             0.0
                         };
-                        let sum: Expression =
-                            inst.steps.clone().map(|t| ct[t] * step_min).sum();
+                        let sum: Expression = inst.steps.clone().map(|t| ct[t] * step_min).sum();
                         constraints.push(constraint!(sum + used <= f64::from(cap)));
                     }
                 }
@@ -380,8 +383,7 @@ impl LpPlanner {
             cost_expr += imp * (price * dt_h) - exp * (world.feedin[t] * dt_h);
         }
 
-        let objective =
-            if unmet_cap.is_none() { unmet_expr.clone() } else { cost_expr.clone() };
+        let objective = if unmet_cap.is_none() { unmet_expr.clone() } else { cost_expr.clone() };
         let mut model = vars.minimise(objective).using(highs);
         for cns in constraints {
             model = model.with(cns);

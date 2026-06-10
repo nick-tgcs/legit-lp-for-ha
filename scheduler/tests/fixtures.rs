@@ -13,9 +13,7 @@ fn fixture(name: &str) -> Value {
 #[test]
 fn forecast_has_provider_slots_in_field_map_shape() {
     let f = fixture("forecast_amber.json");
-    let slots = f["attributes"]["forecasts"]
-        .as_array()
-        .expect("attributes.forecasts is an array");
+    let slots = f["attributes"]["forecasts"].as_array().expect("attributes.forecasts is an array");
     assert!(!slots.is_empty(), "forecast slots present");
     for s in slots {
         // The exact fields the configured field-map renames into the
@@ -26,10 +24,7 @@ fn forecast_has_provider_slots_in_field_map_shape() {
             chrono::DateTime::parse_from_rfc3339(start).is_ok(),
             "start_time is RFC3339: {start}"
         );
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(end).is_ok(),
-            "end_time is RFC3339: {end}"
-        );
+        assert!(chrono::DateTime::parse_from_rfc3339(end).is_ok(), "end_time is RFC3339: {end}");
         assert!(s["per_kwh"].as_f64().is_some(), "slot.per_kwh numeric");
         assert!(end > start, "end after start");
     }

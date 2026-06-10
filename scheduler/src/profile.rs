@@ -82,8 +82,11 @@ impl Profiles {
             .steps
             .iter()
             .map(|s| {
-                let set =
-                    if is_weekend(*s) { &self.consumption_weekend } else { &self.consumption_weekday };
+                let set = if is_weekend(*s) {
+                    &self.consumption_weekend
+                } else {
+                    &self.consumption_weekday
+                };
                 let b = set[bucket_index(*s)];
                 if b.samples > 0 {
                     b.value_kw

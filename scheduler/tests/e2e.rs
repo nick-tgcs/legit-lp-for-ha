@@ -9,7 +9,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn stub_ha() -> MockServer {
     let server = MockServer::start().await;
-    let states: serde_json::Value = serde_json::from_str(include_str!("fixtures/states.json")).unwrap();
+    let states: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/states.json")).unwrap();
     for (entity, body) in states.as_object().unwrap() {
         Mock::given(method("GET"))
             .and(path_regex(format!("^/api/states/{}$", regex::escape(entity))))
@@ -19,21 +20,34 @@ async fn stub_ha() -> MockServer {
     }
     Mock::given(method("GET"))
         .and(path_regex("^/api/states/input_boolean.grid_power_use_lp_scheduler$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"state":"on","attributes":{}})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"state":"on","attributes":{}})),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path_regex("^/api/states/sensor.beckton_general_forecast$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            serde_json::from_str::<serde_json::Value>(include_str!("fixtures/forecast_amber.json")).unwrap(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::from_str::<serde_json::Value>(include_str!(
+                    "fixtures/forecast_amber.json"
+                ))
+                .unwrap(),
+            ),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path_regex("^/api/history/period/.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            serde_json::from_str::<serde_json::Value>(include_str!("fixtures/history_hot_water_running.json")).unwrap(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::from_str::<serde_json::Value>(include_str!(
+                    "fixtures/history_hot_water_running.json"
+                ))
+                .unwrap(),
+            ),
+        )
         .mount(&server)
         .await;
     // Record any service POST (there must be none in dry-run).

@@ -34,14 +34,13 @@ fn canned_ha() -> RecordingHa {
         "binary_sensor.indoor_comfort_hot_water_running".into(),
         history_rows(&fixture("history_hot_water_running.json")).unwrap(),
     );
-    ha.history.insert(
-        "climate.ac_0".into(),
-        history_rows(&fixture("history_climate_ac0.json")).unwrap(),
-    );
+    ha.history
+        .insert("climate.ac_0".into(), history_rows(&fixture("history_climate_ac0.json")).unwrap());
     ha.history.insert(
         "binary_sensor.indoor_comfort_dehumidifiers_running".into(),
         history_rows(&json!([[{"entity_id": "x", "state": "off",
-            "last_changed": "2026-06-09T14:00:00+00:00"}]])).unwrap(),
+            "last_changed": "2026-06-09T14:00:00+00:00"}]]))
+        .unwrap(),
     );
     ha
 }

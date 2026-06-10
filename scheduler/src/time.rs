@@ -114,17 +114,11 @@ pub fn window_instances(w: &Window, grid: &Grid) -> Vec<WindowInstance> {
         if in_window(t.time(), w) {
             run_start.get_or_insert(i);
         } else if let Some(s) = run_start.take() {
-            out.push(WindowInstance {
-                date: grid.steps[s].date_naive(),
-                steps: s..i,
-            });
+            out.push(WindowInstance { date: grid.steps[s].date_naive(), steps: s..i });
         }
     }
     if let Some(s) = run_start {
-        out.push(WindowInstance {
-            date: grid.steps[s].date_naive(),
-            steps: s..grid.steps.len(),
-        });
+        out.push(WindowInstance { date: grid.steps[s].date_naive(), steps: s..grid.steps.len() });
     }
     out
 }

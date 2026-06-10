@@ -24,19 +24,17 @@ async fn main() -> anyhow::Result<()> {
 
     let interval: u64 = env("SCHED_INTERVAL_SECONDS").and_then(|v| v.parse().ok()).unwrap_or(60);
     let dry_run = env("SCHED_DRY_RUN").map(|v| v != "false").unwrap_or(true);
-    let tz: chrono_tz::Tz = env("SCHED_TIME_ZONE")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(chrono_tz::Australia::Sydney);
+    let tz: chrono_tz::Tz =
+        env("SCHED_TIME_ZONE").and_then(|v| v.parse().ok()).unwrap_or(chrono_tz::Australia::Sydney);
     let loads_path = env("SCHED_LOADS_CONFIG").unwrap_or("/config/legit_lp.yaml".into());
     let port: u16 = env("SCHED_WEB_PORT").and_then(|v| v.parse().ok()).unwrap_or(8099);
 
     // HA connection: explicit url+token, else the Supervisor proxy.
     let (base, token) = match (env("SCHED_HASS_URL"), env("SCHED_TOKEN")) {
         (Some(url), Some(tok)) => (format!("{}/api", url.trim_end_matches('/')), tok),
-        _ => (
-            "http://supervisor/core/api".to_string(),
-            env("SUPERVISOR_TOKEN").unwrap_or_default(),
-        ),
+        _ => {
+            ("http://supervisor/core/api".to_string(), env("SUPERVISOR_TOKEN").unwrap_or_default())
+        }
     };
     let ha = HaClient::new(base, token);
 
@@ -45,10 +43,8 @@ async fn main() -> anyhow::Result<()> {
         grid_minutes: registry.global.planning.grid_minutes,
         horizon_hours: registry.global.planning.horizon_hours,
     };
-    let profile_path = std::path::PathBuf::from(
-        env("SCHED_DATA_DIR").unwrap_or("/data".into()),
-    )
-    .join("profile.json");
+    let profile_path = std::path::PathBuf::from(env("SCHED_DATA_DIR").unwrap_or("/data".into()))
+        .join("profile.json");
     let mut profiles = Profiles::load(&profile_path);
     let cycle = Cycle { registry, planner, dry_run, profile_path: Some(profile_path) };
 

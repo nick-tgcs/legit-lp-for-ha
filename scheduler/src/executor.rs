@@ -36,7 +36,10 @@ impl Executor {
             if self.dry_run {
                 tracing::info!(
                     "DRY-RUN {}: would call {}.{} on {}",
-                    c.id.0, call.domain, call.service, call.target_entity
+                    c.id.0,
+                    call.domain,
+                    call.service,
+                    call.target_entity
                 );
                 continue;
             }
@@ -64,7 +67,8 @@ mod tests {
     async fn dry_run_makes_zero_calls() {
         let ha = RecordingHa::default();
         let ex = Executor { dry_run: true };
-        let done = ex.execute(&ha, true, &[runtime_contract()], &[start_decision("hot_water")]).await;
+        let done =
+            ex.execute(&ha, true, &[runtime_contract()], &[start_decision("hot_water")]).await;
         assert_eq!(done, vec![false]);
         assert!(ha.calls.lock().unwrap().is_empty());
     }
@@ -74,7 +78,8 @@ mod tests {
         let ha = RecordingHa::default();
         let ex = Executor { dry_run: false };
         let c = runtime_contract();
-        let done = ex.execute(&ha, true, std::slice::from_ref(&c), &[start_decision("hot_water")]).await;
+        let done =
+            ex.execute(&ha, true, std::slice::from_ref(&c), &[start_decision("hot_water")]).await;
         assert_eq!(done, vec![true]);
         let calls = ha.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

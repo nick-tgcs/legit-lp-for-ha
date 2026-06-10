@@ -460,8 +460,10 @@ mod tests {
     fn rejects_bad_grid_and_site_hard_rules() {
         let r = mutate_example("grid_minutes: 15", "grid_minutes: 7");
         assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("divide 60")));
-        let r = mutate_example("hard_rules:\n      min_run_minutes: 20",
-            "hard_rules:\n      min_run_minutes: 20");
+        let r = mutate_example(
+            "hard_rules:\n      min_run_minutes: 20",
+            "hard_rules:\n      min_run_minutes: 20",
+        );
         assert!(r.is_ok()); // sanity: untouched parse still fine
     }
 }

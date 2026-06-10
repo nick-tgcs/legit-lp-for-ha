@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(f.starts(), 2);
         assert_eq!(f.final_on, Some(true));
         assert_eq!(f.current_stretch.as_secs(), 30 * 60); // on since 03:30
-        // Window intersection 02:00-04:00: 02:00-02:30 on + 03:30-04:00 on.
+                                                          // Window intersection 02:00-04:00: 02:00-02:30 on + 03:30-04:00 on.
         assert_eq!(f.on_secs_within(&[(utc(2, 0), utc(4, 0))]), 60 * 60);
     }
 
@@ -433,7 +433,8 @@ mod tests {
         let body: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let r = history_rows(&body).unwrap();
         assert!(!r.is_empty());
-        let (start, end) = (r.first().unwrap().at, r.last().unwrap().at + chrono::Duration::hours(1));
+        let (start, end) =
+            (r.first().unwrap().at, r.last().unwrap().at + chrono::Duration::hours(1));
         let f = fold_history(&r, start, end, on_predicate_binary);
         let span = (end - start).num_seconds() as u64;
         assert!(f.on_secs_total() <= span);

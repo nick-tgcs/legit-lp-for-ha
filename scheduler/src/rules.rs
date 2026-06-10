@@ -38,9 +38,7 @@ pub fn masks(c: &LoadContract, grid: &Grid, price: &[Option<f64>], surplus: &[f6
     let hard_ok: Vec<bool> = grid
         .steps
         .iter()
-        .map(|s| {
-            c.hard.windows.is_empty() || c.hard.windows.iter().any(|w| in_window(s.time(), w))
-        })
+        .map(|s| c.hard.windows.is_empty() || c.hard.windows.iter().any(|w| in_window(s.time(), w)))
         .collect();
 
     let in_scope = |d: &Demand, i: usize| match demand_window(d) {
@@ -206,7 +204,7 @@ mod tests {
         assert!(m.ok_mh[8]); // 00:00
         assert!(m.ok_mh[8 + 25]); // 06:15 last in-window step
         assert!(!m.ok_mh[8 + 26]); // 06:30 excluded
-        // ct window 10:00-16:00 tomorrow: starts at step 8+40=48.
+                                   // ct window 10:00-16:00 tomorrow: starts at step 8+40=48.
         assert!(!m.ok_ct[47] && m.ok_ct[48]);
     }
 

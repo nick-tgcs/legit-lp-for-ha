@@ -18,6 +18,6 @@ pub mod model;
 pub mod profile;
 pub mod rules;
 pub mod status;
-pub mod time;
 pub mod testkit;
+pub mod time;
 pub mod web;

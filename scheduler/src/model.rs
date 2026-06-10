@@ -73,11 +73,7 @@ pub struct Demand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DemandKind {
     /// hot_water — accumulate runtime within a window.
-    Runtime {
-        minutes: u32,
-        window: Window,
-        completed_minutes: u32,
-    },
+    Runtime { minutes: u32, window: Window, completed_minutes: u32 },
     /// dehumidifier — keep observed %RH at/below `max`.
     /// `drop_per_hour`/`drift_per_hour` drive the trajectory for `predictive`;
     /// `immediate` uses only `max`/`observed`/`start_hysteresis`.
