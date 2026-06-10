@@ -1,0 +1,123 @@
+# Example load registry for legit-lp-scheduler.
+# Copy to /config/legit_lp.yaml and adjust. Every entity below exists in the
+# reference installation; swap for your own. Keys are provider-neutral —
+# the values happen to be Amber/Sonnen/Forecast.Solar entities.
+
+global:
+  enabled_entity: input_boolean.grid_power_use_lp_scheduler
+  pricing:
+    import_entity: sensor.current_grid_cost
+    feedin_entity: sensor.amber_electric_feedin
+    forecast:
+      entity: sensor.beckton_general_forecast
+      attribute: forecasts
+      fields: # provider field-map -> canonical schema (omit if already canonical)
+        start: start_time
+        end: end_time
+        import_per_kwh: per_kwh
+  power:
+    consumption_entity: sensor.current_sonnen_consumption
+    pv_entity: sensor.current_sonnen_production
+    pv_forecast:
+      today_entity: sensor.energy_production_today
+      tomorrow_entity: sensor.energy_production_tomorrow
+      now_entity: sensor.power_production_now
+    baseline_kw: 0.8
+  planning:
+    grid_minutes: 15
+    horizon_hours: 24
+
+loads:
+  - id: hot_water
+    type: hot_water
+    planning: runtime
+    authority:
+      enabled_entity: binary_sensor.hot_water_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.hot_water }
+      stop: { service: input_boolean.turn_off, target: input_boolean.hot_water }
+    state:
+      running_entity: binary_sensor.indoor_comfort_hot_water_running
+    capability:
+      power_kw: 3.6
+    hard_rules:
+      min_run_minutes: 20
+      min_off_minutes: 15
+      max_starts_per_day: 3
+    must_have:
+      kind: runtime
+      amount_hours: { entity: input_number.input_number_hot_water_runtime }
+      window: { start: "00:00", end: "06:30" }
+      # no max_price: required regardless of price
+    can_take:
+      kind: runtime
+      max_minutes: 60
+      window: { start: "10:00", end: "16:00" }
+      max_price: { value: 0.10 }
+    preferences:
+      start_cost_aud: 0.02
+
+  - id: dehumidifier
+    type: dehumidifier
+    planning: immediate
+    authority:
+      enabled_entity: binary_sensor.dehumidifier_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.dehumidifier }
+      stop: { service: input_boolean.turn_off, target: input_boolean.dehumidifier }
+    state:
+      running_entity: binary_sensor.indoor_comfort_dehumidifiers_running
+      observed_entity: sensor.humidity_average_inside
+    capability:
+      power_kw: 0.3
+    hard_rules:
+      min_run_minutes: 30
+      min_off_minutes: 15
+    must_have:
+      kind: humidity_below
+      max_percent: { entity: input_number.input_number_indoor_comfort_humidity_target_percent }
+      start_hysteresis: { entity: input_number.input_number_indoor_comfort_humidity_start_hysteresis_percent }
+      max_price: { entity: input_number.input_number_indoor_comfort_dehumidifier_max_price_kwh }
+    can_take:
+      kind: humidity_below
+      target_percent: { value: 55 }
+      max_minutes: 120
+      window: { start: "09:00", end: "17:00" }
+      max_price: { value: 0.10 }
+    preferences:
+      start_cost_aud: 0.01
+
+  - id: aircon
+    type: aircon
+    planning: predictive
+    authority:
+      enabled_entity: binary_sensor.aircon_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.aircon }
+      stop: { service: input_boolean.turn_off, target: input_boolean.aircon }
+    state:
+      running_entity: climate.ac_0 # running = state != "off"
+      observed_entity: sensor.temp_average_inside
+    capability:
+      power_kw: 2.5
+      change_per_hour: 1.5
+      drift_per_hour: 1.0
+      ambient_entity: sensor.temp_outside
+    hard_rules:
+      min_run_minutes: 20
+      min_off_minutes: 10
+    must_have:
+      kind: temperature_band
+      target_c: { entity: input_number.input_number_climate_aircon_target_temp }
+      band_c: 3
+      window: { start: "07:00", end: "22:00" }
+      max_price: { entity: input_number.input_number_climate_aircon_run_below_price_kwh }
+    can_take:
+      kind: temperature_band
+      target_c: { entity: input_number.input_number_climate_aircon_target_temp }
+      band_c: 1
+      max_minutes: 90
+      window: { start: "13:00", end: "16:00" }
+      max_price: { value: 0.05 }
+    preferences:
+      start_cost_aud: 0.05
