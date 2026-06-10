@@ -23,6 +23,8 @@ anyhow = "1" # main.rs / config boundary only
 good_lp = { version = "1", features = ["highs"], default-features = false }
 axum = "0.8"
 rust-embed = "8"
+async-stream = "0.3.6"
+futures-core = "0.3.32"
 
 [dev-dependencies]
 wiremock = "0.6"
@@ -32,3 +34,4 @@ insta = "1"
 proptest = "1"
 tempfile = "3"
 jsonschema = { version = "0.46.5", default-features = false }
+tower = "0.5.3"

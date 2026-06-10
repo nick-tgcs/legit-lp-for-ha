@@ -1,0 +1,37 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LP Scheduler</title><style>
+:root{--bg:#fafafa;--card:#fff;--text:#212121;--muted:#727272;--accent:#03a9f4;--border:#e0e0e0;--warn:#ff9800}
+@media(prefers-color-scheme:dark){:root{--bg:#111113;--card:#1c1c1e;--text:#e1e1e1;--muted:#9b9b9b;--border:#333}}
+body{font-family:Roboto,system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:16px;max-width:1100px;margin-inline:auto}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+h1{font-size:1.2rem;margin:0 0 4px}h2{font-size:.95rem;color:var(--muted);margin:0 0 12px;text-transform:uppercase;letter-spacing:.05em}
+.chips span{display:inline-block;border:1px solid var(--border);border-radius:16px;padding:2px 10px;margin-right:8px;font-size:.85rem}
+.chips .on{border-color:var(--accent);color:var(--accent)}.chips .warn{border-color:var(--warn);color:var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-size:.9rem;cursor:pointer}
+pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
+img{width:100%}</style></head><body>
+<div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
+<p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button></p></div>
+<div class="card"><h2>Horizon</h2><img id="horizon" src="./horizon.svg" alt="horizon"></div>
+<div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
+<div class="card"><h2>Diagnostics</h2><pre id="diags"></pre></div>
+<script type="module">
+const chips=document.getElementById('chips'),loads=document.getElementById('loads'),diags=document.getElementById('diags');
+function render(r){
+ chips.innerHTML=`<span class="${r.global_enabled?'on':'warn'}">${r.global_enabled?'enabled':'disabled'}</span>`
+  +(r.dry_run?'<span class="warn">DRY-RUN</span>':'')
+  +`<span>price ${r.price_now??'?'} /kWh</span><span>☀ ${r.pv_now??'?'} kW</span>`
+  +`<span>house ${r.consumption_now??'?'} kW</span><span>solve ${r.solver_ms} ms · ${r.at}</span>`;
+ loads.innerHTML=r.loads.map(l=>`<div class="card"><h1>${l.id}</h1>
+  <div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>
+  <span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${l.planning}</span>
+  ${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>
+  <p style="font-size:.85rem;color:var(--muted)">${l.reason}</p></div>`).join('');
+ diags.textContent=r.diagnostics.join('\n')||'all good';
+ document.getElementById('horizon').src='./horizon.svg?t='+Date.now();
+}
+fetch('./api/status').then(r=>r.json()).then(render);
+new EventSource('./api/events').onmessage=e=>render(JSON.parse(e.data));
+</script></body></html>
