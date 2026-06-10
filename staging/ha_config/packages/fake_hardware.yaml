@@ -1,0 +1,84 @@
+# Fake devices behind the production names. The chain is the REAL one:
+#   scheduler flips input_boolean.<load>  ->  <load>_start_stop automation
+#   ->  switch.turn_on/off on label-discovered switches  ->  template switch
+#   flips its backing boolean  ->  *_running binary sensor changes  ->
+#   recorder logs it  ->  the scheduler's history fold reads it back.
+input_boolean:
+  fake_hot_water_state:
+    name: Fake hot water element state
+  fake_dehumidifier_state:
+    name: Fake dehumidifier state
+  fake_aircon_state:
+    name: Fake aircon compressor state
+
+switch:
+  - platform: template
+    switches:
+      fake_hot_water:
+        friendly_name: Fake hot water element
+        value_template: "{{ is_state('input_boolean.fake_hot_water_state', 'on') }}"
+        turn_on:
+          action: input_boolean.turn_on
+          target: { entity_id: input_boolean.fake_hot_water_state }
+        turn_off:
+          action: input_boolean.turn_off
+          target: { entity_id: input_boolean.fake_hot_water_state }
+      fake_dehumidifier:
+        friendly_name: Fake dehumidifier
+        value_template: "{{ is_state('input_boolean.fake_dehumidifier_state', 'on') }}"
+        turn_on:
+          action: input_boolean.turn_on
+          target: { entity_id: input_boolean.fake_dehumidifier_state }
+        turn_off:
+          action: input_boolean.turn_off
+          target: { entity_id: input_boolean.fake_dehumidifier_state }
+      fake_aircon:
+        friendly_name: Fake aircon heater
+        value_template: "{{ is_state('input_boolean.fake_aircon_state', 'on') }}"
+        turn_on:
+          action: input_boolean.turn_on
+          target: { entity_id: input_boolean.fake_aircon_state }
+        turn_off:
+          action: input_boolean.turn_off
+          target: { entity_id: input_boolean.fake_aircon_state }
+
+# climate.ac_0 — a real climate entity (generic_thermostat over the fake
+# heater). The scheduler's aircon "running" predicate is state != off,
+# exactly as on the production AirTouch4.
+climate:
+  - platform: generic_thermostat
+    name: AC 0
+    unique_id: staging_ac_0
+    heater: switch.fake_aircon
+    target_sensor: sensor.temp_average_inside
+    min_cycle_duration:
+      seconds: 1
+
+template:
+  # Label-discovery sensors (production populates these from entity labels;
+  # staging pins the fake switches — same attribute contract).
+  - sensor:
+      - name: Indoor comfort hot water switches
+        unique_id: staging_hw_switches
+        state: "1"
+        attributes:
+          available_switch_entities: "{{ ['switch.fake_hot_water'] }}"
+      - name: Indoor comfort dehumidifier switches
+        unique_id: staging_dh_switches
+        state: "1"
+        attributes:
+          available_switch_entities: "{{ ['switch.fake_dehumidifier'] }}"
+  # Running sensors under the production names, mirroring the fake hardware.
+  - binary_sensor:
+      - name: Indoor comfort hot water running
+        unique_id: staging_hw_running
+        state: "{{ is_state('switch.fake_hot_water', 'on') }}"
+      - name: Indoor comfort dehumidifiers running
+        unique_id: staging_dh_running
+        state: "{{ is_state('switch.fake_dehumidifier', 'on') }}"
+
+# Stub for the script the production aircon_start_stop calls.
+script:
+  script_climate_air_conditioner_set_for_target_temp:
+    alias: Set AC for target temp (staging stub)
+    sequence: []

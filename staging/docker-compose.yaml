@@ -1,8 +1,38 @@
-# Disposable real Home Assistant for pre-live testing (plan: staging tier).
-# docker compose up -d; ./bootstrap.sh; point the scheduler at :8123.
+# Disposable real Home Assistant + the RELEASED scheduler image.
+# verify_release.sh orchestrates: up homeassistant -> bootstrap.sh ->
+# seed_from_fixtures.py -> up scheduler (profile) -> scenario.sh.
+# HA_CONFIG_DIR lets verify_release.sh point at a throwaway copy of the seed.
 services:
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: lp-staging-ha
     ports: ["8123:8123"]
-    volumes: ["./ha_config:/config"]
+    volumes: ["${HA_CONFIG_DIR:-./ha_config}:/config"]
     environment: [TZ=Australia/Sydney]
+
+  scheduler:
+    # The release artifact, pulled anonymously from GHCR — the same pull a
+    # user's Supervisor performs. Override the bashio entrypoint (run.sh is
+    # Supervisor-only); env vars are the documented non-Supervisor path.
+    image: ghcr.io/nick-tgcs/legit-lp-for-ha:${LP_VERSION:-latest}
+    container_name: lp-staging-scheduler
+    profiles: [scheduler]
+    entrypoint: /usr/local/bin/legit-lp-scheduler
+    ports: ["8099:8099"]
+    environment:
+      SCHED_HASS_URL: http://homeassistant:8123
+      SCHED_TOKEN: ${SCHED_TOKEN:?run bootstrap.sh and export SCHED_TOKEN=$(cat .token)}
+      SCHED_DRY_RUN: ${SCHED_DRY_RUN:-true}
+      SCHED_INTERVAL_SECONDS: ${SCHED_INTERVAL_SECONDS:-15}
+      SCHED_TIME_ZONE: Australia/Sydney
+      SCHED_LOADS_CONFIG: /config/legit_lp.yaml   # self-seeds the bundled example
+      SCHED_DATA_DIR: /data
+      RUST_LOG: info
+    volumes:
+      - scheduler_config:/config
+      - scheduler_data:/data
+    depends_on: [homeassistant]
+
+volumes:
+  scheduler_config:
+  scheduler_data:

@@ -1,0 +1,148 @@
+# Scriptable world: scenario.sh / seed_from_fixtures.py drive the fake_*
+# input_numbers; template sensors republish them under the PRODUCTION entity
+# ids the registry reads. Units match production (power in W, prices AUD/kWh).
+input_number:
+  fake_price:
+    name: Fake import price (current step)
+    min: -1
+    max: 5
+    step: 0.001
+    initial: 0.30
+    mode: box
+  fake_price_future:
+    name: Fake import price (rest of forecast)
+    min: -1
+    max: 5
+    step: 0.001
+    initial: 0.30
+    mode: box
+  fake_feedin:
+    name: Fake feed-in price
+    min: -1
+    max: 5
+    step: 0.001
+    initial: 0.05
+    mode: box
+  fake_consumption:
+    name: Fake house consumption (W)
+    min: 0
+    max: 20000
+    step: 1
+    initial: 800
+    mode: box
+  fake_pv:
+    name: Fake PV production (W)
+    min: 0
+    max: 20000
+    step: 1
+    initial: 0
+    mode: box
+  fake_pv_today_kwh:
+    name: Fake Forecast.Solar today (kWh)
+    min: 0
+    max: 100
+    step: 0.1
+    initial: 20
+    mode: box
+  fake_pv_tomorrow_kwh:
+    name: Fake Forecast.Solar tomorrow (kWh)
+    min: 0
+    max: 100
+    step: 0.1
+    initial: 20
+    mode: box
+  fake_humidity_inside:
+    name: Fake inside humidity (%)
+    min: 0
+    max: 100
+    step: 0.1
+    initial: 55
+    mode: box
+  fake_temp_inside:
+    name: Fake inside temperature (C)
+    min: -10
+    max: 50
+    step: 0.1
+    initial: 22
+    mode: box
+  fake_temp_outside:
+    name: Fake outside temperature (C)
+    min: -10
+    max: 50
+    step: 0.1
+    initial: 18
+    mode: box
+
+template:
+  - sensor:
+      - name: Current grid cost
+        unique_id: staging_current_grid_cost
+        unit_of_measurement: AUD/kWh
+        state: "{{ states('input_number.fake_price') }}"
+      - name: Amber Electric Feedin
+        unique_id: staging_amber_feedin
+        unit_of_measurement: AUD/kWh
+        state: "{{ states('input_number.fake_feedin') }}"
+      - name: Current sonnen consumption
+        unique_id: staging_sonnen_consumption
+        unit_of_measurement: W
+        state: "{{ states('input_number.fake_consumption') }}"
+      - name: Current sonnen production
+        unique_id: staging_sonnen_production
+        unit_of_measurement: W
+        state: "{{ states('input_number.fake_pv') }}"
+      - name: Energy production today
+        unique_id: staging_fs_today
+        unit_of_measurement: kWh
+        state: "{{ states('input_number.fake_pv_today_kwh') }}"
+      - name: Energy production tomorrow
+        unique_id: staging_fs_tomorrow
+        unit_of_measurement: kWh
+        state: "{{ states('input_number.fake_pv_tomorrow_kwh') }}"
+      - name: Power production now
+        unique_id: staging_fs_now
+        unit_of_measurement: W
+        state: "{{ states('input_number.fake_pv') }}"
+      - name: Humidity average inside
+        unique_id: staging_humidity_inside
+        unit_of_measurement: "%"
+        state: "{{ states('input_number.fake_humidity_inside') }}"
+      - name: Temp average inside
+        unique_id: staging_temp_inside
+        unit_of_measurement: °C
+        state: "{{ states('input_number.fake_temp_inside') }}"
+      - name: Temp outside
+        unique_id: staging_temp_outside
+        unit_of_measurement: °C
+        state: "{{ states('input_number.fake_temp_outside') }}"
+
+  # Amber-shaped forecast (start_time/end_time/per_kwh) — 48 half-hour slots
+  # anchored to the current half-hour: slot 0..1 at fake_price, the rest at
+  # fake_price_future. The registry's field-map consumes exactly this shape.
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: state
+        entity_id:
+          - input_number.fake_price
+          - input_number.fake_price_future
+    sensor:
+      - name: Beckton General Forecast
+        unique_id: staging_beckton_forecast
+        state: "{{ states('input_number.fake_price') }}"
+        attributes:
+          forecasts: >-
+            {% set ns = namespace(out=[]) %}
+            {% set step = 1800 %}
+            {% set t0 = (now().timestamp() // step) * step %}
+            {% for i in range(48) %}
+              {% set p = states('input_number.fake_price') | float(0.3)
+                 if i < 2 else states('input_number.fake_price_future') | float(0.3) %}
+              {% set ns.out = ns.out + [{
+                   'start_time': (t0 + i * step) | timestamp_local,
+                   'end_time': (t0 + (i + 1) * step) | timestamp_local,
+                   'per_kwh': p }] %}
+            {% endfor %}
+            {{ ns.out }}

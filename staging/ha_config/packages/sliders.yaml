@@ -1,0 +1,47 @@
+# The live-tuned input_numbers the registry (example.yaml) references —
+# production entity ids verbatim (including the doubled input_number_ prefix).
+# Defaults mirror the captured production values; seed_from_fixtures.py
+# overwrites them from the fixture snapshot.
+input_number:
+  input_number_hot_water_runtime:
+    name: Hot water runtime (hours)
+    min: 0
+    max: 8
+    step: 0.25
+    initial: 1.5
+    unit_of_measurement: h
+  input_number_climate_aircon_target_temp:
+    name: Aircon target temperature
+    min: 16
+    max: 28
+    step: 0.5
+    initial: 22
+    unit_of_measurement: °C
+  input_number_climate_aircon_run_below_price_kwh:
+    name: Aircon run below price
+    min: 0
+    max: 1
+    step: 0.01
+    initial: 0.20
+    unit_of_measurement: AUD/kWh
+  input_number_indoor_comfort_dehumidifier_max_price_kwh:
+    name: Dehumidifier max price
+    min: 0
+    max: 1
+    step: 0.01
+    initial: 0.15
+    unit_of_measurement: AUD/kWh
+  input_number_indoor_comfort_humidity_target_percent:
+    name: Humidity target
+    min: 30
+    max: 90
+    step: 1
+    initial: 65
+    unit_of_measurement: "%"
+  input_number_indoor_comfort_humidity_start_hysteresis_percent:
+    name: Humidity start hysteresis
+    min: 0
+    max: 20
+    step: 1
+    initial: 2
+    unit_of_measurement: "%"

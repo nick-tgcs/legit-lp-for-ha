@@ -1,0 +1,16 @@
+# Staging HA: production contract surface over fake hardware.
+# Everything lives in packages/ — one file per concern.
+default_config:
+
+homeassistant:
+  name: LP Staging
+  unit_system: metric
+  time_zone: Australia/Sydney
+  currency: AUD
+  packages: !include_dir_named packages
+
+recorder:
+  purge_keep_days: 2
+
+logger:
+  default: warning

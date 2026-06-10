@@ -1,1 +1,14 @@
 .token
+.refresh
+.runtime/
+# HA runtime junk if compose is pointed straight at ha_config/ during dev
+ha_config/.storage/
+ha_config/.cloud/
+ha_config/blueprints/
+ha_config/deps/
+ha_config/tts/
+ha_config/*.db*
+ha_config/*.log*
+ha_config/.HA_VERSION
+ha_config/.ha_run.lock
+ha_config/home-assistant.log*

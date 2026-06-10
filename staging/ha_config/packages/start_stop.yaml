@@ -1,0 +1,79 @@
+# The decoupled start/stop primitives — copied from live_ha_config (these ARE
+# the add-on's control surface). hot_water/dehumidifier are verbatim; aircon
+# uses hvac_mode heat instead of auto (generic_thermostat has no auto mode —
+# the contract under test is ac_0 leaving/entering "off", same as production).
+automation:
+  - id: hot_water_start_stop
+    alias: Hot water — start when input_boolean.hot_water is on, stop when off
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.hot_water
+    actions:
+      - variables:
+          switches: "{{ state_attr('sensor.indoor_comfort_hot_water_switches', 'available_switch_entities') or [] }}"
+      - condition: template
+        value_template: "{{ switches | count > 0 }}"
+      - if:
+          - condition: state
+            entity_id: input_boolean.hot_water
+            state: "on"
+        then:
+          - action: switch.turn_on
+            target:
+              entity_id: "{{ switches }}"
+        else:
+          - action: switch.turn_off
+            target:
+              entity_id: "{{ switches }}"
+    mode: restart
+
+  - id: dehumidifier_start_stop
+    alias: Dehumidifier — start when input_boolean.dehumidifier is on, stop when off
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.dehumidifier
+    actions:
+      - variables:
+          switches: "{{ state_attr('sensor.indoor_comfort_dehumidifier_switches', 'available_switch_entities') or [] }}"
+      - condition: template
+        value_template: "{{ switches | count > 0 }}"
+      - if:
+          - condition: state
+            entity_id: input_boolean.dehumidifier
+            state: "on"
+        then:
+          - action: switch.turn_on
+            target:
+              entity_id: "{{ switches }}"
+        else:
+          - action: switch.turn_off
+            target:
+              entity_id: "{{ switches }}"
+    mode: restart
+
+  - id: aircon_start_stop
+    alias: Aircon — start when input_boolean.aircon is on, stop when off
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.aircon
+    actions:
+      - if:
+          - condition: state
+            entity_id: input_boolean.aircon
+            state: "on"
+        then:
+          - action: script.turn_on
+            target:
+              entity_id: script.script_climate_air_conditioner_set_for_target_temp
+          - action: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            target:
+              entity_id: climate.ac_0
+        else:
+          - action: climate.set_hvac_mode
+            data:
+              hvac_mode: "off"
+            target:
+              entity_id: climate.ac_0
+    mode: restart

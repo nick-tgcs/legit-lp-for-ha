@@ -1,0 +1,43 @@
+# Authority surface — IDENTICAL to live_ha_config/templates/authority.yaml
+# plus the input_booleans it composes (live defines those in input_booleans.yaml).
+input_boolean:
+  automate:
+    name: Automate — master (off = everything manual)
+    icon: mdi:robot
+  hot_water_auto:
+    name: Hot water — allow automation
+  dehumidifier_auto:
+    name: Dehumidifier — allow automation
+  aircon_auto:
+    name: Aircon — allow automation
+  grid_power_use_lp_scheduler:
+    name: LP scheduler — global enable
+    icon: mdi:chart-timeline-variant
+  # Decoupled control primitives the scheduler flips (the contract surface).
+  hot_water:
+    name: Hot water — start/stop (labelled switches)
+    icon: mdi:water-boiler
+  dehumidifier:
+    name: Dehumidifier — start/stop (labelled switches)
+    icon: mdi:air-humidifier
+  aircon:
+    name: Aircon — start/stop (auto @ target temp)
+    icon: mdi:air-conditioner
+
+template:
+  - binary_sensor:
+      - name: Aircon automated
+        unique_id: aircon_automated
+        icon: mdi:robot
+        state: >-
+          {{ is_state('input_boolean.automate', 'on') and is_state('input_boolean.aircon_auto', 'on') }}
+      - name: Dehumidifier automated
+        unique_id: dehumidifier_automated
+        icon: mdi:robot
+        state: >-
+          {{ is_state('input_boolean.automate', 'on') and is_state('input_boolean.dehumidifier_auto', 'on') }}
+      - name: Hot water automated
+        unique_id: hot_water_automated
+        icon: mdi:robot
+        state: >-
+          {{ is_state('input_boolean.automate', 'on') and is_state('input_boolean.hot_water_auto', 'on') }}
