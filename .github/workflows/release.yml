@@ -1,0 +1,84 @@
+# Release pipeline: cut a release FROM develop. In order:
+#   1. full test gate (the `test` check the main ruleset requires)
+#   2. build + push the multi-arch image to GHCR, tagged <version> + latest
+#   3. fast-forward develop onto main (the add-on store reads main's tip,
+#      so the image MUST already be pullable when this lands — hence 2 first)
+#   4. tag v<version> + GitHub release
+# Version source of truth: addon/config.yaml `version:` (Supervisor pulls
+# image:<version>, so config version and image tag must be in lockstep).
+# Bump it on develop before dispatching; re-releasing an existing tag fails.
+name: release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Releases are cut from develop only
+        if: github.ref != 'refs/heads/develop'
+        run: |
+          echo "::error::Run this workflow on the develop branch (got ${{ github.ref }})"
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scheduler
+      - run: make test
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read version, refuse re-release
+        id: ver
+        run: |
+          v=$(sed -n 's/^version: "\(.*\)"/\1/p' addon/config.yaml)
+          test -n "$v" || { echo "::error::no version in addon/config.yaml"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "::error::v$v already released — bump addon/config.yaml version on develop first"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/nick-tgcs/legit-lp-for-ha:${{ steps.ver.outputs.version }}
+            ghcr.io/nick-tgcs/legit-lp-for-ha:latest
+          labels: |
+            io.hass.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=https://github.com/nick-tgcs/legit-lp-for-ha
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Promote develop onto main
+        run: git push origin HEAD:main
+      - name: Tag + GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --target "$GITHUB_SHA" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --generate-notes

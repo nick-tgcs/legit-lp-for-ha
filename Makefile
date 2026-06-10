@@ -6,5 +6,7 @@ test:
 	cd scheduler && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 build:
 	docker build -t $(IMAGE):$(VERSION) .
-release: test build
-	docker push $(IMAGE):$(VERSION)
+# Releases go through CI (multi-arch build, GHCR push, develop -> main
+# promotion, tag + GitHub release). See docs/RELEASING.md.
+release:
+	gh workflow run release.yml --ref develop
