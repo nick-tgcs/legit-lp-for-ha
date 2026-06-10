@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/nick-tgcs/legit-lp-for-ha/main/docs/schemas/price-forecast.schema.json",
+  "title": "Price forecast slots",
+  "description": "Time-ordered price slots consumed by legit-lp-scheduler. Any slot duration; gaps allowed (flat-filled by the consumer); overlaps invalid. Timestamps RFC3339 with offset. Prices in the site currency per kWh (positive import = you pay). Providers either publish this shape directly or are adapted via the pricing.forecast.fields field-map.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["start", "end", "import_per_kwh"],
+    "properties": {
+      "start": { "type": "string", "format": "date-time" },
+      "end": { "type": "string", "format": "date-time" },
+      "import_per_kwh": { "type": "number" },
+      "export_per_kwh": { "type": "number" }
+    },
+    "additionalProperties": true
+  }
+}
