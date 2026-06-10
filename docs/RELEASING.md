@@ -2,9 +2,11 @@
 
 ## Model
 
-- **`develop`** — integration branch. All work lands here via PRs (or direct
-  pushes, solo); every PR and every develop push runs the `validate` workflow
-  (test gate, Dockerfile build, HA add-on config lint).
+- **`develop`** — integration branch, **PR-only** (ruleset `protect-develop`:
+  PR required, `test`/`build`/`addon-lint` checks required, no force pushes,
+  no deletion). Every PR runs the `validate` workflow: the full Rust gate
+  (fmt, clippy, all unit/integration/e2e tests), the Docker build, and the
+  HA add-on config linter.
 - **`main`** — released state only, and the repo's **default branch**. HA
   Supervisor clones a custom add-on repository's *default* branch and
   hard-resets to its tip on every store refresh — whatever is on `main` is
@@ -42,8 +44,9 @@ Re-running a release for an existing tag fails fast: bump the version first.
 A repository ruleset (`protect-main`) enforces: no deletion, no force pushes,
 and the `test` status check on every pushed commit. There is deliberately no
 PR requirement on `main` — the release pipeline pushes directly, and its own
-`test` job satisfies the required check on the promoted SHA. (PR review
-happens on the way into `develop`, not at promotion time.)
+`test` job satisfies the required check on the promoted SHA. (PR gating
+happens on the way into `develop`; a PR-only main would need a write deploy
+key as a ruleset bypass — considered and declined to keep releases simple.)
 
 ## Build notes
 
