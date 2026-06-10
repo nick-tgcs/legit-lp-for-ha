@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod cycle;
 pub mod error;
 pub mod executor;
 pub mod forecast;
