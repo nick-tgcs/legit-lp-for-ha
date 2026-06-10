@@ -62,11 +62,27 @@ pub fn masks(c: &LoadContract, grid: &Grid, price: &[Option<f64>], surplus: &[f6
         })
         .collect();
 
+    // Setpoint can-take only exists while the observation actually exceeds
+    // its (tighter) target — an unknown sensor means no optional work, ever.
+    let ct_wanted = match &c.can_take {
+        None => false,
+        Some(ct) => match &ct.kind {
+            DemandKind::Runtime { .. } => true,
+            DemandKind::HumidityBelow { max, observed, .. } => {
+                observed.map(|o| o > *max).unwrap_or(false)
+            }
+            DemandKind::TemperatureBand { min, max, observed, .. } => {
+                observed.map(|o| o < *min || o > *max).unwrap_or(false)
+            }
+        },
+    };
+
     let ok_ct = (0..n)
         .map(|i| match &c.can_take {
             None => false,
             Some(ct) => {
-                in_scope(ct, i)
+                ct_wanted
+                    && in_scope(ct, i)
                     && match ct.max_price {
                         None => true,
                         Some(ceil) => match price[i] {

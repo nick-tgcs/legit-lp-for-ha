@@ -153,8 +153,8 @@ pub struct WorldState {
     pub global_enabled: bool,
     /// Import price, currency/kWh, current step.
     pub price_now: Option<f64>,
-    /// Import forecast resampled onto the grid.
-    pub price_forecast: Vec<(DateTime<Tz>, f64)>,
+    /// Import price per step (grid-aligned; `None` = genuinely unknown).
+    pub import: Vec<Option<f64>>,
     /// Export value per step (flat current if no forecast).
     pub feedin: Vec<f64>,
     /// kW per step: learned PV shape scaled to forecast day totals.

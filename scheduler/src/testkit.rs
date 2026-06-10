@@ -173,7 +173,7 @@ pub fn flat_world(now: DateTime<Tz>, steps: usize, price: f64) -> WorldState {
         now,
         global_enabled: true,
         price_now: Some(price),
-        price_forecast: vec![],
+        import: vec![Some(price); steps],
         feedin: vec![0.05; steps],
         pv: vec![0.0; steps],
         baseload: vec![0.8; steps],
