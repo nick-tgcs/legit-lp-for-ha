@@ -29,6 +29,32 @@ status()   { curl -fsS -m 10 "$SCHED_URL/api/status"; }
 # sufficient: just wait one interval + slack, then read.
 solve_wait() { sleep $((INTERVAL + 5)); }
 
+# Poll an HA entity until it reaches a value (timeout in seconds).
+wait_for_state() { # entity value timeout
+  local deadline=$(( $(date +%s) + $3 ))
+  while (( $(date +%s) < deadline )); do
+    [[ "$(state "$1" 2>/dev/null)" == "$2" ]] && return 0
+    sleep 10
+  done
+  return 1
+}
+
+# Cold-start reality: every staging entity is born at HA boot, so the
+# recorder-derived off-stretch is shorter than min_off (15 min) at first —
+# the scheduler CORRECTLY holds starts until the lock expires. Gate the
+# live scenarios on it instead of failing them.
+wait_min_off() {
+  local booted epoch now wait_s
+  booted=$(docker inspect lp-staging-ha --format '{{.State.StartedAt}}')
+  epoch=$(date -d "$booted" +%s)
+  now=$(date +%s)
+  wait_s=$(( epoch + 16*60 - now ))
+  if (( wait_s > 0 )); then
+    echo "   (cold-start min_off lock: waiting ${wait_s}s since HA boot before live scenarios)"
+    sleep "$wait_s"
+  fi
+}
+
 field() { # field <jq-ish python expr over the status json>
   status | python3 -c "
 import json, sys
@@ -41,7 +67,7 @@ print($1)
 say "S5 panel: health, html, status schema"
 curl -fsS -m 5 "$SCHED_URL/health" >/dev/null && ok "/health 200" || bad "/health"
 curl -fsS -m 5 "$SCHED_URL/" | grep -qi '<html' && ok "/ serves html" || bad "/ html"
-status | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "loads" in r and "timestamp" in r' \
+status | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "loads" in r and "at" in r' \
   && ok "/api/status schema" || bad "/api/status schema"
 
 say "S1 dry-run parse: all production-shaped reads resolve"
@@ -63,10 +89,10 @@ fi
 
 say "S2 live start chain: humid + cheap -> dehumidifier starts via real automations"
 turn automate on; turn dehumidifier_auto on; turn grid_power_use_lp_scheduler on
-set_num fake_humidity_inside 80   # > target 65 + hysteresis 2
+set_num fake_humidity_inside 80   # well above target + hysteresis
 set_num fake_price 0.05; set_num fake_price_future 0.05
-solve_wait; solve_wait
-[[ "$(state switch.fake_dehumidifier)" == on ]] \
+wait_min_off
+wait_for_state switch.fake_dehumidifier on $((4 * INTERVAL + 30)) \
   && ok "fake switch ON through input_boolean -> automation -> template switch" \
   || bad "dehumidifier did not start (switch.fake_dehumidifier=$(state switch.fake_dehumidifier))"
 [[ "$(state binary_sensor.indoor_comfort_dehumidifiers_running)" == on ]] \
@@ -85,21 +111,27 @@ AUTH=$(field "loads['dehumidifier'].get('authority')")
 turn dehumidifier_auto on
 
 say "S4 scheduler restart -> state rebuilt from recorder, no duplicate start"
-BEFORE=$(field "loads['dehumidifier'].get('starts_today')")
-docker compose restart scheduler >/dev/null 2>&1 || docker restart lp-staging-scheduler >/dev/null
+docker restart lp-staging-scheduler >/dev/null
 solve_wait; solve_wait
-AFTER=$(field "loads['dehumidifier'].get('starts_today')")
-[[ "$AFTER" == "$BEFORE" ]] \
-  && ok "starts_today stable across restart ($AFTER)" \
-  || bad "starts_today changed across restart: $BEFORE -> $AFTER"
+RUN=$(field "loads['dehumidifier'].get('running')")
+ACT=$(field "loads['dehumidifier'].get('action')")
+[[ "$RUN" == True ]] && ok "running=true reconstructed from recorder" || bad "post-restart running=$RUN"
+[[ "$ACT" == NoChange ]] \
+  && ok "no duplicate start after restart (action=$ACT)" \
+  || bad "post-restart action=$ACT (expected NoChange)"
 [[ "$(state switch.fake_dehumidifier)" == on ]] && ok "no spurious flip on restart" || bad "device flipped on restart"
 
 say "S6 surplus: import above every ceiling, PV covers the load -> still runs"
-HOUR=$(date +%H)
+HOUR=$((10#$(date +%H)))
 if (( HOUR >= 9 && HOUR < 17 )); then
   set_num fake_price 0.60; set_num fake_price_future 0.60
   set_num fake_pv 6000; set_num fake_consumption 800
-  set_num fake_humidity_inside 60   # below must-have, above can-take target 55
+  # Open the ct-only gap: must-have satisfied (60 <= 65, no 65+2 trigger),
+  # can-take wanted (60 > its 55 target). The fixture seed sets target 50,
+  # which leaves NO gap — restore the config default for this scenario.
+  set_num input_number_indoor_comfort_humidity_target_percent 65
+  set_num input_number_indoor_comfort_humidity_start_hysteresis_percent 2
+  set_num fake_humidity_inside 60
   solve_wait; solve_wait
   [[ "$(state switch.fake_dehumidifier)" == on ]] \
     && ok "can-take rides the surplus despite 0.60 import" \
