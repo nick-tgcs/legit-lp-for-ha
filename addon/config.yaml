@@ -1,0 +1,33 @@
+name: Legit LP Scheduler
+description: LP (MILP) home load scheduler (Rust + HiGHS)
+url: https://github.com/nick-tgcs/legit-lp-for-ha
+slug: legit_lp_scheduler
+version: "0.1.0"
+arch: [aarch64, amd64]
+image: "ghcr.io/nick-tgcs/legit-lp-for-ha"
+init: false
+hassio_role: default
+homeassistant_api: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:chart-timeline-variant
+panel_title: LP Scheduler
+watchdog: "http://[HOST]:[PORT:8099]/health"
+map:
+  - type: addon_config
+    path: /config
+    read_only: false
+options:
+  interval_seconds: 60
+  dry_run: true
+  time_zone: "Australia/Sydney"
+  log_level: info
+  loads_config_path: /config/legit_lp.yaml
+schema:
+  interval_seconds: "int(30,3600)"
+  dry_run: "bool"
+  hass_url: "str?"
+  long_lived_token: "password?"
+  time_zone: "match((\\w+)?(\\/)(\\w+))?"
+  log_level: "list(trace|debug|info|warn|error)"
+  loads_config_path: "str"

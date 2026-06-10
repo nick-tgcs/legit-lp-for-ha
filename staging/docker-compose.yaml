@@ -1,0 +1,8 @@
+# Disposable real Home Assistant for pre-live testing (plan: staging tier).
+# docker compose up -d; ./bootstrap.sh; point the scheduler at :8123.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    ports: ["8123:8123"]
+    volumes: ["./ha_config:/config"]
+    environment: [TZ=Australia/Sydney]
