@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use legit_lp_scheduler::cycle::Cycle;
-use legit_lp_scheduler::ha_client::HaClient;
+use legit_lp_scheduler::ha_client::{resolve_endpoint, HaClient};
 use legit_lp_scheduler::lp::LpPlanner;
 use legit_lp_scheduler::profile::Profiles;
 use legit_lp_scheduler::status::SolveReport;
@@ -29,13 +29,13 @@ async fn main() -> anyhow::Result<()> {
     let loads_path = env("SCHED_LOADS_CONFIG").unwrap_or("/config/legit_lp.yaml".into());
     let port: u16 = env("SCHED_WEB_PORT").and_then(|v| v.parse().ok()).unwrap_or(8099);
 
-    // HA connection: explicit url+token, else the Supervisor proxy.
-    let (base, token) = match (env("SCHED_HASS_URL"), env("SCHED_TOKEN")) {
-        (Some(url), Some(tok)) => (format!("{}/api", url.trim_end_matches('/')), tok),
-        _ => {
-            ("http://supervisor/core/api".to_string(), env("SUPERVISOR_TOKEN").unwrap_or_default())
-        }
-    };
+    // HA connection: explicit url+token (when set), else the Supervisor proxy.
+    // `env()` already drops empties; `resolve_endpoint` also drops bashio's
+    // "null" sentinel and rejects non-absolute URLs, so an unset `hass_url`
+    // can't poison the base into "null/api".
+    let (base, token) =
+        resolve_endpoint(env("SCHED_HASS_URL"), env("SCHED_TOKEN"), env("SUPERVISOR_TOKEN"));
+    tracing::info!(base = %base, "HA API endpoint resolved");
     let ha = HaClient::new(base, token);
 
     let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_or_seed(
