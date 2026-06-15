@@ -222,6 +222,36 @@ pub trait HaApi {
     ) -> impl Future<Output = Result<Vec<HistoryRow>, SchedulerError>> + Send;
 }
 
+/// Resolve the HA API `(base, token)` from the optional explicit config
+/// (`hass_url` + `long_lived_token`), falling back to the Supervisor proxy.
+///
+/// Hardened against the bashio gotcha: `bashio::config 'key'` yields the string
+/// `"null"` (not empty) for an unset optional, so `run.sh` exports
+/// `SCHED_HASS_URL="null"` / `SCHED_TOKEN="null"` when the user leaves them
+/// blank. We treat `"null"`/empty as absent, and only take the explicit branch
+/// when the URL is actually absolute (`http(s)://…`) — otherwise we'd build a
+/// bogus base like `"null/api"` and every request fails with reqwest's opaque
+/// "builder error".
+pub fn resolve_endpoint(
+    hass_url: Option<String>,
+    explicit_token: Option<String>,
+    supervisor_token: Option<String>,
+) -> (String, String) {
+    let clean = |v: Option<String>| {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "null")
+    };
+    let url = clean(hass_url);
+    let tok = clean(explicit_token);
+    match (url, tok) {
+        (Some(url), Some(tok)) if url.starts_with("http://") || url.starts_with("https://") => {
+            (format!("{}/api", url.trim_end_matches('/')), tok)
+        }
+        _ => {
+            ("http://supervisor/core/api".to_string(), clean(supervisor_token).unwrap_or_default())
+        }
+    }
+}
+
 /// Real client: Supervisor proxy or explicit `hass_url` + token.
 pub struct HaClient {
     base: String,
@@ -336,6 +366,39 @@ impl HaApi for RecordingHa {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SUP: &str = "http://supervisor/core/api";
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    #[test]
+    fn endpoint_unset_uses_supervisor_proxy() {
+        assert_eq!(resolve_endpoint(None, None, s("sup-tok")), (SUP.into(), "sup-tok".into()));
+    }
+
+    #[test]
+    fn endpoint_bashio_null_falls_back_to_proxy() {
+        // The original bug: bashio exports "null" for unset optionals; that must
+        // NOT be treated as an explicit URL (which produced base "null/api").
+        let (base, tok) = resolve_endpoint(s("null"), s("null"), s("sup-tok"));
+        assert_eq!(base, SUP);
+        assert_eq!(tok, "sup-tok");
+    }
+
+    #[test]
+    fn endpoint_blank_or_relative_url_falls_back_to_proxy() {
+        assert_eq!(resolve_endpoint(s("  "), s("t"), s("sup")).0, SUP);
+        // a non-absolute URL must never become the base
+        assert_eq!(resolve_endpoint(s("supervisor"), s("t"), s("sup")).0, SUP);
+    }
+
+    #[test]
+    fn endpoint_explicit_url_token_used_and_trimmed() {
+        let (base, tok) = resolve_endpoint(s("http://homeassistant:8123/"), s(" llt "), None);
+        assert_eq!(base, "http://homeassistant:8123/api");
+        assert_eq!(tok, "llt");
+    }
 
     fn utc(h: u32, m: u32) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(&format!("2026-06-10T{h:02}:{m:02}:00+00:00"))
