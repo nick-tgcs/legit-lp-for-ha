@@ -7,6 +7,8 @@
 # Version source of truth: addon/config.yaml `version:` (Supervisor pulls
 # image:<version>, so config version and image tag must be in lockstep).
 # Bump it on develop before dispatching; re-releasing an existing tag fails.
+# `timeout-minutes` caps the multi-arch (QEMU arm64) build — without it a
+# transient hang in that step can wedge the run for hours.
 name: release
 on:
   workflow_dispatch:
@@ -18,6 +20,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Releases are cut from develop only
         if: github.ref != 'refs/heads/develop'
@@ -36,6 +39,7 @@ jobs:
   release:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:

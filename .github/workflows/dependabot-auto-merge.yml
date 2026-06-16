@@ -1,0 +1,29 @@
+# Auto-merge Dependabot PRs — but only AFTER all required checks pass, never
+# before. We just *enable* auto-merge (squash); GitHub then completes the merge
+# itself once the develop ruleset's required checks (test/build/addon-lint/audit)
+# go green. Patch + minor bumps merge themselves; major bumps are left for a
+# human. Requires the repo setting "Allow auto-merge" = on.
+name: dependabot-auto-merge
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable auto-merge for patch/minor
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
