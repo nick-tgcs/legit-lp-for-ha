@@ -26,6 +26,17 @@ async fn stub_ha() -> MockServer {
         )
         .mount(&server)
         .await;
+    // Preview HA boolean OFF: the only thing that can enable preview in this test
+    // is the in-panel checkbox (POST /api/preview), so e1 exercises the full
+    // panel -> solve-loop wiring through the real binary.
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/states/input_boolean.lp_scheduler_preview$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"state":"off","attributes":{}})),
+        )
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex("^/api/states/sensor.beckton_general_forecast$"))
         .respond_with(
@@ -36,6 +47,19 @@ async fn stub_ha() -> MockServer {
                 .unwrap(),
             ),
         )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/states/sensor.beckton_feed_in_forecast$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "state": "0.05",
+            "attributes": {"forecasts": [
+                {"per_kwh": 0.06, "start_time": "2026-06-10T00:00:00+00:00",
+                 "end_time": "2026-06-10T00:30:00+00:00"},
+                {"per_kwh": 0.03, "start_time": "2026-06-10T00:30:00+00:00",
+                 "end_time": "2026-06-10T01:00:00+00:00"}
+            ]}
+        })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -84,14 +108,61 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
     // Panel over plain HTTP.
     let health = reqwest::get(format!("http://127.0.0.1:{port}/health")).await.unwrap();
     assert!(health.status().is_success());
+    // First solve, preview OFF (HA boolean off, panel not yet toggled): the
+    // observe-only loads are NOT solved.
+    let status0: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/api/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status0["dry_run"], true);
+    assert_eq!(status0["loads"].as_array().unwrap().len(), 3);
+    assert_eq!(status0["preview"], false, "preview starts off");
+    let solved_before = status0["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| !l["on"].as_array().unwrap().is_empty())
+        .count();
+
+    // Toggle preview ON from the PANEL — exactly what the in-panel checkbox does.
+    // This sets the runtime flag the solve loop reads and nudges an immediate
+    // re-solve, all through the real binary.
+    let toggled = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/preview?on=true"))
+        .send()
+        .await
+        .unwrap();
+    assert!(toggled.status().is_success(), "panel preview toggle accepted");
+    tokio::time::sleep(Duration::from_secs(2)).await; // let the nudged re-solve land
+
     let status: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/api/status"))
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(status["dry_run"], true);
-    assert_eq!(status["loads"].as_array().unwrap().len(), 3);
+    // Preview ON end-to-end via the panel toggle: every observe-only load is now
+    // SOLVED into a horizon plan (non-empty `on`), proving the checkbox is wired
+    // through the real binary into the solve loop. The zero-POST assertion below
+    // proves it stays a pure preview — nothing is ever written to HA.
+    assert_eq!(status["preview"], true, "panel toggle turned preview on end-to-end");
+    assert!(
+        status["loads"].as_array().unwrap().iter().all(|l| !l["on"].as_array().unwrap().is_empty()),
+        "preview solves every load into a horizon plan: {}",
+        status["loads"]
+    );
+    let solved_after = status["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| !l["on"].as_array().unwrap().is_empty())
+        .count();
+    assert!(
+        solved_after > solved_before,
+        "toggling preview solved additional observe-only loads: {solved_before} -> {solved_after}"
+    );
     // The storage device from example.yaml was read (states.json serves its
     // SoC) and planned end-to-end: a trajectory is present and grid-aligned.
     let storage = status["storage"].as_array().expect("storage array");
@@ -102,6 +173,21 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
     // Forecast context series the panel draws are populated too.
     assert!(status["grid_kw"].as_array().unwrap().len() > 1, "grid_kw series present");
     assert!(status["pv"].as_array().unwrap().len() > 1, "pv series present");
+    // The separate feed-in forecast sensor is read and its series published.
+    // (Per-step VARIATION is owned by the unit/integration tests, which inject a
+    // clock; here the real wall clock vs the dated fixture leaves slots in the
+    // past, so this asserts only that the wiring populates a grid-sized series.)
+    assert!(status["feedin"].as_array().unwrap().len() > 1, "feed-in series present");
+    // The served chart carries the hover layer (per-step hit-bands + <title>
+    // readouts) end-to-end through the real binary. The browser-native hover
+    // rendering itself has no headless seam (see tests/web.rs w6 note).
+    let svg = reqwest::get(format!("http://127.0.0.1:{port}/horizon.svg"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(svg.contains(r#"class="hit""#) && svg.contains("<title>"), "chart has the hover layer");
 
     child.kill().unwrap();
     child.wait().unwrap(); // reap; clippy zombie_processes

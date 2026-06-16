@@ -3,9 +3,10 @@
 //! handlers read the latest SolveReport from a watch channel.
 
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -19,6 +20,10 @@ use crate::status::SolveReport;
 pub struct WebState {
     pub report: watch::Receiver<SolveReport>,
     pub solve_now: Arc<Notify>,
+    /// Runtime preview toggle shared with the solve loop. The panel checkbox
+    /// POSTs /api/preview to flip it; the loop reads it each tick. Preview solves
+    /// observe-only loads for the panel but never controls them.
+    pub preview: Arc<AtomicBool>,
 }
 
 pub fn router(state: WebState) -> axum::Router {
@@ -28,6 +33,7 @@ pub fn router(state: WebState) -> axum::Router {
         .route("/api/status", get(status))
         .route("/api/events", get(events))
         .route("/api/solve", post(solve_now))
+        .route("/api/preview", post(set_preview))
         .route("/horizon.svg", get(horizon))
         .with_state(state)
 }
@@ -47,6 +53,20 @@ async fn status(State(s): State<WebState>) -> Json<SolveReport> {
 async fn solve_now(State(s): State<WebState>) -> &'static str {
     s.solve_now.notify_one();
     "solving"
+}
+
+#[derive(serde::Deserialize)]
+struct PreviewQuery {
+    on: bool,
+}
+
+/// Set the runtime preview toggle (the in-panel checkbox) to an explicit state
+/// and nudge an immediate re-solve so the change is reflected at once. Preview
+/// solves observe-only loads for the panel but never controls a device.
+async fn set_preview(State(s): State<WebState>, Query(q): Query<PreviewQuery>) -> &'static str {
+    s.preview.store(q.on, Ordering::Relaxed);
+    s.solve_now.notify_one();
+    "ok"
 }
 
 async fn events(State(s): State<WebState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -362,7 +382,85 @@ pub fn render_horizon(r: &SolveReport) -> String {
         plot_top + 8.0
     );
 
+    // ---- hover layer: a transparent full-height band per step, each carrying a
+    // <title> readout of that step's values. The page inlines this SVG so the
+    // browser shows the readout natively on hover (an <img>-loaded SVG cannot).
+    let mut hover = String::new();
+    let band_h = plot_bot - plot_top;
+    for t in 0..n {
+        let mut tip = hhmm(&r.grid[t], t);
+        if let Some(Some(p)) = r.price.get(t) {
+            tip += &format!("\nimport {p:.3} $/kWh");
+        }
+        if let Some(f) = r.feedin.get(t) {
+            tip += &format!("\nfeed-in {f:.3} $/kWh");
+        }
+        if matches!(r.pv.get(t), Some(v) if *v > 0.0) {
+            tip += &format!("\nsolar {:.2} kW", r.pv[t]);
+        }
+        if let Some(g) = r.grid_kw.get(t) {
+            let dir = if *g >= 0.0 { "import" } else { "export" };
+            tip += &format!("\ngrid {g:+.2} kW ({dir})");
+        }
+        for b in &r.storage {
+            if let Some(s) = b.soc_kwh.get(t) {
+                let act = if matches!(b.charge_kw.get(t), Some(c) if *c > 1e-3) {
+                    format!(" (charging {:.1} kW)", b.charge_kw[t])
+                } else if matches!(b.discharge_kw.get(t), Some(d) if *d > 1e-3) {
+                    format!(" (discharging {:.1} kW)", b.discharge_kw[t])
+                } else {
+                    String::new()
+                };
+                tip += &format!("\n{} {s:.1} kWh{act}", b.id);
+            }
+        }
+        let on: Vec<&str> =
+            r.loads.iter().filter(|l| l.on.get(t) == Some(&true)).map(|l| l.id.as_str()).collect();
+        if !on.is_empty() {
+            tip += &format!("\non: {}", on.join(", "));
+        }
+        hover += &format!(
+            r##"<rect class="hit" x="{:.1}" y="{plot_top:.0}" width="{:.1}" height="{band_h:.1}" fill="transparent"><title>{}</title></rect>"##,
+            x(t as f64),
+            bw.max(0.5),
+            esc(&tip),
+        );
+    }
+
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0} {total_h:.0}" font-family="Roboto,system-ui,sans-serif" font-size="11">{axis}{body}</svg>"##
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0} {total_h:.0}" font-family="Roboto,system-ui,sans-serif" font-size="11">{axis}{body}{hover}</svg>"##
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::{LoadReport, SolveReport};
+
+    #[test]
+    fn horizon_emits_a_hover_band_with_a_readout_per_step() {
+        let r = SolveReport {
+            grid: vec!["2026-06-10T10:00:00+10:00".into(), "2026-06-10T10:15:00+10:00".into()],
+            price: vec![Some(0.142), Some(0.20)],
+            feedin: vec![0.05, 0.05],
+            loads: vec![LoadReport {
+                id: "hot_water".into(),
+                planning: "runtime".into(),
+                authority: false,
+                running: Some(false),
+                action: "NoChange".into(),
+                reason: "observe-only".into(),
+                unmet: 0.0,
+                executed: false,
+                on: vec![true, false],
+                ct: vec![false, false],
+            }],
+            ..Default::default()
+        };
+        let svg = render_horizon(&r);
+        assert_eq!(svg.matches(r#"class="hit""#).count(), 2, "one hit-band per step");
+        assert!(svg.contains("<title>10:00"), "readout starts with the step time");
+        assert!(svg.contains("import 0.142 $/kWh"), "readout carries the price");
+        assert!(svg.contains("on: hot_water"), "readout lists the running loads");
+    }
 }

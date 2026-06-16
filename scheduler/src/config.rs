@@ -42,6 +42,13 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub enabled_entity: String,
+    /// Optional HA boolean: when ON, the scheduler ALSO solves observe-only loads
+    /// (authority off) and shows the plan on the panel — a preview / dry sample —
+    /// WITHOUT ever controlling them. Per-load authority still governs real
+    /// control; the executor never acts on an unauthorised load. This is the
+    /// persistent, automatable path; the in-panel checkbox (POST /api/preview) is
+    /// the transient one, OR-combined with this. Omit to use only the checkbox.
+    pub preview_entity: Option<String>,
     pub pricing: PricingConfig,
     pub power: Option<PowerConfig>,
     /// Site storage devices (home batteries, EVs, …). Omit/empty if none.
@@ -59,6 +66,12 @@ pub struct PricingConfig {
     pub import_entity: String,
     pub feedin_entity: Option<String>,
     pub forecast: Option<ForecastConfig>,
+    /// Optional SEPARATE feed-in (export) price forecast. Some providers (Amber)
+    /// publish feed-in on its own sensor rather than as a field inside the import
+    /// forecast; point this at that sensor so the panel's feed-in line and the
+    /// export valuation vary per step instead of flat-lining the current value.
+    /// The slot value field (mapped via `import_per_kwh`) IS the export price.
+    pub feedin_forecast: Option<ForecastConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -544,6 +557,13 @@ mod tests {
         assert_eq!(map.start.as_deref(), Some("start_time"));
         assert_eq!(map.import_per_kwh.as_deref(), Some("per_kwh"));
 
+        // Separate feed-in (export) forecast wired (Amber publishes it on its own
+        // sensor, distinct from the general/import forecast above).
+        let ff = cfg.global.pricing.feedin_forecast.as_ref().unwrap();
+        assert_eq!(ff.entity, "sensor.beckton_feed_in_forecast");
+        assert_eq!(ff.attribute, "forecasts");
+        assert_eq!(ff.fields.as_ref().unwrap().import_per_kwh.as_deref(), Some("per_kwh"));
+
         // Hot water: live-tuned amount, overnight-ish window, no must-have price.
         match &cfg.loads[0].must_have {
             DemandCfg::Runtime { amount_hours, window, max_price, .. } => {
@@ -561,6 +581,12 @@ mod tests {
         let cap = &cfg.loads[2].capability;
         assert!(cap.change_per_hour.is_some() && cap.drift_per_hour.is_some());
         assert_eq!(cap.ambient_entity.as_deref(), Some("sensor.temp_outside"));
+
+        // Preview (shadow-solve) toggle wired to an HA boolean.
+        assert_eq!(
+            cfg.global.preview_entity.as_deref(),
+            Some("input_boolean.lp_scheduler_preview")
+        );
 
         // One site storage device parsed, with defaults applied where omitted.
         assert_eq!(cfg.global.storage.len(), 1);

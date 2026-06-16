@@ -47,6 +47,10 @@ pub struct SolveReport {
     pub solver_ms: u64,
     pub dry_run: bool,
     pub global_enabled: bool,
+    /// Effective preview (shadow-solve) state this cycle: observe-only loads are
+    /// solved for the panel but never executed. True when the HA preview boolean
+    /// is on OR the in-panel checkbox toggled it on. The panel checkbox binds to it.
+    pub preview: bool,
     pub price_now: Option<f64>,
     pub pv_now: Option<f64>,
     pub consumption_now: Option<f64>,
@@ -178,6 +182,19 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&bare).unwrap();
         assert!(v["storage"].as_array().unwrap().is_empty());
         assert!(v["grid_kw"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn report_exposes_the_preview_flag_for_the_panel_checkbox() {
+        // The in-panel preview checkbox binds to this field so it reflects the
+        // server's effective preview state (HA boolean OR runtime override).
+        // Unit level: the view-model contract; the endpoint that flips it and the
+        // OR resolution are covered in tests/web.rs and tests/cycle.rs.
+        let bare = SolveReport::default();
+        let v: serde_json::Value = serde_json::to_value(&bare).unwrap();
+        assert_eq!(v["preview"], false, "preview present in the JSON and defaults off");
+        let on = SolveReport { preview: true, ..Default::default() };
+        assert_eq!(serde_json::to_value(&on).unwrap()["preview"], true);
     }
 
     #[test]

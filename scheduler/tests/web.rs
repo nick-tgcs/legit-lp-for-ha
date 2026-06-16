@@ -1,6 +1,7 @@
 //! Panel API against a canned watch channel: status JSON, SSE on update,
 //! solve-now notify, valid SVG, relative URLs only.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -85,7 +86,8 @@ fn full_report() -> SolveReport {
 fn state_with(r: SolveReport) -> (WebState, watch::Sender<SolveReport>, Arc<Notify>) {
     let (tx, rx) = watch::channel(r);
     let notify = Arc::new(Notify::new());
-    (WebState { report: rx, solve_now: notify.clone() }, tx, notify)
+    let preview = Arc::new(AtomicBool::new(false));
+    (WebState { report: rx, solve_now: notify.clone(), preview }, tx, notify)
 }
 
 fn state() -> (WebState, watch::Sender<SolveReport>, Arc<Notify>) {
@@ -161,6 +163,17 @@ async fn w6_horizon_svg_renders_every_lane_for_a_full_report() {
     // Loads + shared axis.
     assert!(svg.contains(r#"class="load-on""#) && svg.contains(r#"class="load-ct""#), "loads");
     assert!(svg.contains(r#"class="now-line""#) && svg.contains(r#"class="tick""#), "axis");
+    // Hover layer: one transparent full-height hit-band per step, each carrying a
+    // <title> readout of that step's data. Inlined in the page (w7), the browser
+    // shows it on hover — so "hover a line to see the price" works.
+    assert_eq!(svg.matches(r#"class="hit""#).count(), 8, "one hover band per step");
+    assert!(svg.contains("<title>"), "hover readout present");
+    assert!(svg.contains("import 0.100 $/kWh"), "title shows the step's import price");
+    assert!(svg.contains("feed-in 0.050 $/kWh"), "title shows the step's feed-in");
+    // NOTE (TDD three-level rule): the actual hover-to-show-tooltip interaction is
+    // browser-native and has no headless seam, so it is NOT unit/e2e tested here.
+    // What IS testable — the SVG *content* (per-step hit-bands + value readouts)
+    // and that the page inlines the SVG — is covered (this test, w7, e2e svg check).
 }
 
 #[tokio::test]
@@ -175,6 +188,84 @@ async fn w5_index_uses_relative_urls_only() {
         !html.contains("\"/api") && !html.contains("'/api") && !html.contains("(\"/"),
         "absolute URLs would break under the ingress prefix"
     );
+}
+
+#[tokio::test]
+async fn w7_index_inlines_the_svg_so_hover_tooltips_work() {
+    // An <img>-loaded SVG is a flat image: no hover, no <title> tooltips. The page
+    // must inline the SVG (fetch its text and inject it) so the per-step hover
+    // readouts render and the user can see the value under the cursor.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    assert!(!html.contains("<img"), "no <img>: an img-loaded SVG cannot show tooltips");
+    assert!(html.contains("./horizon.svg"), "still loads the chart");
+    assert!(html.contains("innerHTML"), "injects the SVG inline for interactivity");
+}
+
+#[tokio::test]
+async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
+    // The in-panel checkbox POSTs its new state to /api/preview?on=<bool>. The
+    // handler stores it into the shared runtime flag (which the solve loop reads
+    // each tick) and fires solve-now so the change takes effect immediately.
+    let (tx, rx) = watch::channel(report());
+    let _tx = tx; // keep the channel's last value readable
+    let notify = Arc::new(Notify::new());
+    let preview = Arc::new(AtomicBool::new(false));
+
+    let waiter = notify.clone();
+    let waiting = tokio::spawn(async move { waiter.notified().await });
+    let on = WebState { report: rx.clone(), solve_now: notify.clone(), preview: preview.clone() };
+    let resp = router(on)
+        .oneshot(Request::post("/api/preview?on=true").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(preview.load(Ordering::Relaxed), "toggle-on set the shared preview flag");
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("solve-now fired")
+        .unwrap();
+
+    // ...and the same endpoint turns it back off (deterministic set, not a blind toggle).
+    let off = WebState { report: rx, solve_now: notify.clone(), preview: preview.clone() };
+    let resp = router(off)
+        .oneshot(Request::post("/api/preview?on=false").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!preview.load(Ordering::Relaxed), "toggle-off cleared the shared preview flag");
+}
+
+#[tokio::test]
+async fn w9_index_has_a_preview_checkbox_wired_to_the_api() {
+    // The user asked to toggle preview from the panel itself. The page must carry
+    // a checkbox that POSTs to ./api/preview (relative, for the ingress prefix)
+    // and reflects the server's reported preview state.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    assert!(html.contains(r#"type="checkbox""#), "a checkbox control is present");
+    assert!(html.contains(r#"id="preview""#), "it is the preview checkbox");
+    assert!(html.contains("./api/preview"), "it POSTs to the relative preview endpoint");
+    assert!(html.contains("r.preview"), "its checked state binds to the reported preview flag");
+}
+
+#[tokio::test]
+async fn w10_index_has_an_instant_crosshair_tooltip() {
+    // Beyond the native <title> fallback, the page shows an instant, styled
+    // tooltip + crosshair driven by the SAME per-step readouts: it maps the
+    // cursor to the hovered hit-band and reuses that band's <title> text — no new
+    // data plumbing, just immediate styled presentation of the server's readout.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    assert!(
+        html.contains(r#"id="tip""#) && html.contains(r#"id="xhair""#),
+        "tooltip + crosshair elements present"
+    );
+    assert!(html.contains("elementFromPoint"), "maps the cursor to the hovered step band");
+    assert!(html.contains("closest('.hit')"), "reuses the hovered hit-band's readout");
 }
 
 #[tokio::test]

@@ -75,6 +75,21 @@ struct LoadVars {
 
 impl LpPlanner {
     pub fn plan(&self, world: &WorldState, loads: &[LoadContract]) -> PlanOutput {
+        self.plan_with_preview(world, loads, false)
+    }
+
+    /// Like [`LpPlanner::plan`], but when `preview` is true, observe-only
+    /// (authority-off) loads with a KNOWN running state are ALSO solved, so the
+    /// panel can show what the scheduler WOULD do. Their current-step decision
+    /// stays `NoChange` and the executor's authority gate keeps them unwritten —
+    /// a diagnostic-only shadow plan that never commands a device. See
+    /// ARCHITECTURE.md §"Preview (shadow) planning".
+    pub fn plan_with_preview(
+        &self,
+        world: &WorldState,
+        loads: &[LoadContract],
+        preview: bool,
+    ) -> PlanOutput {
         let mut decisions = vec![None; loads.len()];
         let mut plans: Vec<LoadPlan> = Vec::new();
 
@@ -108,9 +123,11 @@ impl LpPlanner {
             (0..n).map(|t| (world.pv[t] - world.baseload[t]).max(0.0)).collect();
 
         // Observe-only loads get decisions immediately; the rest enter the MILP.
+        // With `preview`, observe-only loads ALSO enter the MILP (a shadow plan
+        // for the panel) — they still never command (see the decision pass below).
         let mut milp: Vec<usize> = Vec::new();
         for (i, c) in loads.iter().enumerate() {
-            if !c.authority {
+            if !c.authority && !preview {
                 decisions[i] = Some(Decision {
                     load_id: c.id.clone(),
                     action: Action::NoChange,
@@ -150,24 +167,35 @@ impl LpPlanner {
             let c = &loads[i];
             let running = c.obs.running.unwrap_or(false);
             let want_on = lp.on[0];
-            let action = match (running, want_on) {
-                (false, true) => Action::Start,
-                (true, false) => Action::Stop,
-                _ => Action::NoChange,
-            };
             let price = world.price_now.map(|p| format!("{p:.3}")).unwrap_or("?".into());
-            let reason = match action {
-                Action::Start if lp.ct[0] => format!("start; can-take step (price {price})"),
-                Action::Start => format!("start; lp plan (price {price})"),
-                Action::Stop => format!("stop; lp plan (price {price})"),
-                Action::NoChange if lp.unmet > 1e-6 => format!(
-                    "{}; must-have unmet {:.0} (legal space too tight)",
-                    if running { "run" } else { "hold" },
-                    lp.unmet
-                ),
-                Action::NoChange => {
-                    format!("{}; lp plan", if running { "run" } else { "idle" })
-                }
+            let (action, reason) = if c.authority {
+                let action = match (running, want_on) {
+                    (false, true) => Action::Start,
+                    (true, false) => Action::Stop,
+                    _ => Action::NoChange,
+                };
+                let reason = match action {
+                    Action::Start if lp.ct[0] => format!("start; can-take step (price {price})"),
+                    Action::Start => format!("start; lp plan (price {price})"),
+                    Action::Stop => format!("stop; lp plan (price {price})"),
+                    Action::NoChange if lp.unmet > 1e-6 => format!(
+                        "{}; must-have unmet {:.0} (legal space too tight)",
+                        if running { "run" } else { "hold" },
+                        lp.unmet
+                    ),
+                    Action::NoChange => {
+                        format!("{}; lp plan", if running { "run" } else { "idle" })
+                    }
+                };
+                (action, reason)
+            } else {
+                // Preview (shadow) plan: solved for the panel, but an
+                // unauthorised load is NEVER commanded — the current-step
+                // action is held and the executor's authority gate is the backstop.
+                (
+                    Action::NoChange,
+                    format!("observe-only; preview plan (price {price}, not executed)"),
+                )
             };
             decisions[i] = Some(Decision { load_id: c.id.clone(), action, reason });
             plans.push(LoadPlan { id: c.id.clone(), on: lp.on, ct: lp.ct, unmet: lp.unmet });

@@ -12,10 +12,15 @@ h1{font-size:1.2rem;margin:0 0 4px}h2{font-size:.95rem;color:var(--muted);margin
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-size:.9rem;cursor:pointer}
 pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
 .legend{font-size:.72rem;color:var(--muted);margin:8px 0 0;line-height:1.8}
-img{width:100%}</style></head><body>
+#horizon{position:relative}
+#horizon svg{width:100%;height:auto;display:block}
+#horizon .hit:hover{fill:rgba(127,127,127,.08)}
+#xhair{position:absolute;top:0;width:1px;background:var(--warn);opacity:0;pointer-events:none;z-index:4}
+#tip{position:absolute;pointer-events:none;z-index:5;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:.76rem;line-height:1.5;white-space:pre;box-shadow:0 2px 10px rgba(0,0,0,.22);opacity:0;transition:opacity .07s;transform:translate(-50%,-115%)}</style></head><body>
 <div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
-<p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button></p></div>
-<div class="card"><h2>The plan · next horizon</h2><img id="horizon" src="./horizon.svg" alt="plan timeline">
+<p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button>
+<label style="margin-left:14px;font-size:.9rem;color:var(--muted)" title="Solve observe-only loads to preview their plan — never controls a device"><input type="checkbox" id="preview" onchange="fetch('./api/preview?on='+this.checked,{method:'POST'})"> solve observe-only (preview)</label></p></div>
+<div class="card"><h2>The plan · next horizon</h2><div id="horizon" role="img" aria-label="plan timeline"><div id="plot"></div><div id="xhair"></div><div id="tip"></div></div>
 <p class="legend"><b style="color:#5c6bc0">━ import price</b> · <b style="color:#26a69a">┄ feed-in</b> · <b style="color:#ffb300">▰ solar</b> · <b style="color:#ef9a9a">▮ grid import</b> · <b style="color:#a5d6a7">▮ grid export</b> · <b style="color:#1e88e5">━ battery SoC</b> · <b style="color:#66bb6a">▮ charging</b> · <b style="color:#ffa726">▮ discharging</b> · <b style="color:#03a9f4">▮ load run</b> · <b style="color:#4caf50">▮ can-take</b></p></div>
 <div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
 <div class="card"><h2>Diagnostics</h2><pre id="diags"></pre></div>
@@ -40,9 +45,27 @@ function render(r){
   <span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${l.planning}</span>
   ${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>
   <p style="font-size:.85rem;color:var(--muted)">${l.reason}</p></div>`).join('');
+ const pc=document.getElementById('preview'); if(pc) pc.checked=!!r.preview;
  diags.textContent=r.diagnostics.join('\n')||'all good';
- document.getElementById('horizon').src='./horizon.svg?t='+Date.now();
+ fetch('./horizon.svg',{cache:'no-store'}).then(r=>r.text()).then(svg=>{document.getElementById('plot').innerHTML=svg;});
 }
+// Instant crosshair tooltip: reuse the per-step <title> readouts the server
+// renders into the hover bands, but show them immediately and styled (the native
+// <title> tooltip — kept as a no-JS fallback — lags ~0.5s and can't be styled).
+const horizon=document.getElementById('horizon'),xhair=document.getElementById('xhair'),tip=document.getElementById('tip');
+const hideTip=()=>{xhair.style.opacity=0;tip.style.opacity=0;};
+horizon.addEventListener('mouseleave',hideTip);
+horizon.addEventListener('mousemove',e=>{
+ const hit=document.elementFromPoint(e.clientX,e.clientY)?.closest('.hit');
+ const svg=document.querySelector('#plot svg'),title=hit&&hit.querySelector('title');
+ if(!hit||!svg||!title){hideTip();return;}
+ const wb=horizon.getBoundingClientRect(),hb=hit.getBoundingClientRect(),cx=hb.left+hb.width/2-wb.left;
+ xhair.style.left=cx+'px';xhair.style.height=svg.getBoundingClientRect().height+'px';xhair.style.opacity=.6;
+ tip.textContent=title.textContent;
+ tip.style.left=Math.min(Math.max(cx,64),wb.width-64)+'px';
+ tip.style.top=(e.clientY-wb.top-6)+'px';
+ tip.style.opacity=1;
+});
 fetch('./api/status').then(r=>r.json()).then(render);
 new EventSource('./api/events').onmessage=e=>render(JSON.parse(e.data));
 </script></body></html>

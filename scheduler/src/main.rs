@@ -1,6 +1,7 @@
 //! Binary wiring: env options -> HaClient -> web server + solve loop.
 //! The only place `anyhow` and the wall clock are allowed.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,11 +49,21 @@ async fn main() -> anyhow::Result<()> {
     let profile_path = std::path::PathBuf::from(env("SCHED_DATA_DIR").unwrap_or("/data".into()))
         .join("profile.json");
     let mut profiles = Profiles::load(&profile_path);
-    let cycle = Cycle { registry, planner, dry_run, profile_path: Some(profile_path) };
+    // Runtime preview toggle shared between the panel (checkbox -> POST /api/preview)
+    // and the solve loop. Starts off; not persisted across restarts (the optional
+    // HA `preview_entity` boolean is the persistent path).
+    let preview = Arc::new(AtomicBool::new(false));
+    let cycle = Cycle {
+        registry,
+        planner,
+        dry_run,
+        profile_path: Some(profile_path),
+        preview_override: preview.clone(),
+    };
 
     let (tx, rx) = watch::channel(SolveReport::default());
     let solve_now = Arc::new(Notify::new());
-    let web = WebState { report: rx, solve_now: solve_now.clone() };
+    let web = WebState { report: rx, solve_now: solve_now.clone(), preview: preview.clone() };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tokio::spawn(async move {
         axum::serve(listener, router(web)).await.ok();

@@ -267,6 +267,63 @@ fn l12_two_loads_compete_for_one_surplus() {
     }
 }
 
+// ---- preview / shadow planning of observe-only loads -------------------
+
+#[test]
+fn p1_preview_plans_observe_only_loads_without_commanding_them() {
+    // An observe-only (authority off) hot-water load at 22:00, runtime due
+    // overnight, with a cheap valley to shift into. By default it is NOT solved
+    // (observe-only); with preview ON it IS solved for the panel, yet the
+    // current-step decision stays NoChange — preview never commands a device.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut c = runtime_contract();
+    c.authority = false; // observe-only
+    let world = priced_world(now, 0.30, 0.05, 16, 20);
+
+    // Default: not planned at all.
+    let out = planner().plan(&world, std::slice::from_ref(&c));
+    assert!(out.plans.is_empty(), "observe-only load is not planned by default");
+    assert_eq!(out.decisions[0].action, Action::NoChange);
+    assert!(out.decisions[0].reason.contains("authority disabled"), "{}", out.decisions[0].reason);
+
+    // Preview ON: a plan appears (for the panel) but the decision is NoChange.
+    let out = planner().plan_with_preview(&world, std::slice::from_ref(&c), true);
+    let plan = out.plans.iter().find(|p| p.id == c.id).expect("preview plan present");
+    assert!(plan.on.iter().any(|v| *v), "preview actually schedules the runtime");
+    assert_eq!(plan.unmet, 0.0, "feasible overnight");
+    assert_eq!(out.decisions[0].action, Action::NoChange, "preview must NOT command");
+    assert!(out.decisions[0].reason.contains("preview"), "{}", out.decisions[0].reason);
+}
+
+#[test]
+fn p2_preview_is_additive_authorised_loads_still_command() {
+    // Preview only widens WHICH loads are solved; an AUTHORISED load still plans
+    // and commands exactly as before.
+    let now = sydney(2026, 6, 10, 10, 0);
+    let c = immediate_contract(Some(80.0)); // authority=true, humid -> start now
+    let out = planner().plan_with_preview(&flat_world(now, STEPS, 0.05), &[c], true);
+    assert_eq!(out.decisions[0].action, Action::Start, "authorised load still commands");
+    assert!(!out.plans.is_empty());
+}
+
+#[test]
+fn p3_preview_off_with_unknown_running_state_is_still_observe_only() {
+    // Preview cannot solve a load whose current running state is unknown — there
+    // is no starting condition to plan from. It stays observe-only either way.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut c = runtime_contract();
+    c.authority = false;
+    c.obs.running = None; // unknown
+    let out = planner().plan_with_preview(&flat_world(now, STEPS, 0.20), &[c], true);
+    assert!(out.plans.is_empty(), "no plan without a known running state");
+    assert_eq!(out.decisions[0].action, Action::NoChange);
+    assert!(
+        out.decisions[0].reason.contains("running state unknown"),
+        "{}",
+        out.decisions[0].reason
+    );
+}
+
 // ---- site balance reporting (grid_kw) ----------------------------------
 
 #[test]
