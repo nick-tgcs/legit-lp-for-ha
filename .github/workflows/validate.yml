@@ -66,3 +66,28 @@ jobs:
         with:
           tool: cargo-audit
       - run: cd scheduler && cargo audit
+
+  # Coverage gate: measure line coverage with cargo-tarpaulin (via `make
+  # coverage`, the same command run locally) and fail the PR if it falls below
+  # the floor baked into the Makefile. The HTML report is uploaded as a build
+  # artifact so a reviewer can see exactly which lines a PR leaves uncovered.
+  # Safe to require on the develop ruleset: runs on every PR and develop push.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scheduler
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+      - run: make coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: scheduler/target/tarpaulin/tarpaulin-report.html
+          if-no-files-found: warn

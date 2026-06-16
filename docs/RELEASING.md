@@ -3,10 +3,22 @@
 ## Model
 
 - **`develop`** — integration branch, **PR-only** (ruleset `protect-develop`:
-  PR required, `test`/`build`/`addon-lint` checks required, no force pushes,
-  no deletion). Every PR runs the `validate` workflow: the full Rust gate
-  (fmt, clippy, all unit/integration/e2e tests), the Docker build, and the
-  HA add-on config linter.
+  PR required, no force pushes, no deletion). Every PR runs the `validate`
+  workflow, which has five jobs:
+  - **`test`** — the full Rust gate (fmt, clippy `-D warnings`, all
+    unit/integration/e2e tests);
+  - **`build`** — proves the repo-root Dockerfile still builds (amd64);
+  - **`addon-lint`** — HA add-on config linter (schema/manifest sanity);
+  - **`audit`** — `cargo audit`, fails on any RUSTSEC advisory in the
+    dependency tree (an in-PR complement to Dependabot security updates);
+  - **`coverage`** — `cargo tarpaulin`, fails if line coverage drops below the
+    floor in the Makefile (`COVERAGE_FLOOR`); uploads an HTML report artifact.
+
+  Required (merge-blocking) checks: `test`, `build`, `addon-lint`. `audit` and
+  `coverage` run on every PR but are **advisory until added to the ruleset's
+  required list** (the ruleset write needs an admin fine-grained PAT / the web
+  UI — a classic OAuth token gets a masked 404). Add them under
+  Settings → Rules → `protect-develop` → Require status checks.
 - **`main`** — released state only, and the repo's **default branch**. HA
   Supervisor clones a custom add-on repository's *default* branch and
   hard-resets to its tip on every store refresh — whatever is on `main` is
