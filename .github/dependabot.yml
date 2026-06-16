@@ -1,0 +1,60 @@
+# Dependabot version-update PRs. These open against `develop` (NOT the default
+# branch `main`), so every dependency bump flows through the same PR validation
+# (test / build / addon-lint / audit) and branch ruleset as any other change.
+# GitHub's Dependabot *security* updates are enabled separately in repo settings
+# and also target develop; this file adds routine *version* bumps on top.
+version: 2
+updates:
+  # Rust crates for the scheduler binary.
+  - package-ecosystem: cargo
+    directory: /scheduler
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Sydney
+    open-pull-requests-limit: 5
+    versioning-strategy: auto
+    labels: [dependencies, rust]
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      cargo-minor:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  # Actions pinned in .github/workflows/*.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Sydney
+    open-pull-requests-limit: 5
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions-all:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  # Base image in the repo-root Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Sydney
+    open-pull-requests-limit: 5
+    labels: [dependencies, docker]
+    commit-message:
+      prefix: deps
+      include: scope
