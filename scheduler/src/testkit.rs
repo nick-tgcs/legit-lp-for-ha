@@ -177,5 +177,26 @@ pub fn flat_world(now: DateTime<Tz>, steps: usize, price: f64) -> WorldState {
         feedin: vec![0.05; steps],
         pv: vec![0.0; steps],
         baseload: vec![0.8; steps],
+        storage: vec![],
+    }
+}
+
+/// A 10 kWh home battery starting at 5 kWh: ±5 kW, 90% round-trip, reserve 10%,
+/// grid-charging allowed, no goals (self-arbitrages). Used by the storage tests.
+pub fn test_storage() -> StorageInput {
+    StorageInput {
+        id: "battery".into(),
+        capacity_kwh: 10.0,
+        soc_now_kwh: 5.0,
+        min_soc_kwh: 1.0,
+        max_soc_kwh: 10.0,
+        max_charge_kw: 5.0,
+        max_discharge_kw: 5.0,
+        round_trip_efficiency: 0.9,
+        allow_grid_charge: true,
+        available: true,
+        // Tiny wear cost: breaks indifference without distorting real arbitrage.
+        cycle_cost_aud_per_kwh: 0.001,
+        goals: vec![],
     }
 }

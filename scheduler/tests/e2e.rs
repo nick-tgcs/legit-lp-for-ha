@@ -92,6 +92,16 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
         .unwrap();
     assert_eq!(status["dry_run"], true);
     assert_eq!(status["loads"].as_array().unwrap().len(), 3);
+    // The storage device from example.yaml was read (states.json serves its
+    // SoC) and planned end-to-end: a trajectory is present and grid-aligned.
+    let storage = status["storage"].as_array().expect("storage array");
+    assert_eq!(storage.len(), 1, "the example's one storage device was planned");
+    assert_eq!(storage[0]["id"], "sonnen");
+    let soc = storage[0]["soc_kwh"].as_array().expect("soc trajectory");
+    assert!(soc.len() > 1, "SoC trajectory spans the horizon");
+    // Forecast context series the panel draws are populated too.
+    assert!(status["grid_kw"].as_array().unwrap().len() > 1, "grid_kw series present");
+    assert!(status["pv"].as_array().unwrap().len() > 1, "pv series present");
 
     child.kill().unwrap();
     child.wait().unwrap(); // reap; clippy zombie_processes

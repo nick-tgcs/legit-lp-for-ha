@@ -23,6 +23,37 @@ global:
       tomorrow_entity: sensor.energy_production_tomorrow
       now_entity: sensor.power_production_now
     baseline_kw: 0.8
+  # Site storage: the scheduler PLANS and REPORTS each device's optimal
+  # charge/discharge trajectory against the price/PV forecast, but never commands
+  # it (no control entities — control is a separate, deliberate step). Add as many
+  # devices as you like; a dischargeable device self-arbitrages, a charge-only one
+  # (max_discharge_kw: 0, e.g. an EV) is driven by its goals. Limits are
+  # placeholders; set them to each device's real figures.
+  storage:
+    - id: sonnen
+      soc_entities: [sensor.usoc_sonnen01, sensor.usoc_sonnen02] # %, averaged
+      capacity_kwh: 20.0 # total usable across the pack
+      max_charge_kw: 8.0
+      max_discharge_kw: 8.0 # 0 = charge-only
+      round_trip_efficiency: 0.9
+      reserve_soc_pct: 10 # never plan below this floor
+      max_soc_pct: 100
+      allow_grid_charge: true # false = only soak solar surplus, never grid
+    # Example EV (uncomment when you have one). Charge-only, to 80% by 07:00 as
+    # cheaply as possible, plus opportunistic top-ups whenever price is under $0.10:
+    # - id: ev
+    #   soc_entities: [sensor.ev_battery_level]
+    #   capacity_kwh: 60.0
+    #   max_charge_kw: 7.0
+    #   max_discharge_kw: 0           # charge-only (no V2G)
+    #   available_entity: binary_sensor.ev_plugged_in
+    #   goals:
+    #     - kind: target
+    #       soc_pct: { value: 80 }
+    #       ready_by: "07:00"
+    #     - kind: price
+    #       below: { value: 0.10 }
+    #       up_to_soc_pct: { value: 100 }
   planning:
     grid_minutes: 15
     horizon_hours: 24
