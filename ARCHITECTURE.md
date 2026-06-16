@@ -106,6 +106,10 @@ Step 5 is equally critical: the scheduler observes all loads regardless of
 authority. A load under manual control still reports its state and progress
 so the scheduler can account for its energy impact.
 
+Optionally (see §5 "Preview (shadow) planning"), step 6 can additionally produce
+a *non-executable* shadow plan for observe-only loads so the panel can show what
+the scheduler would do; those plans are never written to Home Assistant.
+
 ## 5. Authority Model
 
 Authority is a boolean per load, read from a Home Assistant entity at runtime.
@@ -119,6 +123,28 @@ There is no `manual_on` or `manual_off` scheduler mode. Authority is binary:
 the scheduler either has permission to act or it does not. When a human wants
 direct control, they disable scheduler authority for that load and operate the
 device through Home Assistant's normal UI or automations.
+
+### Preview (shadow) planning
+
+The scheduler may *solve* observe-only loads without *controlling* them. When
+preview is on, authority-off loads with a known running state are included in the
+optimisation so the panel can show what the scheduler would do — a diagnostic-only
+shadow plan for testing and sampling.
+
+Preview has two independent toggles, OR-combined (either on ⇒ on):
+
+- the **in-panel checkbox** ("solve observe-only (preview)"), which POSTs
+  `/api/preview` to a runtime flag the solve loop reads each tick. It is the
+  quick way to sample a plan and is *not* persisted across a restart; and
+- an optional **`preview_entity`** (an HA boolean), the persistent, automatable
+  path — useful for leaving preview on, or driving it from an HA automation.
+
+This does not weaken authority. Preview changes only which loads are *solved*, not
+which are *controlled*: an unauthorised load's current-step decision is always
+`NoChange`, and the executor refuses to act on any load without authority. No
+service call is ever issued for a preview load — in dry-run or live. Preview is
+the read-only complement to step 5 ("observe all loads") and §10 ("planned
+actions ... for diagnostics only"); it never makes an illegal action legal.
 
 ## 6. Hard Rules
 

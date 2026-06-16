@@ -5,6 +5,12 @@
 
 global:
   enabled_entity: input_boolean.grid_power_use_lp_scheduler
+  # Preview / dry-sample toggle. When this HA boolean is ON, the scheduler ALSO
+  # solves observe-only loads (authority off) and shows their plan on the panel
+  # WITHOUT ever controlling them — so you can test and sample what it would do.
+  # Per-load authority still governs real control; nothing is written for an
+  # unauthorised load. Create an input_boolean helper and flip it. Omit to disable.
+  preview_entity: input_boolean.lp_scheduler_preview
   pricing:
     import_entity: sensor.current_grid_cost
     feedin_entity: sensor.amber_electric_feedin
@@ -15,6 +21,17 @@ global:
         start: start_time
         end: end_time
         import_per_kwh: per_kwh
+    # Amber publishes feed-in (export) on its OWN forecast sensor, separate from
+    # the general/import forecast above. Without this the panel's feed-in line is
+    # flat (it can only carry the single current value forward). The slot value
+    # field is the export $/kWh — map it via import_per_kwh (the slot's value).
+    feedin_forecast:
+      entity: sensor.beckton_feed_in_forecast
+      attribute: forecasts
+      fields:
+        start: start_time
+        end: end_time
+        import_per_kwh: per_kwh # for a feed-in forecast THIS value is the export $/kWh
   power:
     consumption_entity: sensor.current_sonnen_consumption
     pv_entity: sensor.current_sonnen_production

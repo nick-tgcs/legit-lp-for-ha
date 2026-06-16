@@ -2,6 +2,9 @@
 //! LoadContracts -> WorldState -> LP plan -> executor -> SolveReport.
 //! Pure assembly; every policy lives in the modules it glues.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
@@ -20,6 +23,11 @@ pub struct Cycle {
     pub planner: LpPlanner,
     pub dry_run: bool,
     pub profile_path: Option<std::path::PathBuf>,
+    /// Runtime preview override flipped by the in-panel checkbox (POST
+    /// /api/preview). OR-combined with the optional HA preview boolean to get the
+    /// effective preview: when on, observe-only loads are solved for the panel but
+    /// never executed.
+    pub preview_override: Arc<AtomicBool>,
 }
 
 async fn state_of<A: HaApi>(ha: &A, entity: &str, diags: &mut Vec<String>) -> Option<HaState> {
@@ -51,6 +59,33 @@ async fn resolve_opt<A: HaApi>(
     match vr {
         Some(v) => resolve(ha, v, diags).await,
         None => None,
+    }
+}
+
+/// Read + parse a forecast sensor's slot array (provider field-map applied).
+/// A rejected/missing attribute yields an empty slot set (with a diagnostic);
+/// an unreadable entity yields empty (the read already logged its own).
+async fn forecast_slots<A: HaApi>(
+    ha: &A,
+    fc: &config::ForecastConfig,
+    label: &str,
+    diags: &mut Vec<String>,
+) -> Vec<forecast::Slot> {
+    match state_of(ha, &fc.entity, diags).await {
+        Some(s) => match s.attr(&fc.attribute) {
+            Some(attr) => match forecast::parse_slots(attr, fc.fields.as_ref()) {
+                Ok(slots) => slots,
+                Err(e) => {
+                    diags.push(format!("{label} rejected: {e}"));
+                    vec![]
+                }
+            },
+            None => {
+                diags.push(format!("{label} attribute '{}' missing", fc.attribute));
+                vec![]
+            }
+        },
+        None => vec![],
     }
 }
 
@@ -159,6 +194,18 @@ impl Cycle {
             .and_then(|s| s.as_on_off())
             .unwrap_or(false);
 
+        // Preview (shadow-solve) toggle: when ON, observe-only loads are solved
+        // for the panel too — but never executed (the executor's authority gate
+        // is the backstop). Two independent inputs, OR-combined: the in-panel
+        // checkbox (runtime override) and an optional HA boolean. Either on => on.
+        let preview = self.preview_override.load(Ordering::Relaxed)
+            || match &g.preview_entity {
+                Some(e) => {
+                    state_of(ha, e, &mut diags).await.and_then(|s| s.as_on_off()).unwrap_or(false)
+                }
+                None => false,
+            };
+
         let grid = Grid::build(now, g.planning.grid_minutes, g.planning.horizon_hours)
             .expect("validated config");
         let n = grid.steps.len();
@@ -170,25 +217,24 @@ impl Cycle {
             None => None,
         };
         let slots = match &g.pricing.forecast {
-            Some(fc) => match state_of(ha, &fc.entity, &mut diags).await {
-                Some(s) => match s.attr(&fc.attribute) {
-                    Some(attr) => match forecast::parse_slots(attr, fc.fields.as_ref()) {
-                        Ok(slots) => slots,
-                        Err(e) => {
-                            diags.push(format!("forecast rejected: {e}"));
-                            vec![]
-                        }
-                    },
-                    None => {
-                        diags.push(format!("forecast attribute '{}' missing", fc.attribute));
-                        vec![]
-                    }
-                },
-                None => vec![],
-            },
+            Some(fc) => forecast_slots(ha, fc, "forecast", &mut diags).await,
             None => vec![],
         };
         let prices = forecast::resample(&slots, &grid, price_now, feedin_now);
+        // Feed-in (export): an optional SEPARATE forecast (some providers, e.g.
+        // Amber, publish it on its own sensor). When present it gives a per-step
+        // export series; otherwise the flat current value carried by `resample`.
+        let feedin = match &g.pricing.feedin_forecast {
+            Some(fc) => {
+                let fslots = forecast_slots(ha, fc, "feed-in forecast", &mut diags).await;
+                if fslots.is_empty() {
+                    prices.feedin.clone()
+                } else {
+                    forecast::resample_feedin(&fslots, &grid, feedin_now)
+                }
+            }
+            None => prices.feedin.clone(),
+        };
 
         // ---- per-load resolution ----
         let mut contracts: Vec<LoadContract> = Vec::new();
@@ -344,12 +390,12 @@ impl Cycle {
             global_enabled,
             price_now,
             import: prices.import,
-            feedin: prices.feedin,
+            feedin,
             pv,
             baseload,
             storage,
         };
-        let out = self.planner.plan(&world, &contracts);
+        let out = self.planner.plan_with_preview(&world, &contracts, preview);
         let executed = Executor { dry_run: self.dry_run }
             .execute(ha, global_enabled, &contracts, &out.decisions)
             .await;
@@ -359,6 +405,7 @@ impl Cycle {
             solver_ms: started.elapsed().as_millis() as u64,
             dry_run: self.dry_run,
             global_enabled,
+            preview,
             price_now,
             pv_now: pv_now_kw,
             consumption_now: cons_now_kw,

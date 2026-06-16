@@ -121,6 +121,32 @@ pub fn resample(
     PriceSeries { import, feedin }
 }
 
+/// Resample a DEDICATED feed-in (export) forecast onto the grid. Mirrors
+/// [`resample`]'s gap rule for the feed-in series: flat-fill from the last known
+/// slot, then override the current step with `feedin_now` when known. Each slot's
+/// value IS the export price: for a provider whose feed-in forecast is a SEPARATE
+/// sensor from the import forecast (e.g. Amber), the field-map points the slot's
+/// `import_per_kwh` at that sensor's value field, and it is read here as feed-in.
+/// Without this, the panel's feed-in line could only carry the single current
+/// value forward, drawing a flat line.
+pub fn resample_feedin(slots: &[Slot], grid: &Grid, feedin_now: Option<f64>) -> Vec<f64> {
+    let mut out = Vec::with_capacity(grid.steps.len());
+    let mut last = feedin_now;
+    for step in &grid.steps {
+        let at = step.with_timezone(&Utc);
+        if let Some(s) = slots.iter().find(|s| s.start <= at && at < s.end) {
+            last = Some(s.import_per_kwh);
+        }
+        out.push(last.unwrap_or(0.0));
+    }
+    if let Some(f) = feedin_now {
+        if let Some(first) = out.first_mut() {
+            *first = f;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +273,41 @@ mod tests {
         assert!(s.feedin.iter().all(|f| *f == 0.0));
         let s = resample(&[], &g, None, None);
         assert!(s.import.iter().all(|p| p.is_none()));
+    }
+
+    fn u(h: u32, m: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-06-10T{h:02}:{m:02}:00+00:00"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn feedin_forecast_resamples_to_a_varying_series() {
+        // A dedicated feed-in (export) forecast lives on its OWN provider sensor
+        // (Amber publishes feed-in separately from the general/import forecast),
+        // so each slot's value IS the export price. Before this, feed-in could
+        // only carry the single CURRENT value forward — a flat line on the panel.
+        let slots = vec![
+            Slot { start: u(0, 0), end: u(0, 30), import_per_kwh: 0.06, export_per_kwh: None },
+            Slot { start: u(0, 30), end: u(1, 0), import_per_kwh: 0.09, export_per_kwh: None },
+            Slot { start: u(1, 0), end: u(1, 30), import_per_kwh: 0.03, export_per_kwh: None },
+        ];
+        // 10:00 Sydney == 00:00 UTC; 15-min grid, 2 h -> 8 steps.
+        let g = Grid::build(sydney(2026, 6, 10, 10, 0), 15, 2).unwrap();
+        let f = resample_feedin(&slots, &g, Some(0.05));
+        assert_eq!(f.len(), g.steps.len());
+        assert_eq!(f[0], 0.05, "current step overridden by feedin_now");
+        assert_eq!(f[1], 0.06, "00:15 still inside the first slot");
+        assert_eq!(f[2], 0.09, "00:30 second slot");
+        assert_eq!(f[4], 0.03, "01:00 third slot");
+        assert_eq!(f[7], 0.03, "beyond the last slot flat-fills the last known");
+        assert!(f.windows(2).any(|w| w[0] != w[1]), "feed-in is NOT a flat line: {f:?}");
+    }
+
+    #[test]
+    fn feedin_forecast_without_current_or_slots_is_flat_zero() {
+        let g = Grid::build(sydney(2026, 6, 10, 10, 0), 30, 2).unwrap();
+        let f = resample_feedin(&[], &g, None);
+        assert!(f.iter().all(|v| *v == 0.0), "no slots, no current -> 0.0");
     }
 }
