@@ -157,6 +157,54 @@ pub struct WorldState {
     pub pv: Vec<f64>,
     /// kW per step: learned consumption profile minus managed loads.
     pub baseload: Vec<f64>,
+    /// Site storage devices (home batteries, EVs, …) co-optimised against
+    /// price/PV. Empty = none modelled. Each is independent; a device that can
+    /// discharge (`max_discharge_kw > 0`) self-arbitrages, while charge-only
+    /// devices are driven by their `goals`.
+    pub storage: Vec<StorageInput>,
+}
+
+/// One resolved storage device the planner co-optimises, built from config + a
+/// live SoC read each cycle. Energy in kWh, power in kW. The planner never
+/// *commands* storage (no service calls); it only plans and reports trajectories.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageInput {
+    pub id: String,
+    /// Total usable capacity (kWh).
+    pub capacity_kwh: f64,
+    /// Live state of charge at `now` (kWh), already clamped into [min,max].
+    pub soc_now_kwh: f64,
+    /// Reserve floor and ceiling the plan must stay within (kWh).
+    pub min_soc_kwh: f64,
+    pub max_soc_kwh: f64,
+    /// Power limits (kW). `max_discharge_kw == 0` => charge-only (e.g. an EV).
+    pub max_charge_kw: f64,
+    pub max_discharge_kw: f64,
+    /// Round-trip efficiency in (0,1]; applied as sqrt on each of charge/discharge.
+    pub round_trip_efficiency: f64,
+    /// If false, may only charge from instantaneous PV (never the grid).
+    pub allow_grid_charge: bool,
+    /// Usable this cycle (e.g. an EV that is plugged in). When false the device
+    /// neither charges nor discharges.
+    pub available: bool,
+    /// Throughput wear cost (AUD/kWh of charge+discharge) — breaks indifference
+    /// against pointless cycling; keep well below a typical arbitrage spread.
+    pub cycle_cost_aud_per_kwh: f64,
+    /// Composable charging goals (in addition to inherent self-consumption /
+    /// arbitrage for dischargeable devices). Empty = price-only behaviour.
+    pub goals: Vec<StorageGoal>,
+}
+
+/// A resolved storage charging goal. Multiple goals compose (a device may have a
+/// deadline target AND opportunistic price-charging at once).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StorageGoal {
+    /// Reach `soc_kwh` by the next occurrence of `ready_by`, as cheaply as
+    /// possible (soft — shortfall is reported, never forced).
+    Target { soc_kwh: f64, ready_by: NaiveTime },
+    /// Opportunistically charge while the import price is below `below`
+    /// ($/kWh), up to `up_to_kwh` of stored energy.
+    Price { below: f64, up_to_kwh: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

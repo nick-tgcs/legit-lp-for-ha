@@ -78,6 +78,9 @@ fn states_bundle_covers_every_contract_entity() {
         "sensor.energy_production_today",
         "sensor.energy_production_tomorrow",
         "sensor.power_production_now",
+        // battery state-of-charge (per pack unit)
+        "sensor.usoc_sonnen01",
+        "sensor.usoc_sonnen02",
         // authority
         "binary_sensor.hot_water_automated",
         "binary_sensor.dehumidifier_automated",

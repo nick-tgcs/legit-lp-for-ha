@@ -12,7 +12,7 @@ use crate::ha_client::{fold_history, on_predicate_binary, on_predicate_climate, 
 use crate::lp::LpPlanner;
 use crate::model::*;
 use crate::profile::Profiles;
-use crate::status::{LoadReport, SolveReport};
+use crate::status::{LoadReport, SolveReport, StorageReport};
 use crate::time::{in_window, local_midnight, Grid};
 
 pub struct Cycle {
@@ -52,6 +52,78 @@ async fn resolve_opt<A: HaApi>(
         Some(v) => resolve(ha, v, diags).await,
         None => None,
     }
+}
+
+/// Resolve one storage device from config + live reads. Averages the per-unit
+/// SoC percentages into a kWh charge (clamped into [reserve, max]), reads any
+/// availability sensor, and resolves each goal's `ValueRef`s. Returns None (with
+/// a diagnostic) if no SoC sensor is readable this cycle — the plan then
+/// proceeds without this device rather than guessing its charge.
+async fn build_storage<A: HaApi>(
+    ha: &A,
+    sc: &config::StorageConfig,
+    diags: &mut Vec<String>,
+) -> Option<StorageInput> {
+    let mut socs = Vec::new();
+    for e in &sc.soc_entities {
+        if let Some(v) = f64_of(ha, e, diags).await {
+            socs.push(v);
+        }
+    }
+    if socs.is_empty() {
+        diags.push(format!("storage '{}': SoC unreadable; unmodelled this cycle", sc.id));
+        return None;
+    }
+    let avg_pct = socs.iter().sum::<f64>() / socs.len() as f64;
+    let min_kwh = sc.reserve_soc_pct / 100.0 * sc.capacity_kwh;
+    let max_kwh = sc.max_soc_pct / 100.0 * sc.capacity_kwh;
+    let soc_now = (avg_pct / 100.0 * sc.capacity_kwh).clamp(min_kwh, max_kwh);
+    let available = match &sc.available_entity {
+        Some(e) => state_of(ha, e, diags).await.and_then(|s| s.as_on_off()).unwrap_or(false),
+        None => true,
+    };
+    let mut goals = Vec::new();
+    for g in &sc.goals {
+        match g {
+            config::StorageGoalCfg::Target { soc_pct, ready_by } => {
+                if let (Some(pct), Ok(rb)) = (
+                    resolve(ha, soc_pct, diags).await,
+                    chrono::NaiveTime::parse_from_str(ready_by, "%H:%M"),
+                ) {
+                    goals.push(StorageGoal::Target {
+                        soc_kwh: (pct / 100.0 * sc.capacity_kwh).clamp(0.0, max_kwh),
+                        ready_by: rb,
+                    });
+                }
+            }
+            config::StorageGoalCfg::Price { below, up_to_soc_pct } => {
+                if let Some(b) = resolve(ha, below, diags).await {
+                    let up = match up_to_soc_pct {
+                        Some(v) => resolve(ha, v, diags).await.unwrap_or(100.0),
+                        None => 100.0,
+                    };
+                    goals.push(StorageGoal::Price {
+                        below: b,
+                        up_to_kwh: (up / 100.0 * sc.capacity_kwh).clamp(0.0, max_kwh),
+                    });
+                }
+            }
+        }
+    }
+    Some(StorageInput {
+        id: sc.id.clone(),
+        capacity_kwh: sc.capacity_kwh,
+        soc_now_kwh: soc_now,
+        min_soc_kwh: min_kwh,
+        max_soc_kwh: max_kwh,
+        max_charge_kw: sc.max_charge_kw,
+        max_discharge_kw: sc.max_discharge_kw,
+        round_trip_efficiency: sc.round_trip_efficiency,
+        allow_grid_charge: sc.allow_grid_charge,
+        available,
+        cycle_cost_aud_per_kwh: sc.cycle_cost_aud_per_kwh,
+        goals,
+    })
 }
 
 /// Absolute range of the CURRENT instance of a daily window, up to `now`
@@ -259,6 +331,14 @@ impl Cycle {
             }
         }
 
+        // ---- site storage (optional): live SoC reads, no control ----
+        let mut storage = Vec::new();
+        for sc in &g.storage {
+            if let Some(s) = build_storage(ha, sc, &mut diags).await {
+                storage.push(s);
+            }
+        }
+
         let world = WorldState {
             now,
             global_enabled,
@@ -267,6 +347,7 @@ impl Cycle {
             feedin: prices.feedin,
             pv,
             baseload,
+            storage,
         };
         let out = self.planner.plan(&world, &contracts);
         let executed = Executor { dry_run: self.dry_run }
@@ -282,6 +363,39 @@ impl Cycle {
             pv_now: pv_now_kw,
             consumption_now: cons_now_kw,
             grid: out.grid.iter().map(|t| t.to_rfc3339()).collect(),
+            // Grid-aligned forecast context for the panel (mirrors WorldState).
+            price: world.import.clone(),
+            feedin: world.feedin.clone(),
+            pv: world.pv.clone(),
+            baseload: world.baseload.clone(),
+            grid_kw: out.grid_kw.clone(),
+            storage: out
+                .storage
+                .iter()
+                .map(|b| {
+                    let charge_now = b.charge_kw.first().copied().unwrap_or(0.0);
+                    let discharge_now = b.discharge_kw.first().copied().unwrap_or(0.0);
+                    let action = if charge_now > 1e-3 {
+                        "charging"
+                    } else if discharge_now > 1e-3 {
+                        "discharging"
+                    } else {
+                        "idle"
+                    };
+                    StorageReport {
+                        id: b.id.clone(),
+                        capacity_kwh: b.capacity_kwh,
+                        min_soc_kwh: b.min_soc_kwh,
+                        max_soc_kwh: b.max_soc_kwh,
+                        soc_now_kwh: b.soc_kwh.first().copied().unwrap_or(0.0),
+                        soc_kwh: b.soc_kwh.clone(),
+                        charge_kw: b.charge_kw.clone(),
+                        discharge_kw: b.discharge_kw.clone(),
+                        action: action.into(),
+                        target_unmet: b.target_unmet,
+                    }
+                })
+                .collect(),
             loads: out
                 .decisions
                 .iter()

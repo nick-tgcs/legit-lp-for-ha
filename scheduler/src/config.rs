@@ -44,6 +44,9 @@ pub struct GlobalConfig {
     pub enabled_entity: String,
     pub pricing: PricingConfig,
     pub power: Option<PowerConfig>,
+    /// Site storage devices (home batteries, EVs, …). Omit/empty if none.
+    #[serde(default)]
+    pub storage: Vec<StorageConfig>,
     #[serde(default)]
     pub planning: PlanningConfig,
     /// Site-wide hard rules: reserved; v1 rejects non-empty.
@@ -92,6 +95,69 @@ pub struct PvForecastConfig {
     pub today_entity: String,
     pub tomorrow_entity: String,
     pub now_entity: String,
+}
+
+/// One site storage device (a home battery, an EV, …). All energy in kWh, power
+/// in kW. The scheduler plans and reports each device's optimal trajectory but
+/// never *commands* it — there are no control entities here; control is a
+/// deliberate, separate step.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StorageConfig {
+    pub id: String,
+    /// State-of-charge sensors (%), one per pack unit; averaged to a device SoC.
+    pub soc_entities: Vec<String>,
+    /// Total usable capacity (kWh).
+    pub capacity_kwh: f64,
+    pub max_charge_kw: f64,
+    /// 0 (the default) = charge-only, e.g. an EV without V2G.
+    #[serde(default)]
+    pub max_discharge_kw: f64,
+    /// Round-trip efficiency in (0,1].
+    #[serde(default = "default_round_trip")]
+    pub round_trip_efficiency: f64,
+    /// Reserve floor and usable ceiling, as a percentage of `capacity_kwh`.
+    #[serde(default)]
+    pub reserve_soc_pct: f64,
+    #[serde(default = "default_max_soc_pct")]
+    pub max_soc_pct: f64,
+    /// If false, may only charge from instantaneous PV (never the grid).
+    #[serde(default = "default_true")]
+    pub allow_grid_charge: bool,
+    /// Optional binary sensor; when off the device is idle (e.g. EV unplugged).
+    pub available_entity: Option<String>,
+    /// Throughput wear cost (AUD/kWh) — breaks indifference vs idle cycling.
+    #[serde(default = "default_cycle_cost")]
+    pub cycle_cost_aud_per_kwh: f64,
+    /// Composable charging goals (deadline targets, opportunistic price). A
+    /// dischargeable device self-arbitrages even with no goals.
+    #[serde(default)]
+    pub goals: Vec<StorageGoalCfg>,
+}
+
+/// A storage charging goal. Multiple goals compose on one device — e.g. an EV
+/// with both a morning target and opportunistic cheap top-ups.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StorageGoalCfg {
+    /// Charge to `soc_pct` by the next occurrence of `ready_by` ("HH:MM"), as
+    /// cheaply as possible. Soft — shortfall is reported, never forced.
+    Target { soc_pct: ValueRef, ready_by: String },
+    /// Charge while import price is below `below` ($/kWh), up to `up_to_soc_pct`
+    /// (default 100). The "just charge when it's cheap" policy.
+    Price { below: ValueRef, up_to_soc_pct: Option<ValueRef> },
+}
+
+fn default_round_trip() -> f64 {
+    0.9
+}
+fn default_max_soc_pct() -> f64 {
+    100.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_cycle_cost() -> f64 {
+    0.001
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -301,6 +367,13 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
     if !(1..=48).contains(&h) {
         return err(format!("planning.horizon_hours must be 1..=48, got {h}"));
     }
+    let mut storage_ids = std::collections::HashSet::new();
+    for s in &cfg.global.storage {
+        if !storage_ids.insert(&s.id) {
+            return err(format!("duplicate storage id '{}'", s.id));
+        }
+        validate_storage(s)?;
+    }
 
     let mut seen = std::collections::HashSet::new();
     for l in &cfg.loads {
@@ -362,6 +435,48 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
                     ));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
+    let err = |m: String| Err(SchedulerError::Config(m));
+    if s.id.is_empty() {
+        return err("storage device needs a non-empty id".into());
+    }
+    if s.soc_entities.is_empty() {
+        return err(format!("storage '{}': soc_entities must list at least one sensor", s.id));
+    }
+    if !s.capacity_kwh.is_finite() || s.capacity_kwh <= 0.0 {
+        return err(format!("storage '{}': capacity_kwh must be > 0", s.id));
+    }
+    if s.max_charge_kw <= 0.0 || s.max_discharge_kw < 0.0 {
+        return err(format!(
+            "storage '{}': max_charge_kw must be > 0 and max_discharge_kw >= 0 (0 = charge-only)",
+            s.id
+        ));
+    }
+    if s.round_trip_efficiency <= 0.0 || s.round_trip_efficiency > 1.0 {
+        return err(format!("storage '{}': round_trip_efficiency must be in (0,1]", s.id));
+    }
+    if !(0.0..=100.0).contains(&s.reserve_soc_pct)
+        || !(0.0..=100.0).contains(&s.max_soc_pct)
+        || s.reserve_soc_pct >= s.max_soc_pct
+    {
+        return err(format!(
+            "storage '{}': reserve_soc_pct ({}) must be < max_soc_pct ({}), within 0..=100",
+            s.id, s.reserve_soc_pct, s.max_soc_pct
+        ));
+    }
+    for g in &s.goals {
+        if let StorageGoalCfg::Target { ready_by, .. } = g {
+            NaiveTime::parse_from_str(ready_by, "%H:%M").map_err(|e| {
+                SchedulerError::Config(format!(
+                    "storage '{}': bad ready_by '{ready_by}': {e}",
+                    s.id
+                ))
+            })?;
         }
     }
     Ok(())
@@ -446,6 +561,103 @@ mod tests {
         let cap = &cfg.loads[2].capability;
         assert!(cap.change_per_hour.is_some() && cap.drift_per_hour.is_some());
         assert_eq!(cap.ambient_entity.as_deref(), Some("sensor.temp_outside"));
+
+        // One site storage device parsed, with defaults applied where omitted.
+        assert_eq!(cfg.global.storage.len(), 1);
+        let b = &cfg.global.storage[0];
+        assert_eq!(b.id, "sonnen");
+        assert_eq!(b.soc_entities, ["sensor.usoc_sonnen01", "sensor.usoc_sonnen02"]);
+        assert_eq!(b.capacity_kwh, 20.0);
+        assert_eq!(b.max_discharge_kw, 8.0);
+        assert_eq!(b.round_trip_efficiency, 0.9);
+        assert_eq!(b.reserve_soc_pct, 10.0);
+        assert!(b.allow_grid_charge && b.goals.is_empty());
+        assert_eq!(b.cycle_cost_aud_per_kwh, default_cycle_cost());
+    }
+
+    #[test]
+    fn storage_list_parses_devices_goals_and_defaults() {
+        let yaml = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - id: home
+      soc_entities: [sensor.home_soc]
+      capacity_kwh: 10
+      max_charge_kw: 5
+      max_discharge_kw: 5
+    - id: ev
+      soc_entities: [sensor.ev_soc]
+      capacity_kwh: 60
+      max_charge_kw: 7
+      available_entity: binary_sensor.ev_plugged_in
+      goals:
+        - kind: target
+          soc_pct: { value: 80 }
+          ready_by: \"07:00\"
+        - kind: price
+          below: { value: 0.10 }
+loads: []
+";
+        let cfg = parse(yaml).expect("storage list parses");
+        assert_eq!(cfg.global.storage.len(), 2);
+        let home = &cfg.global.storage[0];
+        assert_eq!(home.round_trip_efficiency, 0.9);
+        assert_eq!(home.max_soc_pct, 100.0);
+        assert_eq!(home.reserve_soc_pct, 0.0);
+        assert!(home.allow_grid_charge && home.available_entity.is_none());
+        let ev = &cfg.global.storage[1];
+        assert_eq!(ev.max_discharge_kw, 0.0, "charge-only by default");
+        assert_eq!(ev.available_entity.as_deref(), Some("binary_sensor.ev_plugged_in"));
+        assert_eq!(ev.goals.len(), 2);
+        assert!(
+            matches!(&ev.goals[0], StorageGoalCfg::Target { ready_by, .. } if ready_by == "07:00")
+        );
+        assert!(matches!(&ev.goals[1], StorageGoalCfg::Price { .. }));
+    }
+
+    #[test]
+    fn rejects_storage_reserve_at_or_above_max() {
+        let r = mutate_example("reserve_soc_pct: 10", "reserve_soc_pct: 100");
+        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("reserve_soc_pct")));
+    }
+
+    #[test]
+    fn rejects_storage_with_nonpositive_capacity() {
+        let r = mutate_example("capacity_kwh: 20.0", "capacity_kwh: 0.0");
+        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("capacity_kwh")));
+    }
+
+    #[test]
+    fn rejects_bad_ready_by_and_duplicate_storage_ids() {
+        let bad_time = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - id: ev
+      soc_entities: [sensor.s]
+      capacity_kwh: 10
+      max_charge_kw: 5
+      goals: [{ kind: target, soc_pct: { value: 80 }, ready_by: \"99:99\" }]
+loads: []
+";
+        assert!(
+            matches!(parse(bad_time), Err(SchedulerError::Config(m)) if m.contains("ready_by"))
+        );
+        let dup = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - { id: a, soc_entities: [sensor.s1], capacity_kwh: 10, max_charge_kw: 5 }
+    - { id: a, soc_entities: [sensor.s2], capacity_kwh: 10, max_charge_kw: 5 }
+loads: []
+";
+        assert!(
+            matches!(parse(dup), Err(SchedulerError::Config(m)) if m.contains("duplicate storage"))
+        );
     }
 
     #[test]

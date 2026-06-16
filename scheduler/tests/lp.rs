@@ -266,3 +266,318 @@ fn l12_two_loads_compete_for_one_surplus() {
         assert!(both <= 1, "step {t}: both loads on would breach the surplus");
     }
 }
+
+// ---- site balance reporting (grid_kw) ----------------------------------
+
+#[test]
+fn g1_grid_kw_imports_baseload_when_no_pv_or_loads() {
+    // Observe-only world: no managed loads, no PV. Net grid = baseload (import).
+    let now = sydney(2026, 6, 10, 12, 0);
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[]);
+    assert_eq!(out.grid_kw.len(), STEPS, "grid_kw is grid-sized even with no loads");
+    for g in &out.grid_kw {
+        assert!((g - 0.8).abs() < 1e-6, "imports the 0.8 kW baseload, got {g}");
+    }
+    assert!(out.storage.is_empty(), "no storage configured");
+}
+
+#[test]
+fn g2_grid_kw_exports_pv_surplus() {
+    // PV 3 kW over 0.8 kW baseload -> 2.2 kW exported (grid_kw negative).
+    let now = sydney(2026, 6, 10, 12, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.pv.iter_mut().for_each(|p| *p = 3.0);
+    let out = planner().plan(&world, &[]);
+    for g in &out.grid_kw {
+        assert!((g - (0.8 - 3.0)).abs() < 1e-6, "exports the 2.2 kW surplus, got {g}");
+    }
+}
+
+// ---- storage device model ----------------------------------------------
+
+/// flat_world + one home battery, then a cheap and an expensive price window.
+fn battery_arb_world(now: chrono::DateTime<chrono_tz::Tz>) -> WorldState {
+    let mut w = flat_world(now, STEPS, 0.20);
+    for t in 4..8 {
+        w.import[t] = Some(0.05); // cheap valley
+    }
+    for t in 40..44 {
+        w.import[t] = Some(0.50); // expensive peak
+    }
+    w.storage = vec![test_storage()];
+    w
+}
+
+#[test]
+fn b1_battery_charges_cheap_and_discharges_expensive() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    let out = planner().plan(&battery_arb_world(now), &[]);
+    let b = out.storage.first().expect("storage plan present");
+    assert_eq!(b.id, "battery");
+    assert_eq!(b.soc_kwh.len(), STEPS + 1, "soc trajectory is grid+1");
+    assert_eq!(b.charge_kw.len(), STEPS);
+    assert!(b.charge_kw[4..8].iter().any(|&c| c > 0.1), "charges across the cheap valley");
+    assert!(b.discharge_kw[40..44].iter().any(|&d| d > 0.1), "discharges across the peak");
+    assert!(b.soc_kwh[8] > b.soc_kwh[4] + 0.5, "SoC climbs over the cheap valley");
+    assert!(b.soc_kwh[44] < b.soc_kwh[40] - 0.5, "SoC falls over the peak");
+}
+
+#[test]
+fn b2_battery_stays_within_soc_bounds() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    let out = planner().plan(&battery_arb_world(now), &[]);
+    let b = &out.storage[0];
+    for s in &b.soc_kwh {
+        assert!(*s >= b.min_soc_kwh - 1e-6 && *s <= b.max_soc_kwh + 1e-6, "SoC {s} out of bounds");
+    }
+}
+
+#[test]
+fn b3_battery_never_charges_and_discharges_at_once() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    // Add a price crossover (feed-in above import) — the classic bait for
+    // simultaneous charge+discharge. The mutex must forbid it.
+    let mut world = battery_arb_world(now);
+    for t in 60..64 {
+        world.import[t] = Some(0.02);
+        world.feedin[t] = 0.40;
+    }
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    for t in 0..STEPS {
+        assert!(
+            !(b.charge_kw[t] > 1e-3 && b.discharge_kw[t] > 1e-3),
+            "step {t}: charging {} and discharging {} at once",
+            b.charge_kw[t],
+            b.discharge_kw[t]
+        );
+    }
+}
+
+#[test]
+fn b4_flat_prices_hold_soc_flat_no_dump_no_churn() {
+    // No arbitrage signal: the terminal valuation + wear cost must keep the
+    // pack where it started — neither dumped to the floor nor cycled.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!((b.soc_kwh[STEPS] - b.soc_kwh[0]).abs() < 0.1, "end SoC ~ start SoC under flat price");
+    assert!(b.charge_kw.iter().all(|&c| c < 1e-2), "no charging without a price signal");
+    assert!(b.discharge_kw.iter().all(|&d| d < 1e-2), "no discharging without a price signal");
+}
+
+#[test]
+fn b5_grid_charge_policy_gates_charging_from_the_grid() {
+    // Cheap night, no solar. With grid-charging ON the pack fills from the grid;
+    // with it OFF (solar-only) the pack cannot charge at all.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.30);
+    for t in 4..8 {
+        world.import[t] = Some(0.02); // cheap window, but pv is 0 everywhere
+    }
+    for t in 40..44 {
+        world.import[t] = Some(0.60); // peak to make arbitrage worthwhile
+    }
+
+    let mut on = test_storage();
+    on.allow_grid_charge = true;
+    on.soc_now_kwh = 1.0; // start empty so charging is the only way to arbitrage
+    let mut w_on = world.clone();
+    w_on.storage = vec![on];
+    let plan = planner().plan(&w_on, &[]);
+    let charged: f64 = plan.storage[0].charge_kw.iter().sum();
+    assert!(charged > 1.0, "grid-charging ON should fill from the cheap grid, got {charged}");
+
+    let mut off = test_storage();
+    off.allow_grid_charge = false;
+    off.soc_now_kwh = 1.0;
+    let mut w_off = world;
+    w_off.storage = vec![off];
+    let out = planner().plan(&w_off, &[]);
+    for (t, &c) in out.storage[0].charge_kw.iter().enumerate() {
+        assert!(c < 1e-3, "solar-only battery must not grid-charge; step {t} charged {c}");
+    }
+}
+
+#[test]
+fn b6_battery_discharge_exports_beyond_pv() {
+    // pv is 0, but a feed-in spike makes exporting stored energy worthwhile.
+    // The export bound must allow grid export to exceed PV by the discharge.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.10);
+    world.feedin.iter_mut().for_each(|f| *f = 0.02);
+    for t in 40..44 {
+        world.feedin[t] = 0.50; // export premium
+    }
+    let mut bat = test_storage();
+    bat.soc_now_kwh = 10.0; // full, ready to export
+    world.storage = vec![bat];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(b.discharge_kw[40..44].iter().any(|&d| d > 0.5), "discharges into the export premium");
+    // pv is 0 yet net grid is a strong export at the spike -> bound fix works.
+    assert!(
+        out.grid_kw[40..44].iter().any(|&g| g < -1.0),
+        "net export exceeds PV (which is zero) via battery discharge: {:?}",
+        &out.grid_kw[40..44]
+    );
+}
+
+#[test]
+fn b7_solar_charges_battery_when_grid_charge_disallowed() {
+    // Expensive grid all day, a midday PV surplus, evening is still expensive:
+    // a solar-only battery soaks the surplus (charging only where pv > 0).
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.45);
+    for t in 48..56 {
+        world.pv[t] = 4.0; // midday surplus over the 0.8 baseload
+    }
+    let mut bat = test_storage();
+    bat.allow_grid_charge = false;
+    bat.soc_now_kwh = 1.0;
+    world.storage = vec![bat];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(b.charge_kw[48..56].iter().any(|&c| c > 0.1), "soaks the midday solar surplus");
+    for t in 0..STEPS {
+        let pv = world.pv[t].max(0.0);
+        assert!(b.charge_kw[t] <= pv + 1e-6, "step {t}: charge {} exceeds PV {pv}", b.charge_kw[t]);
+    }
+}
+
+/// A charge-only EV (no discharge), empty, plugged in.
+fn test_ev() -> StorageInput {
+    StorageInput {
+        id: "ev".into(),
+        capacity_kwh: 60.0,
+        soc_now_kwh: 6.0,
+        min_soc_kwh: 0.0,
+        max_soc_kwh: 60.0,
+        max_charge_kw: 7.0,
+        max_discharge_kw: 0.0, // charge-only
+        round_trip_efficiency: 0.95,
+        allow_grid_charge: true,
+        available: true,
+        cycle_cost_aud_per_kwh: 0.0,
+        goals: vec![],
+    }
+}
+
+#[test]
+fn b8_charge_only_ev_without_goals_does_not_charge() {
+    // No discharge => no terminal value => no economic reason to charge. A
+    // goal-less EV must just sit (charging it would be a pure loss).
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    for t in 8..16 {
+        world.import[t] = Some(0.02); // cheap, but no goal wants it
+    }
+    world.storage = vec![test_ev()];
+    let out = planner().plan(&world, &[]);
+    assert!(out.storage[0].charge_kw.iter().all(|&c| c < 1e-2), "no goal => no charging");
+}
+
+#[test]
+fn b9_ev_target_charges_to_percent_by_deadline_as_cheap_as_possible() {
+    // EV at 22:00 must reach 50% (30 kWh) of 60 kWh by 07:00. Cheap window
+    // 02:00-04:00 (steps 16..24); expensive elsewhere. It should fill in the
+    // cheap window and arrive at/above target by the deadline step.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut world = flat_world(now, STEPS, 0.40);
+    for t in 16..32 {
+        world.import[t] = Some(0.05); // 02:00-06:00 cheap (ample to fill before 07:00)
+    }
+    let mut ev = test_ev();
+    ev.goals = vec![StorageGoal::Target { soc_kwh: 30.0, ready_by: t(7, 0) }];
+    world.storage = vec![ev];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    // 07:00 is step 36 from 22:00 at 15-min steps; SoC there must reach target.
+    assert!(b.soc_kwh[36] >= 30.0 - 0.2, "reaches 30 kWh by 07:00, got {}", b.soc_kwh[36]);
+    assert!(b.target_unmet < 0.2, "target met (slack ~ 0), got {}", b.target_unmet);
+    // The charging concentrates in the cheap window, not the pricey steps.
+    let cheap: f64 = b.charge_kw[16..32].iter().sum();
+    let total: f64 = b.charge_kw.iter().sum();
+    assert!(cheap > 0.9 * total, "fills in the cheap window: {cheap} of {total}");
+}
+
+#[test]
+fn b10_ev_target_reports_unmet_when_unreachable() {
+    // Plugged in only at 06:00 (now), 7 kW max, 1h to 07:00 -> at most ~7 kWh,
+    // but target is 30 kWh: honest shortfall, never forced.
+    let now = sydney(2026, 6, 10, 6, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    let mut ev = test_ev();
+    ev.soc_now_kwh = 0.0;
+    ev.goals = vec![StorageGoal::Target { soc_kwh: 30.0, ready_by: t(7, 0) }];
+    world.storage = vec![ev];
+    let out = planner().plan(&world, &[]);
+    assert!(out.storage[0].target_unmet > 15.0, "big honest shortfall");
+}
+
+#[test]
+fn b11_price_goal_charges_when_cheap_up_to_cap() {
+    // Charge-only EV with a price goal: top up while import < 0.10, up to 18 kWh.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut world = flat_world(now, STEPS, 0.30); // mostly above the ceiling
+    for t in 8..20 {
+        world.import[t] = Some(0.05); // a long cheap window below 0.10
+    }
+    let mut ev = test_ev();
+    ev.soc_now_kwh = 6.0;
+    ev.goals = vec![StorageGoal::Price { below: 0.10, up_to_kwh: 18.0 }];
+    world.storage = vec![ev];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(
+        b.soc_kwh[STEPS] >= 17.0,
+        "fills toward the 18 kWh cap when cheap, got {}",
+        b.soc_kwh[STEPS]
+    );
+    // Charging happens in the cheap window, not the expensive baseline.
+    let cheap: f64 = b.charge_kw[8..20].iter().sum();
+    let total: f64 = b.charge_kw.iter().sum();
+    assert!(total > 9.0 && cheap > 0.9 * total, "charges only while cheap: {cheap} of {total}");
+}
+
+#[test]
+fn b12_two_devices_are_planned_independently() {
+    // A home battery (arbitrages) and a charge-only EV (target) coexist; both
+    // get plans and both feed the one site balance.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut world = flat_world(now, STEPS, 0.40);
+    for t in 16..24 {
+        world.import[t] = Some(0.05);
+    }
+    for t in 40..44 {
+        world.import[t] = Some(0.60); // peak for the battery to discharge into
+    }
+    let mut ev = test_ev();
+    ev.goals = vec![StorageGoal::Target { soc_kwh: 30.0, ready_by: t(7, 0) }];
+    world.storage = vec![test_storage(), ev];
+    let out = planner().plan(&world, &[]);
+    assert_eq!(out.storage.len(), 2);
+    let battery = out.storage.iter().find(|s| s.id == "battery").unwrap();
+    let car = out.storage.iter().find(|s| s.id == "ev").unwrap();
+    assert!(battery.discharge_kw[40..44].iter().any(|&d| d > 0.1), "battery arbitrages the peak");
+    assert!(car.soc_kwh[36] >= 30.0 - 0.3, "EV still meets its 07:00 target");
+    assert!(car.discharge_kw.iter().all(|&d| d < 1e-6), "charge-only EV never discharges");
+}
+
+#[test]
+fn b13_unavailable_device_stays_idle() {
+    // An unplugged EV (available=false) can neither charge nor discharge, even
+    // with a target it would otherwise chase.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let mut world = flat_world(now, STEPS, 0.05); // dirt cheap everywhere
+    let mut ev = test_ev();
+    ev.available = false;
+    ev.goals = vec![StorageGoal::Target { soc_kwh: 40.0, ready_by: t(7, 0) }];
+    world.storage = vec![ev];
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(b.charge_kw.iter().all(|&c| c < 1e-6), "unplugged EV cannot charge");
+    assert!(b.target_unmet > 30.0, "and its target is honestly unmet");
+}

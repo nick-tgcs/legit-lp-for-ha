@@ -11,19 +11,30 @@ h1{font-size:1.2rem;margin:0 0 4px}h2{font-size:.95rem;color:var(--muted);margin
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-size:.9rem;cursor:pointer}
 pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
+.legend{font-size:.72rem;color:var(--muted);margin:8px 0 0;line-height:1.8}
 img{width:100%}</style></head><body>
 <div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
 <p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button></p></div>
-<div class="card"><h2>Horizon</h2><img id="horizon" src="./horizon.svg" alt="horizon"></div>
+<div class="card"><h2>The plan · next horizon</h2><img id="horizon" src="./horizon.svg" alt="plan timeline">
+<p class="legend"><b style="color:#5c6bc0">━ import price</b> · <b style="color:#26a69a">┄ feed-in</b> · <b style="color:#ffb300">▰ solar</b> · <b style="color:#ef9a9a">▮ grid import</b> · <b style="color:#a5d6a7">▮ grid export</b> · <b style="color:#1e88e5">━ battery SoC</b> · <b style="color:#66bb6a">▮ charging</b> · <b style="color:#ffa726">▮ discharging</b> · <b style="color:#03a9f4">▮ load run</b> · <b style="color:#4caf50">▮ can-take</b></p></div>
 <div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
 <div class="card"><h2>Diagnostics</h2><pre id="diags"></pre></div>
 <script type="module">
 const chips=document.getElementById('chips'),loads=document.getElementById('loads'),diags=document.getElementById('diags');
 function render(r){
+ const f=(v,d=2)=>v==null?'?':(+v).toFixed(d);
+ const g0=(r.grid_kw&&r.grid_kw.length)?r.grid_kw[0]:null;
+ const gridChip=g0==null?'':`<span>grid ${g0>=0?'▲ import':'▼ export'} ${f(Math.abs(g0))} kW</span>`;
+ let battChip='';
+ (r.storage||[]).forEach(b=>{const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
+  const a=b.action==='charging'?'▲ charging':b.action==='discharging'?'▼ discharging':'idle';
+  const u=b.target_unmet>0.1?` · short ${f(b.target_unmet,1)} kWh`:'';
+  battChip+=`<span>🔋 ${b.id} ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}% · ${a}${u}</span>`;});
  chips.innerHTML=`<span class="${r.global_enabled?'on':'warn'}">${r.global_enabled?'enabled':'disabled'}</span>`
-  +(r.dry_run?'<span class="warn">DRY-RUN</span>':'')
-  +`<span>price ${r.price_now??'?'} /kWh</span><span>☀ ${r.pv_now??'?'} kW</span>`
-  +`<span>house ${r.consumption_now??'?'} kW</span><span>solve ${r.solver_ms} ms · ${r.at}</span>`;
+  +(r.dry_run?'<span class="warn">observing · dry-run</span>':'')
+  +`<span>price ${f(r.price_now,3)} /kWh</span><span>☀ ${f(r.pv_now)} kW</span>`
+  +`<span>house ${f(r.consumption_now)} kW</span>`+gridChip+battChip
+  +`<span>solve ${r.solver_ms} ms · ${r.at}</span>`;
  loads.innerHTML=r.loads.map(l=>`<div class="card"><h1>${l.id}</h1>
   <div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>
   <span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${l.planning}</span>
