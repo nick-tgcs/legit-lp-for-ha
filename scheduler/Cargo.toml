@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9" # archived upstream but stable/ubiquitous; swap for a maintained fork only if it bites
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.9"
+chrono-tz = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
