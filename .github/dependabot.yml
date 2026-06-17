@@ -1,6 +1,9 @@
 # Dependabot version-update PRs. These open against `develop` (NOT the default
 # branch `main`), so every dependency bump flows through the same PR validation
-# (test / build / addon-lint / audit) and branch ruleset as any other change.
+# (test / build / addon-lint / audit / coverage) and branch ruleset as any other
+# change. Once those required checks are green the PR merges itself — see
+# .github/workflows/dependabot-auto-merge.yml for the policy (all update types,
+# majors included) and the one backstop (release-only Docker actions).
 # GitHub's Dependabot *security* updates are enabled separately in repo settings
 # and also target develop; this file adds routine *version* bumps on top.
 version: 2
