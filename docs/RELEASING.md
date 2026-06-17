@@ -14,11 +14,15 @@
   - **`coverage`** — `cargo tarpaulin`, fails if line coverage drops below the
     floor in the Makefile (`COVERAGE_FLOOR`); uploads an HTML report artifact.
 
-  Required (merge-blocking) checks: `test`, `build`, `addon-lint`. `audit` and
-  `coverage` run on every PR but are **advisory until added to the ruleset's
-  required list** (the ruleset write needs an admin fine-grained PAT / the web
-  UI — a classic OAuth token gets a masked 404). Add them under
-  Settings → Rules → `protect-develop` → Require status checks.
+  All five are **required (merge-blocking)** on `develop`. `test`/`build`/
+  `addon-lint` are enforced by the `protect-develop` ruleset; `audit`/`coverage`
+  by a classic branch-protection rule on `develop`. GitHub enforces the **union**
+  of rulesets and branch protection, so a PR needs all five green to merge. The
+  split is a token limitation, not a design choice: a classic OAuth token can
+  write branch protection but not rulesets (the rulesets API 404s for it), so the
+  two newer checks live in branch protection. Fold them into the ruleset with an
+  admin fine-grained PAT whenever convenient — the enforcement is identical
+  either way.
 - **`main`** — released state only, and the repo's **default branch**. HA
   Supervisor clones a custom add-on repository's *default* branch and
   hard-resets to its tip on every store refresh — whatever is on `main` is
@@ -30,35 +34,39 @@
 
 ## Cutting a release
 
-1. On `develop`, bump `version:` in `addon/config.yaml` (the version is the
-   single source of truth — Supervisor pulls `image:<version>`, so the config
-   version and the GHCR image tag must be in lockstep).
-2. Run the **release** workflow on the `develop` branch
-   (Actions → release → Run workflow, or `make release`).
+1. On `develop`, bump `version:` in `addon/config.yaml` (the single source of
+   truth — Supervisor pulls `image:<version>`, so the config version and the
+   GHCR image tag must stay in lockstep).
+2. **`make release`** (or Actions → release → Run workflow on `develop`). CI:
+   - runs the full test gate (`make test`);
+   - builds the multi-arch image (amd64 + arm64) and pushes it to GHCR as
+     `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest`, with
+     `io.hass.version` stamped (`io.hass.arch`/`io.hass.type` come from the
+     Dockerfile).
 
-The pipeline then, in this order (the order matters — the store reads `main`'s
-tip immediately, so the image must be pullable *before* the version lands on
-`main`):
+   Then it **stops — it does not touch `main`.**
+3. **`make promote`** (locally, once the build above has published the image):
+   fast-forwards `main` onto `develop`'s tip, tags `v<version>`, and creates the
+   GitHub release with generated notes. Refuses if the tag already exists or the
+   image isn't on GHCR yet.
 
-1. full test gate (`make test`) — this is the `test` status check `main`'s
-   ruleset requires, so the promotion push below is self-authorising;
-2. multi-arch image (amd64 + arm64) built and pushed to GHCR as
-   `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest`, with
-   `io.hass.version` stamped (`io.hass.arch`/`io.hass.type` come from the
-   Dockerfile);
-3. fast-forward push of `develop` onto `main`;
-4. git tag `v<version>` + GitHub release with generated notes.
-
-Re-running a release for an existing tag fails fast: bump the version first.
+Why the split: advancing `main` across `.github/workflows/` changes needs a
+credential the Actions `GITHUB_TOKEN` lacks — it refuses to push workflow files
+(`refusing to allow a GitHub App to … update workflow … without 'workflows'
+permission`). A developer's SSH key has no such limit, so the promote runs from
+the CLI. The order matters — the store reads `main`'s tip immediately, so the
+image is published (step 2, in CI) *before* `main` moves (step 3). Re-running a
+release for an existing tag fails fast: bump the version first.
 
 ## Protection on `main`
 
 A repository ruleset (`protect-main`) enforces: no deletion, no force pushes,
 and the `test` status check on every pushed commit. There is deliberately no
-PR requirement on `main` — the release pipeline pushes directly, and its own
-`test` job satisfies the required check on the promoted SHA. (PR gating
-happens on the way into `develop`; a PR-only main would need a write deploy
-key as a ruleset bypass — considered and declined to keep releases simple.)
+PR requirement on `main` — `make promote` fast-forwards directly, and the
+promoted SHA already carries a green `test` from develop's CI, satisfying the
+required check. (PR gating happens on the way into `develop`; a PR-only main
+would need a deploy-key bypass — considered and declined to keep releases
+simple.)
 
 ## Build notes
 

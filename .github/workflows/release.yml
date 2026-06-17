@@ -1,20 +1,24 @@
-# Release pipeline: cut a release FROM develop. In order:
-#   1. full test gate (the `test` check the main ruleset requires)
-#   2. build + push the multi-arch image to GHCR, tagged <version> + latest
-#   3. fast-forward develop onto main (the add-on store reads main's tip,
-#      so the image MUST already be pullable when this lands — hence 2 first)
-#   4. tag v<version> + GitHub release
+# Release pipeline: build + publish the add-on image FROM develop. CI does the
+# part that needs a runner — the full test gate and the multi-arch GHCR push —
+# then STOPS. The develop->main promote + tag + GitHub release are a local
+# `make promote` step, NOT done here: advancing main across .github/workflows/
+# changes needs a credential the Actions GITHUB_TOKEN lacks (it refuses to push
+# workflow files), whereas a developer's SSH key may. The full flow:
+#   1. bump addon/config.yaml `version:` on develop
+#   2. `make release`  -> this workflow: test gate + multi-arch image to GHCR
+#   3. `make promote`  -> FF main onto develop's tip, tag v<version>, release
+# (the store reads main's tip, so the image MUST be pullable before main moves —
+# hence the image is published here, in CI, and main is advanced afterwards).
 # Version source of truth: addon/config.yaml `version:` (Supervisor pulls
 # image:<version>, so config version and image tag must be in lockstep).
-# Bump it on develop before dispatching; re-releasing an existing tag fails.
-# `timeout-minutes` caps the multi-arch (QEMU arm64) build — without it a
-# transient hang in that step can wedge the run for hours.
+# Re-releasing an existing tag is refused (bump first). `timeout-minutes` caps
+# the QEMU arm64 build so a hang fails fast instead of wedging the run.
 name: release
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
@@ -76,13 +80,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Promote develop onto main
-        run: git push origin HEAD:main
-      - name: Tag + GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image published — finish locally with `make promote`
         run: |
-          gh release create "v${{ steps.ver.outputs.version }}" \
-            --target "$GITHUB_SHA" \
-            --title "v${{ steps.ver.outputs.version }}" \
-            --generate-notes
+          v='${{ steps.ver.outputs.version }}'
+          echo "::notice title=Image published::ghcr.io/nick-tgcs/legit-lp-for-ha:$v is on GHCR. Finish the release locally: 'make promote' (fast-forwards main onto develop, tags v$v, creates the GitHub release — over SSH, which may advance main across workflow-file changes)."
