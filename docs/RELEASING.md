@@ -68,6 +68,40 @@ required check. (PR gating happens on the way into `develop`; a PR-only main
 would need a deploy-key bypass — considered and declined to keep releases
 simple.)
 
+## Dependency updates (Dependabot)
+
+Dependabot opens weekly version-update PRs (cargo, github-actions, docker) against
+`develop`, never `main`. Each runs the same required gate as any PR and, once all
+required checks are green, **merges itself** — `dependabot-auto-merge.yml` enables
+squash auto-merge and GitHub completes it only after the checks pass (a red check
+holds the PR for a human).
+
+**Every update type self-merges, majors included**, because the gate actually
+exercises the bump rather than just observing it:
+
+- **cargo** bumps are compiled and run through the full unit/integration/e2e
+  suite plus the coverage floor and `cargo audit`. A major that survives all of
+  that is validated at the API and behaviour level the tests assert.
+- **actions used in PR CI** (`actions/checkout`, `docker/setup-buildx-action`,
+  `docker/build-push-action`) run at their bumped version — a `pull_request` run
+  uses the PR's own workflow files, so the version under test is the one that
+  executes.
+
+Two actions a PR cannot exercise: `docker/setup-qemu-action` and
+`docker/login-action` only run during the release's multi-arch image *push*
+(`workflow_dispatch`), which no PR triggers. Their bumps still auto-merge; the
+backstop is `make release`, which builds multi-arch and fails before publishing
+if a bump broke it. Because the add-on ships inert and releases are manual, the
+worst case is a red release you fix before `make promote` — never a bad image on
+`main`. Moving the arm64 build to a native `ubuntu-24.04-arm` runner would delete
+the QEMU dependency and let a native matrix build exercise the push path on PRs
+too — a worthwhile follow-up, not required for safety.
+
+Why this is safe to fully automate: only PRs authored by `dependabot[bot]`
+self-merge (the actor gate — nothing else does), and they land on `develop`, not
+`main`. A surprising bump is caught in integration well before any release, and a
+release is a deliberate manual step on top.
+
 ## Build notes
 
 - `home-assistant/builder` (the legacy action) was **retired April 2026**; the

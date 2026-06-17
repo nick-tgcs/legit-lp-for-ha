@@ -1,8 +1,36 @@
-# Auto-merge Dependabot PRs — but only AFTER all required checks pass, never
-# before. We just *enable* auto-merge (squash); GitHub then completes the merge
-# itself once the develop ruleset's required checks (test/build/addon-lint/audit)
-# go green. Patch + minor bumps merge themselves; major bumps are left for a
-# human. Requires the repo setting "Allow auto-merge" = on.
+# Self-managing Dependabot. Every Dependabot PR opens against develop, runs the
+# full required gate, and — once ALL required checks are green — merges itself.
+# We only *enable* auto-merge (squash); GitHub performs the merge later, and only
+# after the develop ruleset's required checks pass (test = fmt + clippy -D + unit
+# + integration + e2e; build; addon-lint; audit; coverage). If any check is red,
+# the PR never merges and waits for a human.
+#
+# Every update type self-merges — patch, minor, AND major — because "green" here
+# means the bump was actually exercised, not just present:
+#   - cargo bumps are compiled and run through the whole unit/integration/e2e
+#     suite plus the tarpaulin coverage floor and `cargo audit`. A major that
+#     passes all of that is validated at the API and behaviour level the tests
+#     assert — the strongest signal we have, applied to every level equally.
+#   - actions used in PR CI (actions/checkout, docker/setup-buildx-action,
+#     docker/build-push-action) run at their bumped version: a `pull_request`
+#     run uses the PR's OWN workflow files, so the bump under test is the one
+#     that executes.
+#
+# Two actions a PR cannot exercise: docker/setup-qemu-action and
+# docker/login-action only run during the release's multi-arch image *push*
+# (release.yml, workflow_dispatch) — no PR triggers that, so no check touches
+# them. Their bumps still auto-merge; the backstop is `make release`, which
+# builds multi-arch and fails loudly before publishing if a bump broke it.
+# Because the add-on ships inert and releases are manual, the worst case is a red
+# release you fix before `make promote` — never a bad image on main. (Moving the
+# arm64 build to a native ubuntu-24.04-arm runner deletes the QEMU dependency and
+# lets a native matrix exercise the push path on PRs too — see docs/RELEASING.md.)
+#
+# Safety boundary: the actor gate (github.actor == 'dependabot[bot]') means ONLY
+# Dependabot's own PRs self-merge — nothing else. Majors land on develop, not
+# main, so a surprising bump surfaces in integration well before any release.
+# Requires repo setting "Allow auto-merge" = on. The permissions block grants the
+# write scopes Dependabot's otherwise read-only token needs to enable auto-merge.
 name: dependabot-auto-merge
 on: pull_request
 
@@ -16,13 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fetch Dependabot metadata
-        id: meta
-        uses: dependabot/fetch-metadata@v2
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Enable auto-merge for patch/minor
-        if: steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor'
+      - name: Enable auto-merge (GitHub completes it once required checks pass)
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
