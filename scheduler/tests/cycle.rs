@@ -37,6 +37,17 @@ fn canned_ha() -> RecordingHa {
         "input_boolean.lp_scheduler_preview".into(),
         json!({"state": "off", "attributes": {}}),
     );
+    // Dehumidifier run window (the user's "Run from / Run until"), read live by the
+    // LP load's hard window. Overnight 22:00 -> 11:00, so the 10:00 scenarios are
+    // in-window and unchanged.
+    ha.states.insert(
+        "input_datetime.input_datetime_indoor_comfort_dehumidifier_window_start".into(),
+        json!({"state": "22:00:00", "attributes": {}}),
+    );
+    ha.states.insert(
+        "input_datetime.input_datetime_indoor_comfort_dehumidifier_window_end".into(),
+        json!({"state": "11:00:00", "attributes": {}}),
+    );
     ha.states.insert("sensor.beckton_general_forecast".into(), fixture("forecast_amber.json"));
     // Amber-shaped feed-in (export) forecast on its OWN sensor, values varying
     // per slot. Dated to the injected `now` (10:00 Sydney == 00:00 UTC).
@@ -195,4 +206,41 @@ async fn c6_panel_preview_override_solves_observe_only_loads_without_controlling
     assert!(known.iter().all(|l| !l.on.is_empty()), "override solves observe-only loads");
     assert!(report.loads.iter().all(|l| !l.executed));
     assert!(ha.calls.lock().unwrap().is_empty(), "override must NOT call HA, even live");
+}
+
+#[tokio::test]
+async fn c7_dehumidifier_held_outside_its_run_window() {
+    // The reported bug, end to end: humid + cheap + authority, but the clock is
+    // OUTSIDE the user's configured run window (overnight 22:00 -> 11:00). It must
+    // be HELD, never started. 14:30 is the live screenshot time; we flatten the
+    // import forecast so the step-0 price is the flat current value (unambiguous).
+    let mut ha = canned_ha();
+    set_state(&mut ha, "sensor.humidity_average_inside", "80.0"); // humid
+    set_state(&mut ha, "sensor.current_grid_cost", "0.118"); // <= mh ceiling 0.155
+    set_state(&mut ha, "sensor.beckton_general_forecast", "0.118"); // flat: no forward curve
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on"); // authority granted
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 14, 30)).await;
+    let d = report.loads.iter().find(|l| l.id == "dehumidifier").unwrap();
+    assert!(!d.executed, "dehumidifier ran outside its 22:00-11:00 window: {}", d.reason);
+    assert!(
+        ha.calls.lock().unwrap().is_empty(),
+        "no service call may fire outside the window: {:?}",
+        ha.calls.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn c8_dehumidifier_runs_inside_its_run_window() {
+    // Guard against over-correction: the same humid + cheap + authority case, but
+    // now INSIDE the window (02:00) -> it must still start.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "sensor.humidity_average_inside", "80.0");
+    set_state(&mut ha, "sensor.current_grid_cost", "0.10");
+    set_state(&mut ha, "sensor.beckton_general_forecast", "0.10"); // flat: no forward curve
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on");
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    let d = report.loads.iter().find(|l| l.id == "dehumidifier").unwrap();
+    assert!(d.executed, "dehumidifier must run inside its 22:00-11:00 window: {}", d.reason);
 }
