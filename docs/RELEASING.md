@@ -34,39 +34,53 @@
 
 ## Cutting a release
 
+One command, entirely in CI — **validate off `develop`, build off `main`**:
+
 1. On `develop`, bump `version:` in `addon/config.yaml` (the single source of
    truth — Supervisor pulls `image:<version>`, so the config version and the
-   GHCR image tag must stay in lockstep).
-2. **`make release`** (or Actions → release → Run workflow on `develop`). CI:
-   - runs the full test gate (`make test`);
-   - builds the multi-arch image (amd64 + arm64) and pushes it to GHCR as
-     `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest`, with
-     `io.hass.version` stamped (`io.hass.arch`/`io.hass.type` come from the
-     Dockerfile).
+   GHCR image tag must stay in lockstep). This lands via a normal PR, so it is
+   `test`-gated like anything else.
+2. **`make release`** (or Actions → promote → Run workflow on `develop`). This
+   dispatches **`promote.yml`**, which:
+   - opens (or reuses) a `develop` → `main` PR;
+   - waits for the PR's required check (`test`, per `protect-main`) and **merges
+     it** — `main`'s tree is now develop's validated tip;
+   - dispatches **`release.yml`** on `main`, which builds the multi-arch image
+     (amd64 + arm64) off `main`, pushes it to GHCR as
+     `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest` (with
+     `io.hass.version` stamped), then tags `v<version>` and cuts the GitHub
+     release with generated notes.
 
-   Then it **stops — it does not touch `main`.**
-3. **`make promote`** (locally, once the build above has published the image):
-   fast-forwards `main` onto `develop`'s tip, tags `v<version>`, and creates the
-   GitHub release with generated notes. Refuses if the tag already exists or the
-   image isn't on GHCR yet.
+That is it — no local step. `release.yml` is idempotent: if `v<version>` is
+already tagged it no-ops, so a re-run cannot double-publish. `make release-build`
+is an escape hatch that re-runs just the build-off-`main` step (e.g. if the build
+dispatch was lost after the merge).
 
-Why the split: advancing `main` across `.github/workflows/` changes needs a
-credential the Actions `GITHUB_TOKEN` lacks — it refuses to push workflow files
-(`refusing to allow a GitHub App to … update workflow … without 'workflows'
-permission`). A developer's SSH key has no such limit, so the promote runs from
-the CLI. The order matters — the store reads `main`'s tip immediately, so the
-image is published (step 2, in CI) *before* `main` moves (step 3). Re-running a
-release for an existing tag fails fast: bump the version first.
+**Why a PR merge, not a push:** advancing `main` across `.github/workflows/`
+changes needs a credential the Actions `GITHUB_TOKEN` lacks — it refuses to
+*push* workflow files (`refusing to allow a GitHub App to … update workflow …
+without 'workflows' permission`). The same token is, however, allowed to *merge
+a PR* carrying them, so `promote.yml` merges instead of pushing. (This replaced
+the old local `make promote`, which used a developer's SSH key to push directly.)
+
+**Ordering note (build off `main`):** because the image is built *after* `main`
+advances, `main` advertises the new version for the build's duration. That is
+harmless here — the add-on ships inert and nothing auto-pulls; Supervisor fetches
+the new image only when you run `lp-setup update`, which you do *after* the
+`release.yml` build is green. (The old flow published the image before moving
+`main`; building off `main` inverts that, by design.)
 
 ## Protection on `main`
 
 A repository ruleset (`protect-main`) enforces: no deletion, no force pushes,
-and the `test` status check on every pushed commit. There is deliberately no
-PR requirement on `main` — `make promote` fast-forwards directly, and the
-promoted SHA already carries a green `test` from develop's CI, satisfying the
-required check. (PR gating happens on the way into `develop`; a PR-only main
-would need a deploy-key bypass — considered and declined to keep releases
-simple.)
+and the `test` status check. There is deliberately **no PR requirement** on the
+ruleset — but `promote.yml` still goes through a PR, because that is the only way
+the Actions token can land `.github/workflows/` changes on `main` (a direct push
+of workflow files is refused; a PR merge is not). The promote PR reruns `test`
+and merges on green, satisfying the required check. The result is a merge commit,
+which the `non_fast_forward` rule allows — that rule blocks history-rewriting
+force pushes, not ordinary descendant merges. `main`'s tree still equals
+develop's validated tip.
 
 ## Dependency updates (Dependabot)
 
@@ -88,19 +102,21 @@ exercises the bump rather than just observing it:
   executes.
 
 Two actions a PR cannot exercise: `docker/setup-qemu-action` and
-`docker/login-action` only run during the release's multi-arch image *push*
-(`workflow_dispatch`), which no PR triggers. Their bumps still auto-merge; the
-backstop is `make release`, which builds multi-arch and fails before publishing
-if a bump broke it. Because the add-on ships inert and releases are manual, the
-worst case is a red release you fix before `make promote` — never a bad image on
-`main`. Moving the arm64 build to a native `ubuntu-24.04-arm` runner would delete
-the QEMU dependency and let a native matrix build exercise the push path on PRs
-too — a worthwhile follow-up, not required for safety.
+`docker/login-action` only run in `release.yml` (the multi-arch image *push*, on
+`main`), which no PR triggers. Their bumps still auto-merge; the backstop is
+`release.yml`, which builds multi-arch off `main` and fails before it tags if a
+bump broke it. The worst case is a red `release.yml` after the promote merged —
+`main` has advanced but no image/tag was published (never a *bad* image, just no
+new one); the add-on ships inert and updates are manual, so there is no live
+impact. Fix the bump on `develop` and re-release. Moving the arm64 build to a
+native `ubuntu-24.04-arm` runner would delete the QEMU dependency and let a
+native matrix build exercise the push path on PRs too — a worthwhile follow-up,
+not required for safety.
 
 Why this is safe to fully automate: only PRs authored by `dependabot[bot]`
 self-merge (the actor gate — nothing else does), and they land on `develop`, not
 `main`. A surprising bump is caught in integration well before any release, and a
-release is a deliberate manual step on top.
+release is a deliberate one-command step (`make release`) on top.
 
 ## Build notes
 

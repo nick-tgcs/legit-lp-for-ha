@@ -18,13 +18,15 @@
 #
 # Two actions a PR cannot exercise: docker/setup-qemu-action and
 # docker/login-action only run during the release's multi-arch image *push*
-# (release.yml, workflow_dispatch) — no PR triggers that, so no check touches
-# them. Their bumps still auto-merge; the backstop is `make release`, which
-# builds multi-arch and fails loudly before publishing if a bump broke it.
-# Because the add-on ships inert and releases are manual, the worst case is a red
-# release you fix before `make promote` — never a bad image on main. (Moving the
-# arm64 build to a native ubuntu-24.04-arm runner deletes the QEMU dependency and
-# lets a native matrix exercise the push path on PRs too — see docs/RELEASING.md.)
+# (release.yml, on main) — no PR triggers that, so no check touches them. Their
+# bumps still auto-merge; the backstop is release.yml, which builds multi-arch
+# off main and fails loudly before it tags if a bump broke it. The worst case is
+# a red release.yml after the promote merged: main has advanced but no image/tag
+# was published — never a *bad* image, just no new one — and because the add-on
+# ships inert and updates are manual, there is no live impact. Fix the bump on
+# develop and re-release. (Moving the arm64 build to a native ubuntu-24.04-arm
+# runner deletes the QEMU dependency and lets a native matrix exercise the push
+# path on PRs too — see docs/RELEASING.md.)
 #
 # Safety boundary: the actor gate (github.actor == 'dependabot[bot]') means ONLY
 # Dependabot's own PRs self-merge — nothing else. Majors land on develop, not

@@ -1,7 +1,7 @@
 # PR validation + develop CI. The `test` job name is the required status
-# check on main's ruleset — every develop push gets it, so a release
-# (fast-forwarding develop onto main) always promotes a checked SHA.
-# `timeout-minutes` on every job so a hung step fails fast instead of
+# check on both rulesets — every develop push gets it, and it reruns on the
+# promote PR (develop -> main), so a release always advances main to a checked
+# SHA. `timeout-minutes` on every job so a hung step fails fast instead of
 # burning a runner (and a day) the way an untimed build can.
 name: validate
 on:
