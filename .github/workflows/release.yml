@@ -53,7 +53,7 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: steps.ver.outputs.release == 'true'
       - uses: docker/setup-buildx-action@v3
         if: steps.ver.outputs.release == 'true'
