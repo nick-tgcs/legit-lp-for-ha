@@ -1,0 +1,87 @@
+# Promote — the "validate off develop -> release off main" handoff, run entirely
+# in CI. The old promote was a local `git push origin <sha>:refs/heads/main`,
+# because the Actions GITHUB_TOKEN refuses to *push* .github/workflows/ changes
+# to main. It is, however, allowed to *merge a PR* that carries them — proven by
+# the workflow-file Dependabot PRs that self-merged — so this promotes via a PR.
+#
+# Run on develop: Actions -> promote -> Run workflow (or `make release`). It:
+#   1. opens (or reuses) a develop -> main PR;
+#   2. waits for the PR's REQUIRED check — `test`, per the protect-main ruleset
+#      (the heavier validate jobs also run but aren't required, so we don't wait);
+#   3. merges it (merge commit; main's tree == develop's validated tip);
+#   4. dispatches release.yml on main to build + publish + tag the image.
+# Idempotent: if main already contains develop's tip there's nothing to merge,
+# and it goes straight to dispatching the build (recovers a half-finished
+# release). release.yml itself no-ops if the version is already tagged.
+#
+# NOTE on ordering: this moves main BEFORE the image is built (build off main),
+# so main advertises the new version for the ~build duration. Harmless here —
+# the add-on ships inert and nothing auto-pulls; you run `lp-setup update` only
+# after the release build is green. See docs/RELEASING.md.
+name: promote
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Open or reuse develop -> main PR
+        id: pr
+        run: |
+          set -euo pipefail
+          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/develop:refs/remotes/origin/develop'
+          if git merge-base --is-ancestor origin/develop origin/main; then
+            echo "main already contains develop's tip — nothing to promote."
+            echo "merge=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          num=$(gh pr list --base main --head develop --state open --json number -q '.[0].number // empty')
+          if [ -z "$num" ]; then
+            url=$(gh pr create --base main --head develop \
+              --title "Release: promote develop -> main" \
+              --body "Automated promote (promote.yml): merge develop's validated tip onto main, then build off main (release.yml). Required check on main is \`test\`.")
+            num=$(echo "$url" | grep -oE '[0-9]+$')
+          fi
+          echo "Promote PR #$num"
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+          echo "merge=true" >> "$GITHUB_OUTPUT"
+      - name: Wait for required checks, then merge
+        if: steps.pr.outputs.merge == 'true'
+        run: |
+          set -euo pipefail
+          num='${{ steps.pr.outputs.num }}'
+          # Let validate.yml register its check runs on the PR before watching
+          # (avoids a no-checks-yet race that would error the watch immediately).
+          for _ in $(seq 1 30); do
+            cnt=$(gh pr checks "$num" --json name -q 'length' 2>/dev/null || echo 0)
+            [ "${cnt:-0}" -gt 0 ] && break
+            sleep 10
+          done
+          # Wait only for the REQUIRED checks (protect-main requires `test`);
+          # exits non-zero if a required check fails, which fails the promote.
+          gh pr checks "$num" --watch --required --interval 20
+          gh pr merge "$num" --merge --delete-branch=false
+      - name: Build off main (dispatch release.yml on main)
+        run: |
+          set -euo pipefail
+          # Wait until the merge has landed on main, then build off it.
+          for _ in $(seq 1 20); do
+            git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/develop:refs/remotes/origin/develop' || true
+            if git merge-base --is-ancestor origin/develop origin/main 2>/dev/null; then break; fi
+            sleep 6
+          done
+          gh workflow run release.yml --ref main
+          echo "::notice title=Promoted::main advanced to develop's tip; dispatched release.yml on main to build + tag."

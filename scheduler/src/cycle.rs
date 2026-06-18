@@ -62,6 +62,49 @@ async fn resolve_opt<A: HaApi>(
     }
 }
 
+/// Resolve a clock-time ref: a literal "HH:MM", or an HA entity's state (e.g. an
+/// `input_datetime` the user edits, reporting "HH:MM:SS"). None (with a
+/// diagnostic) when the entity is unreadable/unavailable or its state is not a
+/// time — callers fail closed rather than guess.
+async fn resolve_time<A: HaApi>(
+    ha: &A,
+    tr: &config::TimeRef,
+    diags: &mut Vec<String>,
+) -> Option<chrono::NaiveTime> {
+    match tr {
+        config::TimeRef::Literal(s) => config::parse_clock(s).ok(),
+        config::TimeRef::Entity { entity } => {
+            let st = state_of(ha, entity, diags).await?;
+            if st.is_unknown() {
+                diags.push(format!("{entity}: unavailable; window bound unresolved"));
+                return None;
+            }
+            match config::parse_clock(&st.state) {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    diags.push(format!(
+                        "{entity}: '{}' is not a clock time; window bound unresolved",
+                        st.state
+                    ));
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Resolve both bounds of a window; None if either bound is unresolved.
+async fn resolve_window<A: HaApi>(
+    ha: &A,
+    w: &config::WindowCfg,
+    diags: &mut Vec<String>,
+) -> Option<Window> {
+    Some(Window {
+        start: resolve_time(ha, &w.start, diags).await?,
+        end: resolve_time(ha, &w.end, diags).await?,
+    })
+}
+
 /// Read + parse a forecast sensor's slot array (provider field-map applied).
 /// A rejected/missing attribute yields an empty slot set (with a diagnostic);
 /// an unreadable entity yields empty (the read already logged its own).
@@ -241,10 +284,27 @@ impl Cycle {
         let midnight_utc = local_midnight(now).with_timezone(&Utc);
         let now_utc = now.with_timezone(&Utc);
         for l in &self.registry.loads {
-            let authority = state_of(ha, &l.authority.enabled_entity, &mut diags)
+            let mut authority = state_of(ha, &l.authority.enabled_entity, &mut diags)
                 .await
                 .and_then(|s| s.as_on_off())
                 .unwrap_or(false);
+            // Resolve hard run-windows (literals, or live entities like an
+            // input_datetime the user edits). Fail CLOSED: if a configured window
+            // can't be read, hold the load (observe-only) rather than let it run
+            // unconstrained — the absence of a window must never mean "run anytime".
+            let mut hard_windows = Vec::with_capacity(l.hard_rules.windows.len());
+            for w in &l.hard_rules.windows {
+                match resolve_window(ha, w, &mut diags).await {
+                    Some(win) => hard_windows.push(win),
+                    None => {
+                        diags.push(format!(
+                            "load '{}': run window unresolved; holding (observe-only)",
+                            l.id
+                        ));
+                        authority = false;
+                    }
+                }
+            }
             let is_climate = matches!(l.load_type, LoadTypeCfg::Aircon);
             let pred = if is_climate { on_predicate_climate } else { on_predicate_binary };
             let (running, fold) =
@@ -319,7 +379,7 @@ impl Cycle {
                         u64::from(l.hard_rules.min_off_minutes) * 60,
                     ),
                     max_starts_per_day: l.hard_rules.max_starts_per_day,
-                    windows: l.hard_rules.windows.iter().map(|w| w.parse().unwrap()).collect(),
+                    windows: hard_windows,
                 },
                 must_have: mh,
                 can_take: ct,
@@ -478,17 +538,25 @@ impl Cycle {
     ) -> Demand {
         match d {
             DemandCfg::Runtime { amount_hours, amount_minutes, max_minutes, window, max_price } => {
-                let mins = match resolve_opt(ha, amount_minutes, diags).await {
+                let mut mins = match resolve_opt(ha, amount_minutes, diags).await {
                     Some(m) => m.ceil().max(0.0) as u32,
                     None => match resolve_opt(ha, amount_hours, diags).await {
                         Some(h) => config::hours_to_minutes(h),
                         None => max_minutes.unwrap_or(0),
                     },
                 };
+                let window = match resolve_window(ha, window, diags).await {
+                    Some(w) => w,
+                    None => {
+                        diags.push("runtime window unresolved; demand disabled".into());
+                        mins = 0;
+                        Window { start: chrono::NaiveTime::MIN, end: chrono::NaiveTime::MIN }
+                    }
+                };
                 Demand {
                     kind: DemandKind::Runtime {
                         minutes: mins,
-                        window: window.parse().unwrap(),
+                        window,
                         completed_minutes: 0, // patched after the fold
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,
@@ -509,6 +577,10 @@ impl Cycle {
                 if target.is_none() {
                     diags.push("humidity target unresolved; demand disabled".into());
                 }
+                let window = match window {
+                    Some(w) => resolve_window(ha, w, diags).await,
+                    None => None,
+                };
                 Demand {
                     kind: DemandKind::HumidityBelow {
                         max: target.unwrap_or(f64::INFINITY),
@@ -518,7 +590,7 @@ impl Cycle {
                             .unwrap_or(0.0),
                         drop_per_hour: 0.0,
                         drift_per_hour: 0.0,
-                        window: window.as_ref().map(|w| w.parse().unwrap()),
+                        window,
                         cap_minutes: *max_minutes,
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,
@@ -529,16 +601,24 @@ impl Cycle {
                 if target.is_none() {
                     diags.push("temperature target unresolved; demand disabled".into());
                 }
+                let window = resolve_window(ha, window, diags).await;
+                if window.is_none() {
+                    diags.push("temperature window unresolved; demand disabled".into());
+                }
+                let active = target.is_some() && window.is_some();
                 let t = target.unwrap_or(f64::NAN);
                 Demand {
                     kind: DemandKind::TemperatureBand {
                         min: t - band_c,
                         max: t + band_c,
-                        observed: if target.is_some() { observed } else { None },
+                        observed: if active { observed } else { None },
                         change_per_hour: 0.0, // patched from capability below
                         drift_per_hour: 0.0,
                         ambient: None,
-                        window: window.parse().unwrap(),
+                        window: window.unwrap_or(Window {
+                            start: chrono::NaiveTime::MIN,
+                            end: chrono::NaiveTime::MIN,
+                        }),
                         cap_minutes: *max_minutes,
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,

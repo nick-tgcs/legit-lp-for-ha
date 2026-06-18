@@ -121,6 +121,13 @@ loads:
     hard_rules:
       min_run_minutes: 30
       min_off_minutes: 15
+      # Run ONLY within the user's window — the "Run from / Run until" controls on
+      # the Humidity card. Read live each cycle (entity-ref bounds), so editing the
+      # card re-times the scheduler. A window that wraps midnight (e.g. 22:00 ->
+      # 11:00) is handled. If a bound is unreadable the load is held, not run.
+      windows:
+        - start: { entity: input_datetime.input_datetime_indoor_comfort_dehumidifier_window_start }
+          end: { entity: input_datetime.input_datetime_indoor_comfort_dehumidifier_window_end }
     must_have:
       kind: humidity_below
       max_percent: { entity: input_number.input_number_indoor_comfort_humidity_target_percent }

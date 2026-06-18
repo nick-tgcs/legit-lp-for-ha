@@ -7,7 +7,6 @@ use chrono::NaiveTime;
 use serde::Deserialize;
 
 use crate::error::SchedulerError;
-use crate::model::Window;
 
 /// A number that is either a literal or read live from an HA entity each cycle.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -17,19 +16,42 @@ pub enum ValueRef {
     Entity { entity: String },
 }
 
+/// A clock time that is either a literal "HH:MM" or read live from an HA entity
+/// (e.g. an `input_datetime` the user edits) each cycle. This lets a load's run
+/// window track a UI control instead of being baked into the registry.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TimeRef {
+    Literal(String),
+    Entity { entity: String },
+}
+
+/// Parse a clock string, accepting both "HH:MM" (registry literals) and "HH:MM:SS"
+/// (the shape `input_datetime` entities report their state in).
+pub fn parse_clock(s: &str) -> Result<NaiveTime, SchedulerError> {
+    let s = s.trim();
+    NaiveTime::parse_from_str(s, "%H:%M:%S")
+        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
+        .map_err(|e| SchedulerError::Config(format!("bad window time '{s}': {e}")))
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WindowCfg {
-    pub start: String,
-    pub end: String,
+    pub start: TimeRef,
+    pub end: TimeRef,
 }
 
 impl WindowCfg {
-    pub fn parse(&self) -> Result<Window, SchedulerError> {
-        let parse = |s: &str| {
-            NaiveTime::parse_from_str(s, "%H:%M")
-                .map_err(|e| SchedulerError::Config(format!("bad window time '{s}': {e}")))
-        };
-        Ok(Window { start: parse(&self.start)?, end: parse(&self.end)? })
+    /// Validate any literal bounds now (a malformed literal is a config error).
+    /// Entity bounds are resolved — and checked — live each cycle, so they cannot
+    /// be validated at parse time.
+    pub fn validate(&self) -> Result<(), SchedulerError> {
+        for b in [&self.start, &self.end] {
+            if let TimeRef::Literal(s) = b {
+                parse_clock(s)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -396,7 +418,7 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
         l.control.start.split()?;
         l.control.stop.split()?;
         for w in &l.hard_rules.windows {
-            w.parse()?;
+            w.validate()?;
         }
         validate_demand_windows(&l.must_have)?;
         if let Some(ct) = &l.can_take {
@@ -498,10 +520,10 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
 fn validate_demand_windows(d: &DemandCfg) -> Result<(), SchedulerError> {
     match d {
         DemandCfg::Runtime { window, .. } | DemandCfg::TemperatureBand { window, .. } => {
-            window.parse().map(|_| ())
+            window.validate()
         }
         DemandCfg::HumidityBelow { window, .. } => {
-            window.as_ref().map(|w| w.parse().map(|_| ())).transpose().map(|_| ())
+            window.as_ref().map(|w| w.validate()).transpose().map(|_| ())
         }
     }
 }
@@ -568,8 +590,9 @@ mod tests {
         match &cfg.loads[0].must_have {
             DemandCfg::Runtime { amount_hours, window, max_price, .. } => {
                 assert!(matches!(amount_hours, Some(ValueRef::Entity { .. })));
-                assert_eq!(window.parse().unwrap().start.to_string(), "00:00:00");
+                assert!(matches!(&window.start, TimeRef::Literal(s) if s == "00:00"));
                 assert!(max_price.is_none());
+                window.validate().unwrap();
             }
             other => panic!("hot_water must_have wrong kind: {other:?}"),
         }
