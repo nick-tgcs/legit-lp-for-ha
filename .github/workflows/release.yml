@@ -1,71 +1,70 @@
-# Release pipeline: build + publish the add-on image FROM develop. CI does the
-# part that needs a runner — the full test gate and the multi-arch GHCR push —
-# then STOPS. The develop->main promote + tag + GitHub release are a local
-# `make promote` step, NOT done here: advancing main across .github/workflows/
-# changes needs a credential the Actions GITHUB_TOKEN lacks (it refuses to push
-# workflow files), whereas a developer's SSH key may. The full flow:
-#   1. bump addon/config.yaml `version:` on develop
-#   2. `make release`  -> this workflow: test gate + multi-arch image to GHCR
-#   3. `make promote`  -> FF main onto develop's tip, tag v<version>, release
-# (the store reads main's tip, so the image MUST be pullable before main moves —
-# hence the image is published here, in CI, and main is advanced afterwards).
-# Version source of truth: addon/config.yaml `version:` (Supervisor pulls
-# image:<version>, so config version and image tag must be in lockstep).
-# Re-releasing an existing tag is refused (bump first). `timeout-minutes` caps
-# the QEMU arm64 build so a hang fails fast instead of wedging the run.
+# Release pipeline — the "build off main" half of the model (validation happens
+# off develop: see validate.yml). main only ever advances via a promote PR
+# (promote.yml) that merges develop's already-`test`-green tip, so the commit
+# this builds is one that passed the full develop gate. This workflow builds the
+# multi-arch add-on image FROM main, pushes it to GHCR, then tags v<version> and
+# cuts the GitHub release — all in CI, no local step.
+#
+# Triggered by promote.yml (it dispatches this on main right after merging the
+# promote PR), or manually: Actions -> release -> Run workflow on `main`
+# (equivalently `make release-build`). Idempotent: if v<version> is already
+# tagged it no-ops, so a re-run or stray dispatch can't double-publish.
+#
+# Version source of truth: addon/config.yaml `version:` — Supervisor pulls
+# image:<version>, so the config version and the GHCR tag move in lockstep.
+#
+# Why this is fully in CI now (the old `make promote` was local): moving main is
+# a *PR merge* (promote.yml), which the Actions GITHUB_TOKEN may do even across
+# .github/workflows/ changes — only a direct *push* of workflow files is refused.
+# Building here needs only contents:write (tag + release) and packages:write
+# (GHCR push), both of which the token has; a tag ref pointing at an existing
+# commit introduces no workflow-file change, so pushing it is allowed too.
+# `timeout-minutes` caps the QEMU arm64 build so a hang fails fast.
 name: release
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Releases are cut from develop only
-        if: github.ref != 'refs/heads/develop'
-        run: |
-          echo "::error::Run this workflow on the develop branch (got ${{ github.ref }})"
-          exit 1
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: scheduler
-      - run: make test
-
   release:
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Releases are built from main only
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run this workflow on main (got ${{ github.ref }}). Cut a release with 'make release' (promote.yml), which dispatches this on main after promoting."
+          exit 1
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Read version, refuse re-release
+      - name: Read version; skip if already released
         id: ver
         run: |
           v=$(sed -n 's/^version: "\(.*\)"/\1/p' addon/config.yaml)
           test -n "$v" || { echo "::error::no version in addon/config.yaml"; exit 1; }
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "::error::v$v already released — bump addon/config.yaml version on develop first"
-            exit 1
+            echo "::notice title=Already released::v$v is already tagged — nothing to build."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
+        if: steps.ver.outputs.release == 'true'
       - uses: docker/setup-buildx-action@v3
+        if: steps.ver.outputs.release == 'true'
       - uses: docker/login-action@v3
+        if: steps.ver.outputs.release == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build + push multi-arch image
+        if: steps.ver.outputs.release == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -80,7 +79,13 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Image published — finish locally with `make promote`
+      - name: Tag + GitHub release
+        if: steps.ver.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v='${{ steps.ver.outputs.version }}'
-          echo "::notice title=Image published::ghcr.io/nick-tgcs/legit-lp-for-ha:$v is on GHCR. Finish the release locally: 'make promote' (fast-forwards main onto develop, tags v$v, creates the GitHub release — over SSH, which may advance main across workflow-file changes)."
+          git tag "v$v"
+          git push origin "v$v"
+          gh release create "v$v" --target "$GITHUB_SHA" --title "v$v" --generate-notes
+          echo "::notice title=Released::v$v built off main, image on GHCR, tag + release published."
