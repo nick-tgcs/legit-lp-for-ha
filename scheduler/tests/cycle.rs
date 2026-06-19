@@ -244,3 +244,111 @@ async fn c8_dehumidifier_runs_inside_its_run_window() {
     let d = report.loads.iter().find(|l| l.id == "dehumidifier").unwrap();
     assert!(d.executed, "dehumidifier must run inside its 22:00-11:00 window: {}", d.reason);
 }
+
+// ---- storage control (battery) -------------------------------------------
+// The example registry's two Sonnen cabinets are modelled from live entity-refs
+// (capacity, round-trip efficiency, reserve floor, cycle cost) and driven
+// per-direction: in Optimiser mode the LP writes the per-cabinet rate
+// input_number; otherwise it stands down. `binary_sensor.battery_charge_automated`
+// / `battery_export_automated` are the live authorities — OFF in the shared
+// fixture, flipped on here to exercise actuation.
+
+fn storage_rate_calls(ha: &RecordingHa) -> Vec<(String, f64)> {
+    ha.calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            c.target_entity.contains("grid_charge_rate")
+                || c.target_entity.contains("grid_discharge_rate")
+        })
+        .map(|c| (c.target_entity.clone(), c.data["value"].as_f64().unwrap_or(f64::NAN)))
+        .collect()
+}
+
+#[tokio::test]
+async fn c9_storage_unauthorised_is_modelled_advisory_but_never_actuated() {
+    // Shared fixture: both directions configured but their authority is OFF
+    // (Manual/Scheduled). Both cabinets are still modelled from their live specs
+    // and planned, yet the LP must write NO rate to either — even live.
+    let ha = canned_ha();
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert_eq!(report.storage.len(), 2, "both cabinets modelled from entity-ref specs");
+    assert!(storage_rate_calls(&ha).is_empty(), "unauthorised storage is never actuated");
+}
+
+#[tokio::test]
+async fn c10_charge_authority_writes_only_the_charge_rate_per_direction() {
+    // Grant charge authority (LP import) but leave export Manual: the LP writes
+    // the per-cabinet CHARGE rate each cycle and never a discharge rate.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    let mut profiles = Profiles::default();
+    cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    let calls = storage_rate_calls(&ha);
+    assert!(
+        calls.iter().any(|(t, _)| t == "input_number.input_number_sonnen01_grid_charge_rate"),
+        "charge authority => the LP drives the charge rate: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(t, _)| t.contains("grid_discharge_rate")),
+        "export stays Manual => no discharge rate written: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn c11_storage_dry_run_writes_no_rate_even_when_authorised() {
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    set_state(&mut ha, "binary_sensor.battery_export_automated", "on");
+    let mut profiles = Profiles::default();
+    cycle(true).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert!(ha.calls.lock().unwrap().is_empty(), "dry-run never writes a storage rate");
+}
+
+#[tokio::test]
+async fn c12_storage_charges_off_a_cheap_now_dear_later_spread() {
+    // Both directions Optimiser. Cheap right now, dear for the rest of the horizon
+    // => a clean arbitrage: charge the cabinets now to cover the dear window later.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    set_state(&mut ha, "binary_sensor.battery_export_automated", "on");
+    set_state(&mut ha, "sensor.current_grid_cost", "0.02");
+    ha.states.insert(
+        "sensor.beckton_general_forecast".into(),
+        json!({"state": "0.02", "attributes": {"forecasts": [
+            {"per_kwh": 0.02, "start_time": "2026-06-10T00:00:00+00:00", "end_time": "2026-06-10T01:00:00+00:00"},
+            {"per_kwh": 0.60, "start_time": "2026-06-10T01:00:00+00:00", "end_time": "2026-06-11T00:00:00+00:00"}
+        ]}}),
+    );
+    let mut profiles = Profiles::default();
+    cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let charge = storage_rate_calls(&ha)
+        .into_iter()
+        .find(|(t, _)| t == "input_number.input_number_sonnen01_grid_charge_rate")
+        .expect("charge rate written");
+    assert!(charge.1 > 0.0, "cheap-now/dear-later => charges now, got {} W", charge.1);
+}
+
+#[tokio::test]
+async fn c13_export_authority_writes_only_the_discharge_rate_per_direction() {
+    // Mirror of c10 on the other axis: grant export authority (LP export) while
+    // charge stays Manual — the LP drives the per-cabinet DISCHARGE rate and never
+    // a charge rate. (Discharge economics — charges the cheap valley, discharges
+    // the peak, reserve floor, charge/discharge mutex — are covered deterministically
+    // in tests/lp.rs; here we prove the per-direction control wiring.)
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_export_automated", "on");
+    let mut profiles = Profiles::default();
+    cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 18, 0)).await;
+    let calls = storage_rate_calls(&ha);
+    assert!(
+        calls.iter().any(|(t, _)| t == "input_number.input_number_sonnen01_grid_discharge_rate"),
+        "export authority => the LP drives the discharge rate: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(t, _)| t.contains("grid_charge_rate")),
+        "charge stays Manual => no charge rate written: {calls:?}"
+    );
+}

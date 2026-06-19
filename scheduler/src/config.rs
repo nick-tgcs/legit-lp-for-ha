@@ -12,7 +12,31 @@ use crate::error::SchedulerError;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ValueRef {
+    /// A bare number, e.g. `capacity_kwh: 18.1`.
+    Plain(f64),
+    /// `{ value: 18.1 }` — the explicit literal form.
     Literal { value: f64 },
+    /// `{ entity: sensor.x }` — read live each cycle.
+    Entity { entity: String },
+}
+
+impl ValueRef {
+    /// The constant value if this is a literal (`Plain`/`Literal`); `None` for an
+    /// entity-ref, which is only known after a live read.
+    pub fn as_literal(&self) -> Option<f64> {
+        match self {
+            ValueRef::Plain(v) | ValueRef::Literal { value: v } => Some(*v),
+            ValueRef::Entity { .. } => None,
+        }
+    }
+}
+
+/// A boolean that is either a literal (`true`/`false`) or read live from an HA
+/// entity each cycle (e.g. an `input_boolean` toggle).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum BoolRef {
+    Plain(bool),
     Entity { entity: String },
 }
 
@@ -132,41 +156,91 @@ pub struct PvForecastConfig {
     pub now_entity: String,
 }
 
-/// One site storage device (a home battery, an EV, …). All energy in kWh, power
-/// in kW. The scheduler plans and reports each device's optimal trajectory but
-/// never *commands* it — there are no control entities here; control is a
-/// deliberate, separate step.
+/// One site storage device (a home battery cabinet, an EV, …). All energy in kWh,
+/// power in kW. The scheduler plans + reports each device's optimal trajectory and,
+/// for any direction given a `charge:`/`discharge:` control block AND live
+/// authority (Optimiser mode), drives it by writing the planned rate; a direction
+/// without a control block stays advisory (planned + reported, never actuated).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct StorageConfig {
     pub id: String,
     /// State-of-charge sensors (%), one per pack unit; averaged to a device SoC.
     pub soc_entities: Vec<String>,
-    /// Total usable capacity (kWh).
-    pub capacity_kwh: f64,
+    /// Total usable capacity (kWh) — literal, or (better) an entity-ref to the
+    /// live FullChargeCapacity so it tracks degradation.
+    pub capacity_kwh: ValueRef,
+    /// Per-cabinet charge power limit (kW). `max_discharge_kw == 0` = charge-only.
     pub max_charge_kw: f64,
-    /// 0 (the default) = charge-only, e.g. an EV without V2G.
     #[serde(default)]
     pub max_discharge_kw: f64,
-    /// Round-trip efficiency in (0,1].
-    #[serde(default = "default_round_trip")]
-    pub round_trip_efficiency: f64,
-    /// Reserve floor and usable ceiling, as a percentage of `capacity_kwh`.
-    #[serde(default)]
-    pub reserve_soc_pct: f64,
+    /// Round-trip efficiency in (0,1] — literal or entity-ref.
+    #[serde(default = "default_round_trip_ref")]
+    pub round_trip_efficiency: ValueRef,
+    /// Reserve floor (% of capacity) — the hard discharge floor. Literal or an
+    /// entity-ref (e.g. an export-limit slider).
+    #[serde(default = "default_zero_ref")]
+    pub reserve_soc_pct: ValueRef,
+    /// Usable ceiling, as a percentage of `capacity_kwh`.
     #[serde(default = "default_max_soc_pct")]
     pub max_soc_pct: f64,
-    /// If false, may only charge from instantaneous PV (never the grid).
-    #[serde(default = "default_true")]
-    pub allow_grid_charge: bool,
+    /// If false, may only charge from instantaneous PV (never the grid). Literal
+    /// (`true`/`false`) or an entity-ref to a toggle.
+    #[serde(default = "default_true_ref")]
+    pub allow_grid_charge: BoolRef,
     /// Optional binary sensor; when off the device is idle (e.g. EV unplugged).
     pub available_entity: Option<String>,
-    /// Throughput wear cost (AUD/kWh) — breaks indifference vs idle cycling.
-    #[serde(default = "default_cycle_cost")]
-    pub cycle_cost_aud_per_kwh: f64,
+    /// Throughput wear cost (AUD/kWh) — literal or entity-ref.
+    #[serde(default = "default_cycle_cost_ref")]
+    pub cycle_cost_aud_per_kwh: ValueRef,
     /// Composable charging goals (deadline targets, opportunistic price). A
     /// dischargeable device self-arbitrages even with no goals.
     #[serde(default)]
     pub goals: Vec<StorageGoalCfg>,
+    /// Per-direction CONTROL. When a direction is present AND authorised
+    /// (Optimiser mode), the LP drives it by writing the planned per-cabinet rate
+    /// (+ optional price threshold) each cycle; absent = that direction is
+    /// advisory (planned + reported, never actuated).
+    #[serde(default)]
+    pub charge: Option<StorageDirectionCfg>,
+    #[serde(default)]
+    pub discharge: Option<StorageDirectionCfg>,
+}
+
+/// Control surface for ONE storage direction (charge or discharge). While the LP
+/// holds authority for this direction it writes the planned per-cabinet rate to
+/// `set_rate` (the service's value = watts) each cycle and, if `set_threshold` is
+/// given, sets it to `active` while acting / `idle` while not — so an existing
+/// price-gated executor automation fires exactly when the LP intends.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StorageDirectionCfg {
+    pub authority: AuthorityCfg,
+    /// The LP fills this call's value with the planned rate in watts.
+    pub set_rate: ServiceCallCfg,
+    #[serde(default)]
+    pub set_threshold: Option<StorageThresholdCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StorageThresholdCfg {
+    /// `domain.service`, e.g. `input_number.set_value`.
+    pub service: String,
+    pub target: String,
+    /// Value set while the LP is actively driving this direction (permissive).
+    pub active: ValueRef,
+    /// Value set while the LP is idle on this direction (blocking).
+    pub idle: ValueRef,
+}
+
+impl StorageThresholdCfg {
+    pub fn split(&self) -> Result<(String, String), SchedulerError> {
+        match self.service.split_once('.') {
+            Some((d, s)) if !d.is_empty() && !s.is_empty() => Ok((d.into(), s.into())),
+            _ => Err(SchedulerError::Config(format!(
+                "service must be 'domain.service', got '{}'",
+                self.service
+            ))),
+        }
+    }
 }
 
 /// A storage charging goal. Multiple goals compose on one device — e.g. an EV
@@ -182,17 +256,20 @@ pub enum StorageGoalCfg {
     Price { below: ValueRef, up_to_soc_pct: Option<ValueRef> },
 }
 
-fn default_round_trip() -> f64 {
-    0.9
+fn default_round_trip_ref() -> ValueRef {
+    ValueRef::Literal { value: 0.9 }
+}
+fn default_zero_ref() -> ValueRef {
+    ValueRef::Literal { value: 0.0 }
 }
 fn default_max_soc_pct() -> f64 {
     100.0
 }
-fn default_true() -> bool {
-    true
+fn default_true_ref() -> BoolRef {
+    BoolRef::Plain(true)
 }
-fn default_cycle_cost() -> f64 {
-    0.001
+fn default_cycle_cost_ref() -> ValueRef {
+    ValueRef::Literal { value: 0.001 }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -483,8 +560,11 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
     if s.soc_entities.is_empty() {
         return err(format!("storage '{}': soc_entities must list at least one sensor", s.id));
     }
-    if !s.capacity_kwh.is_finite() || s.capacity_kwh <= 0.0 {
-        return err(format!("storage '{}': capacity_kwh must be > 0", s.id));
+    // Literal specs are checked now; entity-refs are validated live each cycle.
+    if let Some(c) = s.capacity_kwh.as_literal() {
+        if !c.is_finite() || c <= 0.0 {
+            return err(format!("storage '{}': capacity_kwh must be > 0", s.id));
+        }
     }
     if s.max_charge_kw <= 0.0 || s.max_discharge_kw < 0.0 {
         return err(format!(
@@ -492,17 +572,27 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
             s.id
         ));
     }
-    if s.round_trip_efficiency <= 0.0 || s.round_trip_efficiency > 1.0 {
-        return err(format!("storage '{}': round_trip_efficiency must be in (0,1]", s.id));
+    if let Some(e) = s.round_trip_efficiency.as_literal() {
+        if e <= 0.0 || e > 1.0 {
+            return err(format!("storage '{}': round_trip_efficiency must be in (0,1]", s.id));
+        }
     }
-    if !(0.0..=100.0).contains(&s.reserve_soc_pct)
-        || !(0.0..=100.0).contains(&s.max_soc_pct)
-        || s.reserve_soc_pct >= s.max_soc_pct
-    {
-        return err(format!(
-            "storage '{}': reserve_soc_pct ({}) must be < max_soc_pct ({}), within 0..=100",
-            s.id, s.reserve_soc_pct, s.max_soc_pct
-        ));
+    if !(0.0..=100.0).contains(&s.max_soc_pct) {
+        return err(format!("storage '{}': max_soc_pct must be within 0..=100", s.id));
+    }
+    if let Some(r) = s.reserve_soc_pct.as_literal() {
+        if !(0.0..=100.0).contains(&r) || r >= s.max_soc_pct {
+            return err(format!(
+                "storage '{}': reserve_soc_pct ({r}) must be < max_soc_pct ({}), within 0..=100",
+                s.id, s.max_soc_pct
+            ));
+        }
+    }
+    for dir in [&s.charge, &s.discharge].into_iter().flatten() {
+        dir.set_rate.split()?;
+        if let Some(t) = &dir.set_threshold {
+            t.split()?;
+        }
     }
     for g in &s.goals {
         if let StorageGoalCfg::Target { ready_by, .. } = g {
@@ -611,17 +701,26 @@ mod tests {
             Some("input_boolean.lp_scheduler_preview")
         );
 
-        // One site storage device parsed, with defaults applied where omitted.
-        assert_eq!(cfg.global.storage.len(), 1);
+        // Two site storage cabinets parsed, each entity-ref'd with per-direction control.
+        assert_eq!(cfg.global.storage.len(), 2);
         let b = &cfg.global.storage[0];
-        assert_eq!(b.id, "sonnen");
-        assert_eq!(b.soc_entities, ["sensor.usoc_sonnen01", "sensor.usoc_sonnen02"]);
-        assert_eq!(b.capacity_kwh, 20.0);
-        assert_eq!(b.max_discharge_kw, 8.0);
-        assert_eq!(b.round_trip_efficiency, 0.9);
-        assert_eq!(b.reserve_soc_pct, 10.0);
-        assert!(b.allow_grid_charge && b.goals.is_empty());
-        assert_eq!(b.cycle_cost_aud_per_kwh, default_cycle_cost());
+        assert_eq!(b.id, "sonnen01");
+        assert_eq!(b.soc_entities, ["sensor.usoc_sonnen01"]);
+        assert!(matches!(b.capacity_kwh, ValueRef::Entity { .. }));
+        assert_eq!(b.max_charge_kw, 4.0);
+        assert_eq!(b.max_discharge_kw, 4.0);
+        assert!(matches!(b.round_trip_efficiency, ValueRef::Entity { .. }));
+        assert!(matches!(b.reserve_soc_pct, ValueRef::Entity { .. }));
+        assert!(matches!(b.cycle_cost_aud_per_kwh, ValueRef::Entity { .. }));
+        assert!(matches!(b.allow_grid_charge, BoolRef::Entity { .. }));
+        let charge = b.charge.as_ref().expect("charge control");
+        assert_eq!(charge.authority.enabled_entity, "binary_sensor.battery_charge_automated");
+        assert_eq!(charge.set_rate.target, "input_number.input_number_sonnen01_grid_charge_rate");
+        let t = charge.set_threshold.as_ref().expect("charge threshold");
+        assert_eq!(t.active.as_literal(), Some(5.0));
+        let disc = b.discharge.as_ref().expect("discharge control");
+        assert_eq!(disc.authority.enabled_entity, "binary_sensor.battery_export_automated");
+        assert_eq!(cfg.global.storage[1].id, "sonnen02");
     }
 
     #[test]
@@ -652,10 +751,10 @@ loads: []
         let cfg = parse(yaml).expect("storage list parses");
         assert_eq!(cfg.global.storage.len(), 2);
         let home = &cfg.global.storage[0];
-        assert_eq!(home.round_trip_efficiency, 0.9);
+        assert_eq!(home.round_trip_efficiency.as_literal(), Some(0.9));
         assert_eq!(home.max_soc_pct, 100.0);
-        assert_eq!(home.reserve_soc_pct, 0.0);
-        assert!(home.allow_grid_charge && home.available_entity.is_none());
+        assert_eq!(home.reserve_soc_pct.as_literal(), Some(0.0));
+        assert!(home.allow_grid_charge == BoolRef::Plain(true) && home.available_entity.is_none());
         let ev = &cfg.global.storage[1];
         assert_eq!(ev.max_discharge_kw, 0.0, "charge-only by default");
         assert_eq!(ev.available_entity.as_deref(), Some("binary_sensor.ev_plugged_in"));
@@ -668,14 +767,31 @@ loads: []
 
     #[test]
     fn rejects_storage_reserve_at_or_above_max() {
-        let r = mutate_example("reserve_soc_pct: 10", "reserve_soc_pct: 100");
-        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("reserve_soc_pct")));
+        // Literal reserve >= ceiling is rejected at parse (entity-refs check live).
+        let y = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - { id: a, soc_entities: [sensor.s], capacity_kwh: 10, max_charge_kw: 5, reserve_soc_pct: 100 }
+loads: []
+";
+        assert!(
+            matches!(parse(y), Err(SchedulerError::Config(m)) if m.contains("reserve_soc_pct"))
+        );
     }
 
     #[test]
     fn rejects_storage_with_nonpositive_capacity() {
-        let r = mutate_example("capacity_kwh: 20.0", "capacity_kwh: 0.0");
-        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("capacity_kwh")));
+        let y = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - { id: a, soc_entities: [sensor.s], capacity_kwh: 0, max_charge_kw: 5 }
+loads: []
+";
+        assert!(matches!(parse(y), Err(SchedulerError::Config(m)) if m.contains("capacity_kwh")));
     }
 
     #[test]
