@@ -20,14 +20,18 @@ build:
 	docker build -t $(IMAGE):$(VERSION) .
 # Cut a release. Bump addon/config.yaml `version:` on develop first (via a PR),
 # then:
-#   make release   # dispatch promote.yml on develop: promotes develop -> main
-#                  # (PR merge, gated on `test`), then builds + tags off main.
-# Everything runs in CI — no local step. See docs/RELEASING.md.
+#   make release   # open the develop -> main PR with YOUR credentials (no bot).
+# CI validates it; you approve + merge it on GitHub. Merging main is a push that
+# triggers release.yml to build + tag + publish off main. Your merge is the
+# release gate. See docs/RELEASING.md.
 release:
-	gh workflow run promote.yml --ref develop
+	gh pr create --base main --head develop \
+	  --title "Release: promote develop -> main" \
+	  --body "Promote develop's validated tip to main. CI runs the required \`test\` check; approve + merge to release — merging main triggers release.yml to build off main."
 
-# Escape hatch: (re)build + publish + tag off main WITHOUT promoting — e.g. the
-# promote merged but the build dispatch was lost. No-op if v<version> is already
-# tagged. The normal path is `make release`, which does this for you.
+# Escape hatch: (re)build + publish + tag off main WITHOUT a new PR — e.g. main
+# advanced but the push-triggered release.yml didn't run, or a build needs a
+# re-run. No-op if v<version> is already tagged. The normal path is the
+# develop -> main PR (`make release` opens it; you approve + merge it).
 release-build:
 	gh workflow run release.yml --ref main
