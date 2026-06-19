@@ -40,7 +40,7 @@ jobs:
         run: |
           echo "::error::Run this workflow on main (got ${{ github.ref }}). Releases build off main — merge the develop->main PR ('make release' opens it) or dispatch this on main ('make release-build')."
           exit 1
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Read version; skip if already released
