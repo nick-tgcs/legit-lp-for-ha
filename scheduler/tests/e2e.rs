@@ -166,8 +166,8 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
     // The storage device from example.yaml was read (states.json serves its
     // SoC) and planned end-to-end: a trajectory is present and grid-aligned.
     let storage = status["storage"].as_array().expect("storage array");
-    assert_eq!(storage.len(), 1, "the example's one storage device was planned");
-    assert_eq!(storage[0]["id"], "sonnen");
+    assert_eq!(storage.len(), 2, "both example cabinets were planned");
+    assert_eq!(storage[0]["id"], "sonnen01");
     let soc = storage[0]["soc_kwh"].as_array().expect("soc trajectory");
     assert!(soc.len() > 1, "SoC trajectory spans the horizon");
     // Forecast context series the panel draws are populated too.
