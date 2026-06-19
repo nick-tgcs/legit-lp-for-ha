@@ -3,7 +3,9 @@
 //! excluded such loads. Dry-run logs the intended call and does nothing.
 
 use crate::ha_client::HaApi;
-use crate::model::{Action, Decision, LoadContract};
+use crate::model::{
+    Action, Decision, LoadContract, StorageControl, StorageDecision, StorageDirection,
+};
 
 pub struct Executor {
     pub dry_run: bool,
@@ -49,6 +51,84 @@ impl Executor {
             }
         }
         executed
+    }
+
+    /// Execute the current-step STORAGE commands. Same shape as `execute`: global
+    /// gate, then per-DIRECTION authority, dry-run logs and does nothing. Each
+    /// authorised direction sets its per-cabinet rate (watts) and, if configured,
+    /// a price threshold (`active` while driving, `idle` while idle). Returns a
+    /// per-device "a real call was made" flag.
+    pub async fn execute_storage<A: HaApi>(
+        &self,
+        ha: &A,
+        global_enabled: bool,
+        controls: &[StorageControl],
+        decisions: &[StorageDecision],
+    ) -> Vec<bool> {
+        let mut executed = vec![false; decisions.len()];
+        if !global_enabled {
+            return executed;
+        }
+        for (i, d) in decisions.iter().enumerate() {
+            let Some(c) = controls.iter().find(|c| c.id == d.storage_id) else { continue };
+            let mut made = false;
+            if let Some(dir) = &c.charge {
+                made |= self.drive(ha, &c.id, "charge", dir, d.charge_watts).await;
+            }
+            if let Some(dir) = &c.discharge {
+                made |= self.drive(ha, &c.id, "discharge", dir, d.discharge_watts).await;
+            }
+            executed[i] = made;
+        }
+        executed
+    }
+
+    /// Drive ONE storage direction: authority gate, set the rate (watts) and the
+    /// threshold (active while acting, idle otherwise). `true` if a real call ran.
+    async fn drive<A: HaApi>(
+        &self,
+        ha: &A,
+        id: &str,
+        dir: &str,
+        d: &StorageDirection,
+        watts: f64,
+    ) -> bool {
+        if !d.authority {
+            return false; // defence in depth: external path owns this direction
+        }
+        let watts = watts.max(0.0).round();
+        let acting = watts >= 1.0; // sub-watt = idle
+        let mut made = false;
+        if self.dry_run {
+            tracing::info!(
+                "DRY-RUN storage {id} {dir}: would set rate {watts:.0} W on {}",
+                d.set_rate.target_entity
+            );
+        } else {
+            let mut call = d.set_rate.clone();
+            call.data = serde_json::json!({ "value": watts });
+            match ha.call_service(&call).await {
+                Ok(()) => made = true,
+                Err(e) => tracing::error!("storage {id} {dir}: set_rate failed: {e}"),
+            }
+        }
+        if let Some(t) = &d.set_threshold {
+            let value = if acting { t.active } else { t.idle };
+            if self.dry_run {
+                tracing::info!(
+                    "DRY-RUN storage {id} {dir}: would set threshold {value} on {}",
+                    t.call.target_entity
+                );
+            } else {
+                let mut call = t.call.clone();
+                call.data = serde_json::json!({ "value": value });
+                match ha.call_service(&call).await {
+                    Ok(()) => made = true,
+                    Err(e) => tracing::error!("storage {id} {dir}: set_threshold failed: {e}"),
+                }
+            }
+        }
+        made
     }
 }
 

@@ -220,3 +220,44 @@ pub struct Decision {
     pub action: Action,
     pub reason: String,
 }
+
+/// A price threshold the LP nudges so an existing price-gated executor automation
+/// fires when intended: `active` while the LP drives the direction, `idle` while not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageThreshold {
+    /// `domain.service` + target; data (`{value: …}`) is filled per cycle.
+    pub call: ServiceCall,
+    pub active: f64,
+    pub idle: f64,
+}
+
+/// Resolved control for ONE storage direction (charge or discharge) — the executor
+/// boundary. The planner never sees this (it stays in `StorageInput`); the executor
+/// fills `set_rate`'s value with the planned watts each cycle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageDirection {
+    /// Resolved from the direction's authority entity; `false` = LP must not actuate.
+    pub authority: bool,
+    /// Per-cabinet rate setter (e.g. `input_number.set_value`); value = watts.
+    pub set_rate: ServiceCall,
+    pub set_threshold: Option<StorageThreshold>,
+}
+
+/// The resolved control surface for one storage device (executor only). A direction
+/// is `None` when not configured (advisory: planned + reported, never actuated).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageControl {
+    pub id: String,
+    pub charge: Option<StorageDirection>,
+    pub discharge: Option<StorageDirection>,
+}
+
+/// Current-step storage command derived from the plan's slot 0 (receding horizon).
+/// Charge/discharge are mutually exclusive in the plan, so at most one is non-zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageDecision {
+    pub storage_id: String,
+    pub charge_watts: f64,
+    pub discharge_watts: f64,
+    pub reason: String,
+}

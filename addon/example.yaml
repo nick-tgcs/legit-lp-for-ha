@@ -40,37 +40,69 @@ global:
       tomorrow_entity: sensor.energy_production_tomorrow
       now_entity: sensor.power_production_now
     baseline_kw: 0.8
-  # Site storage: the scheduler PLANS and REPORTS each device's optimal
-  # charge/discharge trajectory against the price/PV forecast, but never commands
-  # it (no control entities — control is a separate, deliberate step). Add as many
-  # devices as you like; a dischargeable device self-arbitrages, a charge-only one
-  # (max_discharge_kw: 0, e.g. an EV) is driven by its goals. Limits are
-  # placeholders; set them to each device's real figures.
+  # Site storage: the two Sonnen cabinets, modelled from their REAL entities (no
+  # invented numbers). Specs that are live HA settings are entity-refs so they
+  # track reality; the 4 kW/cabinet limit is the real Sonnen rating (the
+  # …grid_charge_rate slider's max: 4000 W). Each DIRECTION has its own authority +
+  # control: in Optimiser mode the LP writes the per-cabinet rate (value = watts)
+  # and nudges the shared price threshold so the existing charge.yaml / export_.yaml
+  # executor fires only when the LP intends, while the legacy charge_ai / export_ai
+  # stand down. Omit a `charge:`/`discharge:` block to leave that direction advisory
+  # (planned + reported, never actuated). The threshold `active`/`idle` values are
+  # tuned to your executor automations.
   storage:
-    - id: sonnen
-      soc_entities: [sensor.usoc_sonnen01, sensor.usoc_sonnen02] # %, averaged
-      capacity_kwh: 20.0 # total usable across the pack
-      max_charge_kw: 8.0
-      max_discharge_kw: 8.0 # 0 = charge-only
-      round_trip_efficiency: 0.9
-      reserve_soc_pct: 10 # never plan below this floor
+    - id: sonnen01
+      soc_entities: [sensor.usoc_sonnen01]
+      capacity_kwh: { entity: sensor.sonnen_01_capacity_kwh } # FullChargeCapacity/1000 (live)
+      max_charge_kw: 4.0 # real per-cabinet rating (rate slider max 4000 W)
+      max_discharge_kw: 4.0
+      round_trip_efficiency: { entity: sensor.sonnen_round_trip_efficiency } # (100-loss%)/100
+      reserve_soc_pct: { entity: input_number.input_number_sonnen_allow_export_above } # export-limit slider = hard discharge floor
       max_soc_pct: 100
-      allow_grid_charge: true # false = only soak solar surplus, never grid
-    # Example EV (uncomment when you have one). Charge-only, to 80% by 07:00 as
-    # cheaply as possible, plus opportunistic top-ups whenever price is under $0.10:
-    # - id: ev
-    #   soc_entities: [sensor.ev_battery_level]
-    #   capacity_kwh: 60.0
-    #   max_charge_kw: 7.0
-    #   max_discharge_kw: 0           # charge-only (no V2G)
-    #   available_entity: binary_sensor.ev_plugged_in
-    #   goals:
-    #     - kind: target
-    #       soc_pct: { value: 80 }
-    #       ready_by: "07:00"
-    #     - kind: price
-    #       below: { value: 0.10 }
-    #       up_to_soc_pct: { value: 100 }
+      cycle_cost_aud_per_kwh: { entity: input_number.input_number_sonnen_degradation_cost_per_kwh }
+      allow_grid_charge: { entity: input_boolean.grid_power_auto_manage_allow_charge }
+      charge:
+        authority: { enabled_entity: binary_sensor.battery_charge_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen01_grid_charge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_battery_charge_price_kwh
+          active: { value: 5.0 } # permissive: current price ≤ this, so charge.yaml fires
+          idle: { value: -5.0 } # blocking
+      discharge:
+        authority: { enabled_entity: binary_sensor.battery_export_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen01_grid_discharge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_do_export_price_kwh
+          active: { value: 0.0 } # permissive
+          idle: { value: -999.0 } # blocking
+    - id: sonnen02
+      soc_entities: [sensor.usoc_sonnen02]
+      capacity_kwh: { entity: sensor.sonnen_02_capacity_kwh }
+      max_charge_kw: 4.0
+      max_discharge_kw: 4.0
+      round_trip_efficiency: { entity: sensor.sonnen_round_trip_efficiency }
+      reserve_soc_pct: { entity: input_number.input_number_sonnen_allow_export_above }
+      max_soc_pct: 100
+      cycle_cost_aud_per_kwh: { entity: input_number.input_number_sonnen_degradation_cost_per_kwh }
+      allow_grid_charge: { entity: input_boolean.grid_power_auto_manage_allow_charge }
+      charge:
+        authority: { enabled_entity: binary_sensor.battery_charge_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen02_grid_charge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_battery_charge_price_kwh
+          active: { value: 5.0 }
+          idle: { value: -5.0 }
+      discharge:
+        authority: { enabled_entity: binary_sensor.battery_export_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen02_grid_discharge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_do_export_price_kwh
+          active: { value: 0.0 }
+          idle: { value: -999.0 }
   planning:
     grid_minutes: 15
     horizon_hours: 24

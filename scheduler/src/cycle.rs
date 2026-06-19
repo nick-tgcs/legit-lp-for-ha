@@ -46,7 +46,7 @@ async fn f64_of<A: HaApi>(ha: &A, entity: &str, diags: &mut Vec<String>) -> Opti
 
 async fn resolve<A: HaApi>(ha: &A, vr: &ValueRef, diags: &mut Vec<String>) -> Option<f64> {
     match vr {
-        ValueRef::Literal { value } => Some(*value),
+        ValueRef::Plain(value) | ValueRef::Literal { value } => Some(*value),
         ValueRef::Entity { entity } => f64_of(ha, entity, diags).await,
     }
 }
@@ -132,16 +132,77 @@ async fn forecast_slots<A: HaApi>(
     }
 }
 
-/// Resolve one storage device from config + live reads. Averages the per-unit
-/// SoC percentages into a kWh charge (clamped into [reserve, max]), reads any
-/// availability sensor, and resolves each goal's `ValueRef`s. Returns None (with
-/// a diagnostic) if no SoC sensor is readable this cycle — the plan then
-/// proceeds without this device rather than guessing its charge.
+/// Resolve a boolean ref: a literal, or an HA entity's on/off state.
+async fn resolve_bool<A: HaApi>(
+    ha: &A,
+    br: &config::BoolRef,
+    diags: &mut Vec<String>,
+) -> Option<bool> {
+    match br {
+        config::BoolRef::Plain(b) => Some(*b),
+        config::BoolRef::Entity { entity } => {
+            state_of(ha, entity, diags).await.and_then(|s| s.as_on_off())
+        }
+    }
+}
+
+/// Resolve one configured storage direction into its executor surface: the live
+/// authority boolean (fail-closed false) plus the rate (+ optional threshold)
+/// service calls. `None` when the direction isn't configured.
+async fn resolve_direction<A: HaApi>(
+    ha: &A,
+    cfg: Option<&config::StorageDirectionCfg>,
+    diags: &mut Vec<String>,
+) -> Option<StorageDirection> {
+    let cfg = cfg?;
+    let authority = state_of(ha, &cfg.authority.enabled_entity, diags)
+        .await
+        .and_then(|s| s.as_on_off())
+        .unwrap_or(false);
+    let (rd, rs) = cfg.set_rate.split().ok()?;
+    let set_rate = ServiceCall {
+        domain: rd,
+        service: rs,
+        target_entity: cfg.set_rate.target.clone(),
+        data: serde_json::Value::Null,
+    };
+    let set_threshold = match &cfg.set_threshold {
+        Some(t) => match (
+            t.split(),
+            resolve(ha, &t.active, diags).await,
+            resolve(ha, &t.idle, diags).await,
+        ) {
+            (Ok((td, ts)), Some(active), Some(idle)) => Some(StorageThreshold {
+                call: ServiceCall {
+                    domain: td,
+                    service: ts,
+                    target_entity: t.target.clone(),
+                    data: serde_json::Value::Null,
+                },
+                active,
+                idle,
+            }),
+            _ => {
+                diags.push(format!("storage threshold '{}' unresolved; rate-only", t.target));
+                None
+            }
+        },
+        None => None,
+    };
+    Some(StorageDirection { authority, set_rate, set_threshold })
+}
+
+/// Resolve one storage device from config + live reads into `(planner input,
+/// executor control)`. Averages the per-unit SoC into a kWh charge (clamped to
+/// [reserve, max]), resolves the entity-ref specs + per-direction authority +
+/// control, and zeroes a configured-but-unauthorised direction's power (so the LP
+/// neither plans nor actuates it). None (with a diagnostic) if SoC or capacity is
+/// unreadable this cycle — the plan proceeds without this device.
 async fn build_storage<A: HaApi>(
     ha: &A,
     sc: &config::StorageConfig,
     diags: &mut Vec<String>,
-) -> Option<StorageInput> {
+) -> Option<(StorageInput, StorageControl)> {
     let mut socs = Vec::new();
     for e in &sc.soc_entities {
         if let Some(v) = f64_of(ha, e, diags).await {
@@ -153,13 +214,45 @@ async fn build_storage<A: HaApi>(
         return None;
     }
     let avg_pct = socs.iter().sum::<f64>() / socs.len() as f64;
-    let min_kwh = sc.reserve_soc_pct / 100.0 * sc.capacity_kwh;
-    let max_kwh = sc.max_soc_pct / 100.0 * sc.capacity_kwh;
-    let soc_now = (avg_pct / 100.0 * sc.capacity_kwh).clamp(min_kwh, max_kwh);
+    // Specs are literals or live entity-refs (e.g. FullChargeCapacity, the
+    // backup/export sliders). Capacity is required; the rest fall back + log.
+    let capacity_kwh = match resolve(ha, &sc.capacity_kwh, diags).await {
+        Some(c) if c.is_finite() && c > 0.0 => c,
+        _ => {
+            diags.push(format!("storage '{}': capacity unreadable/invalid; unmodelled", sc.id));
+            return None;
+        }
+    };
+    let reserve_pct =
+        resolve(ha, &sc.reserve_soc_pct, diags).await.unwrap_or(0.0).clamp(0.0, 100.0);
+    let efficiency =
+        resolve(ha, &sc.round_trip_efficiency, diags).await.unwrap_or(0.9).clamp(0.05, 1.0);
+    let cycle_cost = resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await.unwrap_or(0.001).max(0.0);
+    let allow_grid_charge = resolve_bool(ha, &sc.allow_grid_charge, diags).await.unwrap_or(true);
+
+    let mut min_kwh = reserve_pct / 100.0 * capacity_kwh;
+    let max_kwh = sc.max_soc_pct / 100.0 * capacity_kwh;
+    if min_kwh > max_kwh {
+        min_kwh = max_kwh; // degenerate reserve >= ceiling => freeze (fail safe)
+    }
+    let soc_now = (avg_pct / 100.0 * capacity_kwh).clamp(min_kwh, max_kwh);
     let available = match &sc.available_entity {
         Some(e) => state_of(ha, e, diags).await.and_then(|s| s.as_on_off()).unwrap_or(false),
         None => true,
     };
+
+    // Per-direction control + authority. A configured-but-unauthorised direction
+    // is owned by the Manual/Scheduled path, so zero its power: the LP neither
+    // plans nor actuates it. An UNCONFIGURED direction keeps its limit and stays
+    // advisory (planned + reported, never actuated — no control surface).
+    let charge = resolve_direction(ha, sc.charge.as_ref(), diags).await;
+    let discharge = resolve_direction(ha, sc.discharge.as_ref(), diags).await;
+    let charge_auth = charge.as_ref().map(|d| d.authority).unwrap_or(false);
+    let discharge_auth = discharge.as_ref().map(|d| d.authority).unwrap_or(false);
+    let max_charge_kw = if sc.charge.is_some() && !charge_auth { 0.0 } else { sc.max_charge_kw };
+    let max_discharge_kw =
+        if sc.discharge.is_some() && !discharge_auth { 0.0 } else { sc.max_discharge_kw };
+
     let mut goals = Vec::new();
     for g in &sc.goals {
         match g {
@@ -169,7 +262,7 @@ async fn build_storage<A: HaApi>(
                     chrono::NaiveTime::parse_from_str(ready_by, "%H:%M"),
                 ) {
                     goals.push(StorageGoal::Target {
-                        soc_kwh: (pct / 100.0 * sc.capacity_kwh).clamp(0.0, max_kwh),
+                        soc_kwh: (pct / 100.0 * capacity_kwh).clamp(0.0, max_kwh),
                         ready_by: rb,
                     });
                 }
@@ -182,26 +275,28 @@ async fn build_storage<A: HaApi>(
                     };
                     goals.push(StorageGoal::Price {
                         below: b,
-                        up_to_kwh: (up / 100.0 * sc.capacity_kwh).clamp(0.0, max_kwh),
+                        up_to_kwh: (up / 100.0 * capacity_kwh).clamp(0.0, max_kwh),
                     });
                 }
             }
         }
     }
-    Some(StorageInput {
+    let input = StorageInput {
         id: sc.id.clone(),
-        capacity_kwh: sc.capacity_kwh,
+        capacity_kwh,
         soc_now_kwh: soc_now,
         min_soc_kwh: min_kwh,
         max_soc_kwh: max_kwh,
-        max_charge_kw: sc.max_charge_kw,
-        max_discharge_kw: sc.max_discharge_kw,
-        round_trip_efficiency: sc.round_trip_efficiency,
-        allow_grid_charge: sc.allow_grid_charge,
+        max_charge_kw,
+        max_discharge_kw,
+        round_trip_efficiency: efficiency,
+        allow_grid_charge,
         available,
-        cycle_cost_aud_per_kwh: sc.cycle_cost_aud_per_kwh,
+        cycle_cost_aud_per_kwh: cycle_cost,
         goals,
-    })
+    };
+    let control = StorageControl { id: sc.id.clone(), charge, discharge };
+    Some((input, control))
 }
 
 /// Absolute range of the CURRENT instance of a daily window, up to `now`
@@ -437,11 +532,13 @@ impl Cycle {
             }
         }
 
-        // ---- site storage (optional): live SoC reads, no control ----
+        // ---- site storage (optional): live SoC reads + per-direction control ----
         let mut storage = Vec::new();
+        let mut storage_controls = Vec::new();
         for sc in &g.storage {
-            if let Some(s) = build_storage(ha, sc, &mut diags).await {
+            if let Some((s, ctrl)) = build_storage(ha, sc, &mut diags).await {
                 storage.push(s);
+                storage_controls.push(ctrl);
             }
         }
 
@@ -456,9 +553,36 @@ impl Cycle {
             storage,
         };
         let out = self.planner.plan_with_preview(&world, &contracts, preview);
-        let executed = Executor { dry_run: self.dry_run }
-            .execute(ha, global_enabled, &contracts, &out.decisions)
+        let executor = Executor { dry_run: self.dry_run };
+        let executed = executor.execute(ha, global_enabled, &contracts, &out.decisions).await;
+        // Storage: map each device's slot-0 plan to a current-step command, then
+        // actuate the authorised directions (mirrors the load executor; the
+        // unauthorised/unconfigured ones are skipped inside execute_storage).
+        let storage_decisions: Vec<StorageDecision> = out
+            .storage
+            .iter()
+            .map(|sp| {
+                let charge_watts = sp.charge_kw.first().copied().unwrap_or(0.0) * 1000.0;
+                let discharge_watts = sp.discharge_kw.first().copied().unwrap_or(0.0) * 1000.0;
+                StorageDecision {
+                    storage_id: sp.id.clone(),
+                    charge_watts,
+                    discharge_watts,
+                    reason: format!(
+                        "lp plan (charge {charge_watts:.0}W, discharge {discharge_watts:.0}W)"
+                    ),
+                }
+            })
+            .collect();
+        let storage_executed = executor
+            .execute_storage(ha, global_enabled, &storage_controls, &storage_decisions)
             .await;
+        if storage_executed.iter().any(|&b| b) {
+            tracing::debug!(
+                "storage: commanded {} device(s)",
+                storage_executed.iter().filter(|&&b| b).count()
+            );
+        }
 
         SolveReport {
             at: now.to_rfc3339(),

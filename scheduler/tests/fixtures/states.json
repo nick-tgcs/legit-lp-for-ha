@@ -433,5 +433,83 @@
     },
     "last_changed": "2026-06-10T00:00:00+00:00",
     "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "sensor.sonnen_01_capacity_kwh": {
+    "entity_id": "sensor.sonnen_01_capacity_kwh",
+    "state": "9.0",
+    "attributes": {
+      "unit_of_measurement": "kWh",
+      "device_class": "energy_storage",
+      "friendly_name": "sonnen_01_capacity_kwh"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "sensor.sonnen_02_capacity_kwh": {
+    "entity_id": "sensor.sonnen_02_capacity_kwh",
+    "state": "9.1",
+    "attributes": {
+      "unit_of_measurement": "kWh",
+      "device_class": "energy_storage",
+      "friendly_name": "sonnen_02_capacity_kwh"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "sensor.sonnen_round_trip_efficiency": {
+    "entity_id": "sensor.sonnen_round_trip_efficiency",
+    "state": "0.82",
+    "attributes": {
+      "friendly_name": "sonnen_round_trip_efficiency"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "input_number.input_number_sonnen_allow_export_above": {
+    "entity_id": "input_number.input_number_sonnen_allow_export_above",
+    "state": "30",
+    "attributes": {
+      "unit_of_measurement": "%",
+      "friendly_name": "input_number_sonnen_allow_export_above"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "input_number.input_number_sonnen_degradation_cost_per_kwh": {
+    "entity_id": "input_number.input_number_sonnen_degradation_cost_per_kwh",
+    "state": "0.02",
+    "attributes": {
+      "unit_of_measurement": "AUD/kWh",
+      "friendly_name": "input_number_sonnen_degradation_cost_per_kwh"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "input_boolean.grid_power_auto_manage_allow_charge": {
+    "entity_id": "input_boolean.grid_power_auto_manage_allow_charge",
+    "state": "on",
+    "attributes": {
+      "friendly_name": "grid_power_auto_manage_allow_charge"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "binary_sensor.battery_charge_automated": {
+    "entity_id": "binary_sensor.battery_charge_automated",
+    "state": "off",
+    "attributes": {
+      "friendly_name": "battery_charge_automated"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
+  },
+  "binary_sensor.battery_export_automated": {
+    "entity_id": "binary_sensor.battery_export_automated",
+    "state": "off",
+    "attributes": {
+      "friendly_name": "battery_export_automated"
+    },
+    "last_changed": "2026-06-10T00:00:00+00:00",
+    "last_updated": "2026-06-10T00:00:00+00:00"
   }
 }
