@@ -34,34 +34,35 @@
 
 ## Cutting a release
 
-One command, entirely in CI — **validate off `develop`, build off `main`**:
+**Validate off `develop`, build off `main` — and your merge is the release gate.**
 
 1. On `develop`, bump `version:` in `addon/config.yaml` (the single source of
    truth — Supervisor pulls `image:<version>`, so the config version and the
    GHCR image tag must stay in lockstep). This lands via a normal PR, so it is
    `test`-gated like anything else.
-2. **`make release`** (or Actions → promote → Run workflow on `develop`). This
-   dispatches **`promote.yml`**, which:
-   - opens (or reuses) a `develop` → `main` PR;
-   - waits for the PR's required check (`test`, per `protect-main`) and **merges
-     it** — `main`'s tree is now develop's validated tip;
-   - dispatches **`release.yml`** on `main`, which builds the multi-arch image
-     (amd64 + arm64) off `main`, pushes it to GHCR as
-     `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest` (with
-     `io.hass.version` stamped), then tags `v<version>` and cuts the GitHub
-     release with generated notes.
+2. **`make release`** opens a `develop` → `main` PR **with your own credentials**
+   (a plain `gh pr create` — no bot creates or approves it; that is the whole
+   point). CI runs the `validate` workflow on the PR (`pull_request` trigger);
+   the required check on `main` is `test` (per `protect-main`).
+3. **You review, approve, and merge it on GitHub.** Merging `main` is a *push to
+   `main`*, which triggers **`release.yml`** to build the multi-arch image (amd64
+   + arm64) off `main`, push it to GHCR as
+   `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest` (with
+   `io.hass.version` stamped), then tag `v<version>` and cut the GitHub release
+   with generated notes.
 
-That is it — no local step. `release.yml` is idempotent: if `v<version>` is
-already tagged it no-ops, so a re-run cannot double-publish. `make release-build`
-is an escape hatch that re-runs just the build-off-`main` step (e.g. if the build
-dispatch was lost after the merge).
+That is it — no local build step, and no bot in the merge path. `release.yml` is
+idempotent: if `v<version>` is already tagged it no-ops, so a re-run (or a push
+to `main` that didn't bump the version) cannot double-publish. `make
+release-build` is an escape hatch that re-runs just the build-off-`main` step
+(e.g. if the push-triggered build didn't fire after a merge).
 
-**Why a PR merge, not a push:** advancing `main` across `.github/workflows/`
-changes needs a credential the Actions `GITHUB_TOKEN` lacks — it refuses to
-*push* workflow files (`refusing to allow a GitHub App to … update workflow …
-without 'workflows' permission`). The same token is, however, allowed to *merge
-a PR* carrying them, so `promote.yml` merges instead of pushing. (This replaced
-the old local `make promote`, which used a developer's SSH key to push directly.)
+**Why a human merge, not an auto-merge bot:** the release gate is a deliberate
+human approval — you merge the PR, and that merge is what releases. A bonus: a
+human can land `.github/workflows/` changes on `main`, which the Actions
+`GITHUB_TOKEN` refuses to *push* (`refusing to allow a GitHub App to … update
+workflow … without 'workflows' permission`) — so even the workflow files release
+cleanly through your merge.
 
 **Ordering note (build off `main`):** because the image is built *after* `main`
 advances, `main` advertises the new version for the build's duration. That is
@@ -73,14 +74,12 @@ the new image only when you run `lp-setup update`, which you do *after* the
 ## Protection on `main`
 
 A repository ruleset (`protect-main`) enforces: no deletion, no force pushes,
-and the `test` status check. There is deliberately **no PR requirement** on the
-ruleset — but `promote.yml` still goes through a PR, because that is the only way
-the Actions token can land `.github/workflows/` changes on `main` (a direct push
-of workflow files is refused; a PR merge is not). The promote PR reruns `test`
-and merges on green, satisfying the required check. The result is a merge commit,
-which the `non_fast_forward` rule allows — that rule blocks history-rewriting
-force pushes, not ordinary descendant merges. `main`'s tree still equals
-develop's validated tip.
+and the `test` status check. The release goes through a `develop` → `main` PR so
+there is a human approval gate and a place for CI to rerun `test`; you merge it
+on green. The result is a merge commit, which the `non_fast_forward` rule allows
+— that rule blocks history-rewriting force pushes, not ordinary descendant
+merges. `main`'s tree then equals develop's validated tip, and that merge (a push
+to `main`) triggers `release.yml` to build off `main`.
 
 ## Dependency updates (Dependabot)
 
