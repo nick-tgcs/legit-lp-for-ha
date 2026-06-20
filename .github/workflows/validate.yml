@@ -1,8 +1,11 @@
-# PR validation + develop CI. The `test` job name is the required status
-# check on both rulesets — every develop push gets it, and it reruns on the
-# promote PR (develop -> main), so a release always advances main to a checked
-# SHA. `timeout-minutes` on every job so a hung step fails fast instead of
-# burning a runner (and a day) the way an untimed build can.
+# PR validation + develop CI. The `test` job name is the required status check on
+# both rulesets — every develop push gets it. The `promote` workflow opens the
+# develop -> main release PR with develop's tip as its head, so that SHA already
+# carries this `test` check and a release only ever advances main to a checked SHA
+# — no pull_request rerun on the promote PR is needed (which also means a
+# bot-authored develop tip can't put the release PR's required check in
+# `action_required`). `timeout-minutes` on every job so a hung step fails fast
+# instead of burning a runner (and a day) the way an untimed build can.
 name: validate
 on:
   pull_request:

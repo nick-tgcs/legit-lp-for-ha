@@ -4,7 +4,7 @@ IMAGE := ghcr.io/nick-tgcs/legit-lp-for-ha
 # lower it to make a red run pass. Current is ~91% (see `make coverage`).
 COVERAGE_FLOOR := 88
 
-.PHONY: release release-build build test coverage
+.PHONY: promote release-build build test coverage
 test:
 	cd scheduler && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 # Line coverage via cargo-tarpaulin. CI's `coverage` job runs exactly this, so
@@ -18,20 +18,21 @@ coverage:
 	  --fail-under $(COVERAGE_FLOOR)
 build:
 	docker build -t $(IMAGE):$(VERSION) .
-# Cut a release. Bump addon/config.yaml `version:` on develop first (via a PR),
-# then:
-#   make release   # open the develop -> main PR with YOUR credentials (no bot).
-# CI validates it; you approve + merge it on GitHub. Merging main is a push that
-# triggers release.yml to build + tag + publish off main. Your merge is the
-# release gate. See docs/RELEASING.md.
-release:
-	gh pr create --base main --head develop \
-	  --title "Release: promote develop -> main" \
-	  --body "Promote develop's validated tip to main. CI runs the required \`test\` check; approve + merge to release — merging main triggers release.yml to build off main."
+# Cutting a release is PIPELINE-driven — there's normally nothing to run here.
+# Bump addon/config.yaml `version:` on develop (via a PR); merging that bump is a
+# develop push, and the `promote` workflow opens the develop -> main release PR
+# for you. You review + merge it on GitHub; merging main triggers release.yml to
+# build + tag + publish off main. Your merge is the release gate. See
+# docs/RELEASING.md.
+#
+# This target is only a manual nudge: dispatch the same `promote` workflow (e.g.
+# to (re)open the PR without pushing to develop). It opens the PR; it never merges.
+promote:
+	gh workflow run promote.yml --ref develop
 
 # Escape hatch: (re)build + publish + tag off main WITHOUT a new PR — e.g. main
 # advanced but the push-triggered release.yml didn't run, or a build needs a
 # re-run. No-op if v<version> is already tagged. The normal path is the
-# develop -> main PR (`make release` opens it; you approve + merge it).
+# pipeline-opened develop -> main PR (the `promote` workflow opens it; you merge).
 release-build:
 	gh workflow run release.yml --ref main

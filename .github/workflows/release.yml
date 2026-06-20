@@ -1,8 +1,9 @@
 # Release pipeline — the "build off main" half of the model (validation happens
 # off develop: see validate.yml). main only ever advances via a human-approved
-# develop -> main PR (opened with `make release`, then approved + merged by YOU on
-# GitHub), so the commit this builds passed the full develop gate AND a human
-# review. Merging that PR is a push to main, which triggers this workflow to build
+# develop -> main PR (opened by the `promote` workflow when develop carries an
+# unreleased version, then approved + merged by YOU on GitHub), so the commit this
+# builds passed the full develop gate AND a human review. Merging that PR is a push
+# to main, which triggers this workflow to build
 # the multi-arch add-on image FROM main, push it to GHCR, then tag v<version> and
 # cut the GitHub release — all in CI, no local step.
 #

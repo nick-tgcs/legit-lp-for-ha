@@ -1,0 +1,71 @@
+# Open the release PR — the "promote" half of the flow, done by the PIPELINE (not
+# a local `make release`/`gh pr create`). On every push to develop, if
+# addon/config.yaml carries an UNRELEASED version (no v<version> tag yet) and no
+# develop -> main PR is already open, this opens one. It NEVER approves or merges:
+# your review + merge on GitHub is the release gate. Merging that PR is a push to
+# main, which triggers release.yml to build off main, push to GHCR, and tag.
+#
+# The version bump on develop IS the release intent — until you bump `version:`,
+# no release PR appears, and a routine develop push (e.g. a Dependabot bump) whose
+# version is already tagged is a no-op. At most one release PR is open at a time
+# (it tracks develop's tip as more commits land before you merge).
+#
+# Why this is NOT the old auto-merge bot: this job holds only `pull-requests:
+# write` — it can open a PR but cannot merge it. And it relies on no PR-time CI:
+# the PR's head is develop's tip, which validate.yml already checked on this same
+# develop push (`test` is the required check on protect-main), so the release PR
+# shows a green required check WITHOUT a pull_request rerun. That also sidesteps
+# the "action_required" hold GitHub puts on pull_request runs when develop's tip
+# was authored by a bot (e.g. a self-merged Dependabot PR).
+name: promote
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-release-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Open develop -> main PR when version is unreleased
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^version: "\(.*\)"/\1/p' addon/config.yaml)
+          test -n "$v" || { echo "::error::no version in addon/config.yaml"; exit 1; }
+
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "::notice title=Already released::v$v is tagged — nothing to promote."
+            exit 0
+          fi
+
+          existing=$(gh pr list --base main --head develop --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "::notice title=PR already open::develop -> main PR #$existing covers v$v — leaving it."
+            exit 0
+          fi
+
+          body=$(printf '%s\n' \
+            "Opened by the \`promote\` workflow because develop carries an unreleased version (\`v$v\`)." \
+            "" \
+            "The head is develop's validated tip: the required \`test\` check ran on this SHA via \`validate.yml\` (push to develop), so the required check on \`main\` is already satisfied." \
+            "" \
+            "**Review, approve, and merge to release.** Merging \`main\` is a push that triggers \`release.yml\` to build the multi-arch image off \`main\`, push it to GHCR, and tag \`v$v\`." \
+            "" \
+            "This workflow only *opens* this PR — it never approves or merges. Your merge is the release gate.")
+
+          gh pr create --base main --head develop \
+            --title "Release: promote develop -> main (v$v)" \
+            --body "$body"
+          echo "::notice title=Release PR opened::develop -> main for v$v — review + merge to release."

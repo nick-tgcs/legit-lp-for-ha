@@ -34,16 +34,23 @@
 
 ## Cutting a release
 
-**Validate off `develop`, build off `main` — and your merge is the release gate.**
+**Validate off `develop`, build off `main`. The pipeline opens the release PR;
+your merge is the release gate — there is no local script in the path.**
 
 1. On `develop`, bump `version:` in `addon/config.yaml` (the single source of
    truth — Supervisor pulls `image:<version>`, so the config version and the
    GHCR image tag must stay in lockstep). This lands via a normal PR, so it is
    `test`-gated like anything else.
-2. **`make release`** opens a `develop` → `main` PR **with your own credentials**
-   (a plain `gh pr create` — no bot creates or approves it; that is the whole
-   point). CI runs the `validate` workflow on the PR (`pull_request` trigger);
-   the required check on `main` is `test` (per `protect-main`).
+2. Merging that bump is a **push to `develop`**, which triggers the **`promote`**
+   workflow. Seeing an unreleased version (no `v<version>` tag) and no open
+   `develop` → `main` PR, it opens one for you. It is **create-only**: the job
+   holds `pull-requests: write` and *cannot* merge — no bot is in the merge path.
+   The PR's head is develop's tip, which `validate.yml` already checked on that
+   same develop push, so the required `test` check (per `protect-main`) is already
+   green on the PR — no `pull_request` rerun is needed, which also means a
+   bot-authored develop tip (e.g. a self-merged Dependabot PR) can't leave the
+   required check stuck in `action_required`. (Need to (re)open it by hand?
+   `make promote` dispatches the very same workflow.)
 3. **You review, approve, and merge it on GitHub.** Merging `main` is a *push to
    `main`*, which triggers **`release.yml`** to build the multi-arch image (amd64
    + arm64) off `main`, push it to GHCR as
@@ -51,18 +58,22 @@
    `io.hass.version` stamped), then tag `v<version>` and cut the GitHub release
    with generated notes.
 
-That is it — no local build step, and no bot in the merge path. `release.yml` is
-idempotent: if `v<version>` is already tagged it no-ops, so a re-run (or a push
-to `main` that didn't bump the version) cannot double-publish. `make
-release-build` is an escape hatch that re-runs just the build-off-`main` step
-(e.g. if the push-triggered build didn't fire after a merge).
+That is it — no local build step, no hand-cranked `gh pr create`, and no bot in
+the merge path. `release.yml` is idempotent: if `v<version>` is already tagged it
+no-ops, so a re-run (or a push to `main` that didn't bump the version) cannot
+double-publish. `make release-build` is an escape hatch that re-runs just the
+build-off-`main` step (e.g. if the push-triggered build didn't fire after a
+merge).
 
-**Why a human merge, not an auto-merge bot:** the release gate is a deliberate
-human approval — you merge the PR, and that merge is what releases. A bonus: a
-human can land `.github/workflows/` changes on `main`, which the Actions
-`GITHUB_TOKEN` refuses to *push* (`refusing to allow a GitHub App to … update
-workflow … without 'workflows' permission`) — so even the workflow files release
-cleanly through your merge.
+**Why the pipeline opens the PR but a human merges it:** the release gate is a
+deliberate human approval — you merge the PR, and that merge is what releases. The
+`promote` workflow only removes the hand-cranked `gh pr create`; with just
+`pull-requests: write` it cannot merge, so it is not the old auto-merge bot
+(`promote.yml`'s ancestor, which created *and* merged, was deleted). A bonus of
+the human merge: a person can land `.github/workflows/` changes on `main`, which
+the Actions `GITHUB_TOKEN` refuses to *push* (`refusing to allow a GitHub App to …
+update workflow … without 'workflows' permission`) — so even the workflow files
+release cleanly through your merge.
 
 **Ordering note (build off `main`):** because the image is built *after* `main`
 advances, `main` advertises the new version for the build's duration. That is
@@ -75,8 +86,10 @@ the new image only when you run `lp-setup update`, which you do *after* the
 
 A repository ruleset (`protect-main`) enforces: no deletion, no force pushes,
 and the `test` status check. The release goes through a `develop` → `main` PR so
-there is a human approval gate and a place for CI to rerun `test`; you merge it
-on green. The result is a merge commit, which the `non_fast_forward` rule allows
+there is a human approval gate; the required `test` check is already green on the
+PR's head (it ran on the develop push that the `promote` workflow reacted to), and
+you merge it on green. The result is a merge commit, which the `non_fast_forward`
+rule allows
 — that rule blocks history-rewriting force pushes, not ordinary descendant
 merges. `main`'s tree then equals develop's validated tip, and that merge (a push
 to `main`) triggers `release.yml` to build off `main`.
@@ -115,7 +128,7 @@ not required for safety.
 Why this is safe to fully automate: only PRs authored by `dependabot[bot]`
 self-merge (the actor gate — nothing else does), and they land on `develop`, not
 `main`. A surprising bump is caught in integration well before any release, and a
-release is a deliberate one-command step (`make release`) on top.
+release is a deliberate human merge of the pipeline-opened `promote` PR on top.
 
 ## Build notes
 
