@@ -29,6 +29,15 @@ impl ValueRef {
             ValueRef::Entity { .. } => None,
         }
     }
+
+    /// The HA entity backing this ref, if any (`None` for a literal). Used by the
+    /// reasoning panel to show the user which slider/sensor drove each value.
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            ValueRef::Entity { entity } => Some(entity),
+            _ => None,
+        }
+    }
 }
 
 /// A boolean that is either a literal (`true`/`false`) or read live from an HA
@@ -48,6 +57,16 @@ pub enum BoolRef {
 pub enum TimeRef {
     Literal(String),
     Entity { entity: String },
+}
+
+impl TimeRef {
+    /// The HA entity backing this time ref, if any (`None` for a literal).
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            TimeRef::Entity { entity } => Some(entity),
+            TimeRef::Literal(_) => None,
+        }
+    }
 }
 
 /// Parse a clock string, accepting both "HH:MM" (registry literals) and "HH:MM:SS"
@@ -146,7 +165,9 @@ pub struct PowerConfig {
     pub consumption_entity: String,
     pub pv_entity: String,
     pub pv_forecast: Option<PvForecastConfig>,
-    pub baseline_kw: f64,
+    /// Assumed always-on house baseload (kW) the plan subtracts before placing
+    /// managed loads — literal or entity-ref (e.g. a measured baseload sensor).
+    pub baseline_kw: ValueRef,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -169,10 +190,11 @@ pub struct StorageConfig {
     /// Total usable capacity (kWh) — literal, or (better) an entity-ref to the
     /// live FullChargeCapacity so it tracks degradation.
     pub capacity_kwh: ValueRef,
-    /// Per-cabinet charge power limit (kW). `max_discharge_kw == 0` = charge-only.
-    pub max_charge_kw: f64,
-    #[serde(default)]
-    pub max_discharge_kw: f64,
+    /// Per-cabinet charge power limit (kW) — literal or entity-ref.
+    /// `max_discharge_kw == 0` = charge-only.
+    pub max_charge_kw: ValueRef,
+    #[serde(default = "default_zero_ref")]
+    pub max_discharge_kw: ValueRef,
     /// Round-trip efficiency in (0,1] — literal or entity-ref.
     #[serde(default = "default_round_trip_ref")]
     pub round_trip_efficiency: ValueRef,
@@ -180,9 +202,9 @@ pub struct StorageConfig {
     /// entity-ref (e.g. an export-limit slider).
     #[serde(default = "default_zero_ref")]
     pub reserve_soc_pct: ValueRef,
-    /// Usable ceiling, as a percentage of `capacity_kwh`.
-    #[serde(default = "default_max_soc_pct")]
-    pub max_soc_pct: f64,
+    /// Usable ceiling, as a percentage of `capacity_kwh` — literal or entity-ref.
+    #[serde(default = "default_max_soc_pct_ref")]
+    pub max_soc_pct: ValueRef,
     /// If false, may only charge from instantaneous PV (never the grid). Literal
     /// (`true`/`false`) or an entity-ref to a toggle.
     #[serde(default = "default_true_ref")]
@@ -248,9 +270,10 @@ impl StorageThresholdCfg {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StorageGoalCfg {
-    /// Charge to `soc_pct` by the next occurrence of `ready_by` ("HH:MM"), as
-    /// cheaply as possible. Soft — shortfall is reported, never forced.
-    Target { soc_pct: ValueRef, ready_by: String },
+    /// Charge to `soc_pct` by the next occurrence of `ready_by`, as cheaply as
+    /// possible. `ready_by` is a literal "HH:MM" or an entity-ref (e.g. the peak
+    /// start `input_datetime`). Soft — shortfall is reported, never forced.
+    Target { soc_pct: ValueRef, ready_by: TimeRef },
     /// Charge while import price is below `below` ($/kWh), up to `up_to_soc_pct`
     /// (default 100). The "just charge when it's cheap" policy.
     Price { below: ValueRef, up_to_soc_pct: Option<ValueRef> },
@@ -262,8 +285,8 @@ fn default_round_trip_ref() -> ValueRef {
 fn default_zero_ref() -> ValueRef {
     ValueRef::Literal { value: 0.0 }
 }
-fn default_max_soc_pct() -> f64 {
-    100.0
+fn default_max_soc_pct_ref() -> ValueRef {
+    ValueRef::Literal { value: 100.0 }
 }
 fn default_true_ref() -> BoolRef {
     BoolRef::Plain(true)
@@ -365,20 +388,26 @@ pub struct StateCfg {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CapabilityCfg {
-    pub power_kw: f64,
-    pub drop_per_hour: Option<f64>,
-    pub change_per_hour: Option<f64>,
-    pub drift_per_hour: Option<f64>,
+    /// Rated electrical draw (kW) — literal or entity-ref (e.g. a live power meter).
+    pub power_kw: ValueRef,
+    /// Setpoint dynamics (°C or %RH per hour) — literal or entity-ref. Absent = the
+    /// load has no modelled dynamics (0); required for `predictive` aircon/dehum.
+    pub drop_per_hour: Option<ValueRef>,
+    pub change_per_hour: Option<ValueRef>,
+    pub drift_per_hour: Option<ValueRef>,
     pub ambient_entity: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HardRulesCfg {
-    #[serde(default)]
-    pub min_run_minutes: u32,
-    #[serde(default)]
-    pub min_off_minutes: u32,
-    pub max_starts_per_day: Option<u32>,
+    /// Minimum continuous run once started (minutes) — literal or entity-ref.
+    #[serde(default = "default_zero_ref")]
+    pub min_run_minutes: ValueRef,
+    /// Minimum off-time between runs (minutes) — literal or entity-ref.
+    #[serde(default = "default_zero_ref")]
+    pub min_off_minutes: ValueRef,
+    /// Daily on-transition ceiling — literal or entity-ref; absent = unbounded.
+    pub max_starts_per_day: Option<ValueRef>,
     #[serde(default)]
     pub windows: Vec<WindowCfg>,
 }
@@ -389,8 +418,8 @@ pub enum DemandCfg {
     Runtime {
         amount_hours: Option<ValueRef>,
         amount_minutes: Option<ValueRef>,
-        /// Can-take cap.
-        max_minutes: Option<u32>,
+        /// Can-take cap (minutes) — literal or entity-ref.
+        max_minutes: Option<ValueRef>,
         window: WindowCfg,
         max_price: Option<ValueRef>,
     },
@@ -400,31 +429,35 @@ pub enum DemandCfg {
         target_percent: Option<ValueRef>,
         start_hysteresis: Option<ValueRef>,
         window: Option<WindowCfg>,
-        max_minutes: Option<u32>,
+        max_minutes: Option<ValueRef>,
         max_price: Option<ValueRef>,
     },
     TemperatureBand {
         target_c: ValueRef,
-        band_c: f64,
+        /// Half-band around target (°C) — literal or entity-ref (e.g. a hysteresis slider).
+        band_c: ValueRef,
         window: WindowCfg,
-        max_minutes: Option<u32>,
+        max_minutes: Option<ValueRef>,
         max_price: Option<ValueRef>,
     },
 }
 
 impl DemandCfg {
-    pub fn cap_minutes(&self) -> Option<u32> {
+    /// The can-take cap ref, if set. Presence (not the value) is what validation
+    /// checks; the magnitude is resolved live each cycle.
+    pub fn cap_minutes(&self) -> Option<&ValueRef> {
         match self {
             DemandCfg::Runtime { max_minutes, .. }
             | DemandCfg::HumidityBelow { max_minutes, .. }
-            | DemandCfg::TemperatureBand { max_minutes, .. } => *max_minutes,
+            | DemandCfg::TemperatureBand { max_minutes, .. } => max_minutes.as_ref(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PreferencesCfg {
-    pub start_cost_aud: f64,
+    /// Per-start wear cost (AUD) — literal or entity-ref.
+    pub start_cost_aud: ValueRef,
 }
 
 /// Required runtime: live-tuned hours -> whole minutes, rounding up
@@ -566,26 +599,39 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
             return err(format!("storage '{}': capacity_kwh must be > 0", s.id));
         }
     }
-    if s.max_charge_kw <= 0.0 || s.max_discharge_kw < 0.0 {
-        return err(format!(
-            "storage '{}': max_charge_kw must be > 0 and max_discharge_kw >= 0 (0 = charge-only)",
-            s.id
-        ));
+    if let Some(c) = s.max_charge_kw.as_literal() {
+        if c <= 0.0 {
+            return err(format!("storage '{}': max_charge_kw must be > 0", s.id));
+        }
+    }
+    if let Some(d) = s.max_discharge_kw.as_literal() {
+        if d < 0.0 {
+            return err(format!(
+                "storage '{}': max_discharge_kw must be >= 0 (0 = charge-only)",
+                s.id
+            ));
+        }
     }
     if let Some(e) = s.round_trip_efficiency.as_literal() {
         if e <= 0.0 || e > 1.0 {
             return err(format!("storage '{}': round_trip_efficiency must be in (0,1]", s.id));
         }
     }
-    if !(0.0..=100.0).contains(&s.max_soc_pct) {
-        return err(format!("storage '{}': max_soc_pct must be within 0..=100", s.id));
+    if let Some(m) = s.max_soc_pct.as_literal() {
+        if !(0.0..=100.0).contains(&m) {
+            return err(format!("storage '{}': max_soc_pct must be within 0..=100", s.id));
+        }
     }
-    if let Some(r) = s.reserve_soc_pct.as_literal() {
-        if !(0.0..=100.0).contains(&r) || r >= s.max_soc_pct {
+    if let (Some(r), Some(m)) = (s.reserve_soc_pct.as_literal(), s.max_soc_pct.as_literal()) {
+        if !(0.0..=100.0).contains(&r) || r >= m {
             return err(format!(
-                "storage '{}': reserve_soc_pct ({r}) must be < max_soc_pct ({}), within 0..=100",
-                s.id, s.max_soc_pct
+                "storage '{}': reserve_soc_pct ({r}) must be < max_soc_pct ({m}), within 0..=100",
+                s.id
             ));
+        }
+    } else if let Some(r) = s.reserve_soc_pct.as_literal() {
+        if !(0.0..=100.0).contains(&r) {
+            return err(format!("storage '{}': reserve_soc_pct must be within 0..=100", s.id));
         }
     }
     for dir in [&s.charge, &s.discharge].into_iter().flatten() {
@@ -595,12 +641,9 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
         }
     }
     for g in &s.goals {
-        if let StorageGoalCfg::Target { ready_by, .. } = g {
-            NaiveTime::parse_from_str(ready_by, "%H:%M").map_err(|e| {
-                SchedulerError::Config(format!(
-                    "storage '{}': bad ready_by '{ready_by}': {e}",
-                    s.id
-                ))
+        if let StorageGoalCfg::Target { ready_by: TimeRef::Literal(rb), .. } = g {
+            parse_clock(rb).map_err(|e| {
+                SchedulerError::Config(format!("storage '{}': bad ready_by '{rb}': {e}", s.id))
             })?;
         }
     }
@@ -707,8 +750,8 @@ mod tests {
         assert_eq!(b.id, "sonnen01");
         assert_eq!(b.soc_entities, ["sensor.usoc_sonnen01"]);
         assert!(matches!(b.capacity_kwh, ValueRef::Entity { .. }));
-        assert_eq!(b.max_charge_kw, 4.0);
-        assert_eq!(b.max_discharge_kw, 4.0);
+        assert_eq!(b.max_charge_kw.as_literal(), Some(4.0));
+        assert_eq!(b.max_discharge_kw.as_literal(), Some(4.0));
         assert!(matches!(b.round_trip_efficiency, ValueRef::Entity { .. }));
         assert!(matches!(b.reserve_soc_pct, ValueRef::Entity { .. }));
         assert!(matches!(b.cycle_cost_aud_per_kwh, ValueRef::Entity { .. }));
@@ -752,16 +795,15 @@ loads: []
         assert_eq!(cfg.global.storage.len(), 2);
         let home = &cfg.global.storage[0];
         assert_eq!(home.round_trip_efficiency.as_literal(), Some(0.9));
-        assert_eq!(home.max_soc_pct, 100.0);
+        assert_eq!(home.max_soc_pct.as_literal(), Some(100.0));
         assert_eq!(home.reserve_soc_pct.as_literal(), Some(0.0));
         assert!(home.allow_grid_charge == BoolRef::Plain(true) && home.available_entity.is_none());
         let ev = &cfg.global.storage[1];
-        assert_eq!(ev.max_discharge_kw, 0.0, "charge-only by default");
+        assert_eq!(ev.max_discharge_kw.as_literal(), Some(0.0), "charge-only by default");
         assert_eq!(ev.available_entity.as_deref(), Some("binary_sensor.ev_plugged_in"));
         assert_eq!(ev.goals.len(), 2);
-        assert!(
-            matches!(&ev.goals[0], StorageGoalCfg::Target { ready_by, .. } if ready_by == "07:00")
-        );
+        assert!(matches!(&ev.goals[0], StorageGoalCfg::Target { ready_by, .. }
+                if matches!(ready_by, TimeRef::Literal(s) if s == "07:00")));
         assert!(matches!(&ev.goals[1], StorageGoalCfg::Price { .. }));
     }
 

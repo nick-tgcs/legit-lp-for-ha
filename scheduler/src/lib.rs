@@ -16,6 +16,7 @@ pub mod ha_client;
 pub mod lp;
 pub mod model;
 pub mod profile;
+pub mod reasoning;
 pub mod rules;
 pub mod status;
 pub mod testkit;

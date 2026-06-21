@@ -15,6 +15,7 @@ use crate::ha_client::{fold_history, on_predicate_binary, on_predicate_climate, 
 use crate::lp::LpPlanner;
 use crate::model::*;
 use crate::profile::Profiles;
+use crate::reasoning;
 use crate::status::{LoadReport, SolveReport, StorageReport};
 use crate::time::{in_window, local_midnight, Grid};
 
@@ -59,6 +60,30 @@ async fn resolve_opt<A: HaApi>(
     match vr {
         Some(v) => resolve(ha, v, diags).await,
         None => None,
+    }
+}
+
+/// Resolve an optional minutes ref (literal or entity) to whole minutes (ceil).
+/// `None` means NOT configured. A configured-but-unreadable entity-ref fails
+/// CLOSED to `Some(0)` (with a diagnostic), NOT to `None`: a can-take cap that
+/// silently vanished would let a discretionary load run unbounded — the opposite
+/// of the "always capped" invariant.
+async fn resolve_minutes<A: HaApi>(
+    ha: &A,
+    vr: &Option<ValueRef>,
+    diags: &mut Vec<String>,
+) -> Option<u32> {
+    match vr {
+        None => None,
+        Some(v) => match resolve(ha, v, diags).await {
+            Some(m) => Some(m.ceil().max(0.0) as u32),
+            None => {
+                diags.push(
+                    "cap minutes unresolved; failing closed to 0 (no discretionary run)".into(),
+                );
+                Some(0)
+            }
+        },
     }
 }
 
@@ -229,9 +254,10 @@ async fn build_storage<A: HaApi>(
         resolve(ha, &sc.round_trip_efficiency, diags).await.unwrap_or(0.9).clamp(0.05, 1.0);
     let cycle_cost = resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await.unwrap_or(0.001).max(0.0);
     let allow_grid_charge = resolve_bool(ha, &sc.allow_grid_charge, diags).await.unwrap_or(true);
+    let max_soc_pct = resolve(ha, &sc.max_soc_pct, diags).await.unwrap_or(100.0).clamp(0.0, 100.0);
 
     let mut min_kwh = reserve_pct / 100.0 * capacity_kwh;
-    let max_kwh = sc.max_soc_pct / 100.0 * capacity_kwh;
+    let max_kwh = max_soc_pct / 100.0 * capacity_kwh;
     if min_kwh > max_kwh {
         min_kwh = max_kwh; // degenerate reserve >= ceiling => freeze (fail safe)
     }
@@ -249,18 +275,28 @@ async fn build_storage<A: HaApi>(
     let discharge = resolve_direction(ha, sc.discharge.as_ref(), diags).await;
     let charge_auth = charge.as_ref().map(|d| d.authority).unwrap_or(false);
     let discharge_auth = discharge.as_ref().map(|d| d.authority).unwrap_or(false);
-    let max_charge_kw = if sc.charge.is_some() && !charge_auth { 0.0 } else { sc.max_charge_kw };
+    let rated_charge_kw = resolve(ha, &sc.max_charge_kw, diags).await.unwrap_or(0.0).max(0.0);
+    let rated_discharge_kw = resolve(ha, &sc.max_discharge_kw, diags).await.unwrap_or(0.0).max(0.0);
+    // Parse-time validation only guards a LITERAL max_charge_kw > 0; an entity-ref
+    // that reads unavailable/zero collapses to 0 (charging off) with no error. That's
+    // fail-safe (no overcharge) but silently disables a core function — surface it.
+    if sc.max_charge_kw.source().is_some() && rated_charge_kw <= 0.0 {
+        diags.push(format!(
+            "storage '{}': max_charge_kw entity unresolved/zero; charging disabled this cycle",
+            sc.id
+        ));
+    }
+    let max_charge_kw = if sc.charge.is_some() && !charge_auth { 0.0 } else { rated_charge_kw };
     let max_discharge_kw =
-        if sc.discharge.is_some() && !discharge_auth { 0.0 } else { sc.max_discharge_kw };
+        if sc.discharge.is_some() && !discharge_auth { 0.0 } else { rated_discharge_kw };
 
     let mut goals = Vec::new();
     for g in &sc.goals {
         match g {
             config::StorageGoalCfg::Target { soc_pct, ready_by } => {
-                if let (Some(pct), Ok(rb)) = (
-                    resolve(ha, soc_pct, diags).await,
-                    chrono::NaiveTime::parse_from_str(ready_by, "%H:%M"),
-                ) {
+                if let (Some(pct), Some(rb)) =
+                    (resolve(ha, soc_pct, diags).await, resolve_time(ha, ready_by, diags).await)
+                {
                     goals.push(StorageGoal::Target {
                         soc_kwh: (pct / 100.0 * capacity_kwh).clamp(0.0, max_kwh),
                         ready_by: rb,
@@ -426,9 +462,21 @@ impl Cycle {
                 Some(e) => f64_of(ha, e, &mut diags).await,
                 None => None,
             };
+            // Setpoint dynamics resolved live (literal or entity-ref); absent = 0.
+            let rates = Rates {
+                change_per_hour: resolve_opt(ha, &l.capability.change_per_hour, &mut diags)
+                    .await
+                    .unwrap_or(0.0),
+                drift_per_hour: resolve_opt(ha, &l.capability.drift_per_hour, &mut diags)
+                    .await
+                    .unwrap_or(0.0),
+                drop_per_hour: resolve_opt(ha, &l.capability.drop_per_hour, &mut diags)
+                    .await
+                    .unwrap_or(0.0),
+            };
             let mh = patch_ambient(mh, ambient);
-            let mh = patch_rates(mh, &l.capability);
-            let ct = ct.map(|d| patch_rates(d, &l.capability));
+            let mh = patch_rates(mh, &rates);
+            let ct = ct.map(|d| patch_rates(d, &rates));
             let (sd, ss) = (l.control.start.split().unwrap(), l.control.stop.split().unwrap());
             let obs = Observation {
                 running,
@@ -452,6 +500,48 @@ impl Cycle {
                     .unwrap_or(std::time::Duration::ZERO),
             };
             let mh = patch_completed(mh, obs.runtime_in_mh_window);
+            // Hard-rule limits resolved live (literal or entity-ref) — never hardcoded.
+            let min_run_min = resolve(ha, &l.hard_rules.min_run_minutes, &mut diags)
+                .await
+                .unwrap_or(0.0)
+                .max(0.0);
+            let min_off_min = resolve(ha, &l.hard_rules.min_off_minutes, &mut diags)
+                .await
+                .unwrap_or(0.0)
+                .max(0.0);
+            // Daily start ceiling. A configured-but-unreadable entity-ref leaves the
+            // ceiling unenforced this cycle (extra wear, not unsafe) — surface it so a
+            // flaky sensor isn't silent, rather than looking like "no ceiling set".
+            let max_starts = match &l.hard_rules.max_starts_per_day {
+                None => None,
+                Some(vr) => match resolve(ha, vr, &mut diags).await {
+                    Some(v) => Some(v.max(0.0) as u32),
+                    None => {
+                        diags.push(format!(
+                            "load '{}': max_starts_per_day unresolved; ceiling not enforced this cycle",
+                            l.id
+                        ));
+                        None
+                    }
+                },
+            };
+            // Capability + preference magnitudes resolved live (literal or entity-ref).
+            let power_kw =
+                resolve(ha, &l.capability.power_kw, &mut diags).await.unwrap_or(0.0).max(0.0);
+            // Fail CLOSED: a load whose draw can't be read (entity-ref unavailable) or
+            // is non-positive can't be modelled — a 0-kW load looks "free" to the LP and
+            // sails past every price ceiling. Hold it observe-only this cycle.
+            if power_kw <= 0.0 {
+                diags.push(format!(
+                    "load '{}': power_kw unresolved/zero; holding (observe-only)",
+                    l.id
+                ));
+                authority = false;
+            }
+            let start_cost_aud = resolve(ha, &l.preferences.start_cost_aud, &mut diags)
+                .await
+                .unwrap_or(0.0)
+                .max(0.0);
             contracts.push(LoadContract {
                 id: LoadId(l.id.clone()),
                 load_type: match l.load_type {
@@ -464,21 +554,17 @@ impl Cycle {
                     PlanningMode::Predictive => Planning::Predictive,
                     PlanningMode::Immediate => Planning::Immediate,
                 },
-                power_kw: l.capability.power_kw,
+                power_kw,
                 authority,
                 hard: HardRules {
-                    min_run: std::time::Duration::from_secs(
-                        u64::from(l.hard_rules.min_run_minutes) * 60,
-                    ),
-                    min_off: std::time::Duration::from_secs(
-                        u64::from(l.hard_rules.min_off_minutes) * 60,
-                    ),
-                    max_starts_per_day: l.hard_rules.max_starts_per_day,
+                    min_run: std::time::Duration::from_secs((min_run_min * 60.0) as u64),
+                    min_off: std::time::Duration::from_secs((min_off_min * 60.0) as u64),
+                    max_starts_per_day: max_starts,
                     windows: hard_windows,
                 },
                 must_have: mh,
                 can_take: ct,
-                prefs: Preferences { start_cost_aud: l.preferences.start_cost_aud },
+                prefs: Preferences { start_cost_aud },
                 obs,
                 control: Control {
                     start: ServiceCall {
@@ -523,7 +609,8 @@ impl Cycle {
                 ),
                 None => (None, None),
             };
-            baseload = profiles.baseload_curve(&grid, p.baseline_kw, cons_now_kw);
+            let baseline_kw = resolve(ha, &p.baseline_kw, &mut diags).await.unwrap_or(0.8).max(0.0);
+            baseload = profiles.baseload_curve(&grid, baseline_kw, cons_now_kw);
             pv = profiles.pv_curve(&grid, |d| if d == today { t_today } else { t_tom }, pv_now_kw);
             if let Some(path) = &self.profile_path {
                 if let Err(e) = profiles.save(path) {
@@ -584,6 +671,11 @@ impl Cycle {
             );
         }
 
+        // PV surplus over baseload per step — the can-take/must-have masks need it,
+        // and so does the reasoning panel's step-availability breakdown.
+        let surplus: Vec<f64> =
+            (0..n).map(|t| (world.pv[t] - world.baseload[t]).max(0.0)).collect();
+
         SolveReport {
             at: now.to_rfc3339(),
             solver_ms: started.elapsed().as_millis() as u64,
@@ -613,6 +705,24 @@ impl Cycle {
                     } else {
                         "idle"
                     };
+                    // A device is "actuated" when any direction is authorised
+                    // (Optimiser); otherwise the plan is advisory.
+                    let authority = storage_controls
+                        .iter()
+                        .find(|c| c.id == b.id)
+                        .map(|c| {
+                            c.charge.as_ref().map(|d| d.authority).unwrap_or(false)
+                                || c.discharge.as_ref().map(|d| d.authority).unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    let reasoning = self
+                        .registry
+                        .global
+                        .storage
+                        .iter()
+                        .find(|s| s.id == b.id)
+                        .map(|cfg| reasoning::for_storage(cfg, b, action, authority, &grid))
+                        .unwrap_or_default();
                     StorageReport {
                         id: b.id.clone(),
                         capacity_kwh: b.capacity_kwh,
@@ -624,6 +734,7 @@ impl Cycle {
                         discharge_kw: b.discharge_kw.clone(),
                         action: action.into(),
                         target_unmet: b.target_unmet,
+                        reasoning,
                     }
                 })
                 .collect(),
@@ -633,6 +744,14 @@ impl Cycle {
                 .enumerate()
                 .map(|(i, d)| {
                     let plan = out.plans.iter().find(|p| p.id == d.load_id);
+                    let reasoning = reasoning::for_load(
+                        &self.registry.loads[i],
+                        &contracts[i],
+                        plan,
+                        &grid,
+                        &world.import,
+                        &surplus,
+                    );
                     LoadReport {
                         id: d.load_id.0.clone(),
                         planning: format!("{:?}", contracts[i].planning).to_lowercase(),
@@ -644,6 +763,7 @@ impl Cycle {
                         executed: executed[i],
                         on: plan.map(|p| p.on.clone()).unwrap_or_default(),
                         ct: plan.map(|p| p.ct.clone()).unwrap_or_default(),
+                        reasoning,
                     }
                 })
                 .collect(),
@@ -662,11 +782,12 @@ impl Cycle {
     ) -> Demand {
         match d {
             DemandCfg::Runtime { amount_hours, amount_minutes, max_minutes, window, max_price } => {
+                let cap = resolve_minutes(ha, max_minutes, diags).await;
                 let mut mins = match resolve_opt(ha, amount_minutes, diags).await {
                     Some(m) => m.ceil().max(0.0) as u32,
                     None => match resolve_opt(ha, amount_hours, diags).await {
                         Some(h) => config::hours_to_minutes(h),
-                        None => max_minutes.unwrap_or(0),
+                        None => cap.unwrap_or(0),
                     },
                 };
                 let window = match resolve_window(ha, window, diags).await {
@@ -715,26 +836,31 @@ impl Cycle {
                         drop_per_hour: 0.0,
                         drift_per_hour: 0.0,
                         window,
-                        cap_minutes: *max_minutes,
+                        cap_minutes: resolve_minutes(ha, max_minutes, diags).await,
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,
                 }
             }
             DemandCfg::TemperatureBand { target_c, band_c, window, max_minutes, max_price } => {
                 let target = resolve(ha, target_c, diags).await;
+                let band = resolve(ha, band_c, diags).await;
                 if target.is_none() {
                     diags.push("temperature target unresolved; demand disabled".into());
+                }
+                if band.is_none() {
+                    diags.push("temperature band unresolved; demand disabled".into());
                 }
                 let window = resolve_window(ha, window, diags).await;
                 if window.is_none() {
                     diags.push("temperature window unresolved; demand disabled".into());
                 }
-                let active = target.is_some() && window.is_some();
+                let active = target.is_some() && band.is_some() && window.is_some();
                 let t = target.unwrap_or(f64::NAN);
+                let b = band.unwrap_or(0.0);
                 Demand {
                     kind: DemandKind::TemperatureBand {
-                        min: t - band_c,
-                        max: t + band_c,
+                        min: t - b,
+                        max: t + b,
                         observed: if active { observed } else { None },
                         change_per_hour: 0.0, // patched from capability below
                         drift_per_hour: 0.0,
@@ -743,7 +869,7 @@ impl Cycle {
                             start: chrono::NaiveTime::MIN,
                             end: chrono::NaiveTime::MIN,
                         }),
-                        cap_minutes: *max_minutes,
+                        cap_minutes: resolve_minutes(ha, max_minutes, diags).await,
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,
                 }
@@ -775,15 +901,22 @@ fn patch_ambient(mut d: Demand, amb: Option<f64>) -> Demand {
     d
 }
 
-fn patch_rates(mut d: Demand, cap: &crate::config::CapabilityCfg) -> Demand {
+/// Live-resolved setpoint dynamics (°C or %RH per hour) for one load.
+struct Rates {
+    change_per_hour: f64,
+    drift_per_hour: f64,
+    drop_per_hour: f64,
+}
+
+fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
     match &mut d.kind {
         DemandKind::TemperatureBand { change_per_hour, drift_per_hour, .. } => {
-            *change_per_hour = cap.change_per_hour.unwrap_or(0.0);
-            *drift_per_hour = cap.drift_per_hour.unwrap_or(0.0);
+            *change_per_hour = rates.change_per_hour;
+            *drift_per_hour = rates.drift_per_hour;
         }
         DemandKind::HumidityBelow { drop_per_hour, drift_per_hour, .. } => {
-            *drop_per_hour = cap.drop_per_hour.unwrap_or(0.0);
-            *drift_per_hour = cap.drift_per_hour.unwrap_or(0.0);
+            *drop_per_hour = rates.drop_per_hour;
+            *drift_per_hour = rates.drift_per_hour;
         }
         DemandKind::Runtime { .. } => {}
     }

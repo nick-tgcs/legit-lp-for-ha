@@ -28,6 +28,7 @@ fn report() -> SolveReport {
             executed: false,
             on: vec![false, true, true, false],
             ct: vec![false, false, true, false],
+            reasoning: Default::default(),
         }],
         ..Default::default()
     }
@@ -66,6 +67,7 @@ fn full_report() -> SolveReport {
             discharge_kw: vec![0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 0.0, 0.0],
             action: "charging".into(),
             target_unmet: 0.0,
+            reasoning: Default::default(),
         }],
         loads: vec![LoadReport {
             id: "hot_water".into(),
@@ -78,6 +80,7 @@ fn full_report() -> SolveReport {
             executed: false,
             on: vec![false, true, true, false, false, true, false, false],
             ct: vec![false, false, true, false, false, false, false, false],
+            reasoning: Default::default(),
         }],
         ..Default::default()
     }
@@ -201,6 +204,20 @@ async fn w7_index_inlines_the_svg_so_hover_tooltips_work() {
     assert!(!html.contains("<img"), "no <img>: an img-loaded SVG cannot show tooltips");
     assert!(html.contains("./horizon.svg"), "still loads the chart");
     assert!(html.contains("innerHTML"), "injects the SVG inline for interactivity");
+}
+
+#[tokio::test]
+async fn w11_index_has_per_device_why_panels_for_loads_and_storage() {
+    // Every load AND storage device gets an Overview/Why two-tab card driven by the
+    // serialised `reasoning` object — so the user can see why the LP did what it did.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    assert!(html.contains("setTab"), "tab switching is wired");
+    assert!(html.contains(">Overview<") && html.contains(">Why<"), "both tabs are present");
+    assert!(html.contains(r#"id="storage""#), "storage devices get their own cards");
+    assert!(html.contains("reasoning"), "cards render the reasoning view-model");
+    assert!(html.contains("Resolved inputs"), "the Why tab lists resolved live inputs");
 }
 
 #[tokio::test]

@@ -109,6 +109,36 @@ async fn c1_dry_run_cycle_produces_report_and_zero_calls() {
 }
 
 #[tokio::test]
+async fn c1b_unreadable_entity_ref_power_holds_the_load_observe_only() {
+    // De-hardcoding fail-CLOSED guard: if a load's power_kw is entity-ref'd and the
+    // sensor is unavailable, resolve -> 0 kW, which would otherwise look "free" to the
+    // LP and sail past every price ceiling. The cycle must hold it observe-only +
+    // surface a diagnostic, never command it.
+    let mut reg = registry();
+    let hw = reg.loads.iter_mut().find(|l| l.id == "hot_water").expect("hot_water load");
+    hw.capability.power_kw = config::ValueRef::Entity { entity: "sensor.missing_hw_power".into() };
+    let mut ha = canned_ha();
+    // Grant authority so the ONLY thing that can hold the load is the fail-closed guard.
+    set_state(&mut ha, "binary_sensor.hot_water_automated", "on");
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let hw = report.loads.iter().find(|l| l.id == "hot_water").unwrap();
+    assert!(hw.reason.contains("observe-only"), "held observe-only: {}", hw.reason);
+    assert!(
+        report.diagnostics.iter().any(|d| d.contains("power_kw")),
+        "power_kw fail-closed diagnostic surfaced: {:?}",
+        report.diagnostics
+    );
+}
+
+#[tokio::test]
 async fn c2_live_cycle_issues_exactly_the_planned_call() {
     let mut ha = canned_ha();
     // Humid house, price between hot-water ct ceiling (0.10) and dehumidifier

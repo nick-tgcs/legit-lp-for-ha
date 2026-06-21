@@ -454,6 +454,7 @@ mod tests {
                 executed: false,
                 on: vec![true, false],
                 ct: vec![false, false],
+                reasoning: Default::default(),
             }],
             ..Default::default()
         };
