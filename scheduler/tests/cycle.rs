@@ -423,6 +423,22 @@ async fn c10_charge_authority_writes_only_the_charge_rate_per_direction() {
 }
 
 #[tokio::test]
+async fn c10b_report_carries_per_direction_authority_for_the_panel() {
+    // Same one-sided fixture (charge Optimiser, export Manual). The view-model must
+    // expose per-direction authority so the panel tags the ACTIVE direction by what
+    // will actually be actuated: `execute_storage` drives charge but never discharge.
+    // Device-level `authority` stays true (the cabinet IS partly controllable).
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 storage");
+    assert!(s.charge_authority, "charge is in Optimiser => its direction is authorised");
+    assert!(!s.discharge_authority, "export stays Manual => discharge is advisory");
+    assert!(s.authority, "device-level authority is true when any direction is authorised");
+}
+
+#[tokio::test]
 async fn c11_storage_dry_run_writes_no_rate_even_when_authorised() {
     let mut ha = canned_ha();
     set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");

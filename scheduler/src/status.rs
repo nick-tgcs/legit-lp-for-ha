@@ -98,6 +98,12 @@ pub struct StorageReport {
     /// Any direction authorised (Optimiser)? false => the trajectory is advisory
     /// (the panel shows it as "(preview)"/"(dry-run)", never executed).
     pub authority: bool,
+    /// Per-direction authority: true when THAT direction is configured AND
+    /// authorised — i.e. exactly when `execute_storage` will drive it. The panel
+    /// tags the current action by its OWN direction, so a charge-only device shows
+    /// a planned discharge as advisory (it won't be actuated), not "live · executes".
+    pub charge_authority: bool,
+    pub discharge_authority: bool,
     /// Unmet target energy (kWh) across this device's deadline goals; 0 = met.
     pub target_unmet: f64,
     /// The "Why" explanation behind this device's planned trajectory.
@@ -153,6 +159,10 @@ pub struct SolveReport {
     /// RFC3339 local timestamps (view-model: strings, not chrono types).
     pub at: String,
     pub solver_ms: u64,
+    /// Grid step length in minutes (the solve resolution). The panel's Plan tab
+    /// derives block durations / kWh / avg-price from this instead of assuming
+    /// 15-minute steps, so a non-15 `grid_minutes` renders correct runtimes.
+    pub grid_minutes: u32,
     pub dry_run: bool,
     pub global_enabled: bool,
     /// Effective preview (shadow-solve) state this cycle: observe-only loads are
@@ -313,7 +323,9 @@ mod tests {
                 charge_kw: vec![4.0],
                 discharge_kw: vec![0.0],
                 action: "charging".into(),
-                authority: false,
+                authority: true,
+                charge_authority: true,
+                discharge_authority: false,
                 target_unmet: 0.0,
                 reasoning: Reasoning::default(),
             }],
@@ -327,6 +339,10 @@ mod tests {
         assert_eq!(v["storage"][0]["id"], "sonnen");
         assert_eq!(v["storage"][0]["action"], "charging");
         assert_eq!(v["storage"][0]["soc_kwh"][1], 6.0);
+        // Per-direction authority is exposed so the panel can tag the active
+        // direction correctly (charge authorised here, discharge advisory).
+        assert_eq!(v["storage"][0]["charge_authority"], true);
+        assert_eq!(v["storage"][0]["discharge_authority"], false);
         // The Why panel's reasoning view-model is always serialised (object form).
         assert!(v["storage"][0]["reasoning"].is_object(), "reasoning present in storage JSON");
         // A no-storage report is structurally clean — storage is an empty array.

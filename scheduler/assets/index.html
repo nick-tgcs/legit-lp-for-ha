@@ -123,8 +123,14 @@ function loadAction(l,r){
 }
 function storageAction(b,r){
  const ch=(b.charge_kw&&b.charge_kw[0])||0, dis=(b.discharge_kw&&b.discharge_kw[0])||0;
- const advisory=!b.authority||r.dry_run, tag=b.authority?'dry-run':'preview';
  const why=(b.reasoning&&b.reasoning.narrative)||'';
+ // Tag by the ACTIVE direction's authority — execute_storage drives charge and
+ // discharge independently, so a charge-only cabinet's planned discharge is advisory
+ // (won't be actuated) even though the device has authority on the other direction.
+ const dirAuth=b.action==='charging'?!!b.charge_authority
+  :b.action==='discharging'?!!b.discharge_authority
+  :(!!b.charge_authority||!!b.discharge_authority); // idle: any executable direction
+ const advisory=!dirAuth||r.dry_run, tag=dirAuth?'dry-run':'preview';
  if(b.action==='charging')return pillLine('start','▲',`CHARGE ${ch.toFixed(1)} kW`,false,advisory,tag,why);
  if(b.action==='discharging')return pillLine('stop','▼',`DISCHARGE ${dis.toFixed(1)} kW`,false,advisory,tag,why);
  return pillLine('hold','●','hold',true,advisory,tag,why);
@@ -132,8 +138,14 @@ function storageAction(b,r){
 // Full-width mode (info) + solve-failure (critical) banners.
 function bannersHtml(r){
  let h='';
- if(r.stale)h+=`<div class="banner crit"><div class="ico">⛔</div><div><b>SCHEDULER ERROR — could not solve this cycle.</b>`
-  +`<span class="sub">All loads were HELD; nothing was changed. The plan below is the last good one (solved ${esc(r.last_solved||'?')}).</span>`
+ // Key the red banner off the critical scheduler alert, not `stale` alone: the
+ // first solve after startup can fail with NO last-good plan to carry over, so the
+ // report is critical-but-not-stale. (`stale` only flips when a prior plan exists.)
+ const solveFailed=(r.alerts||[]).some(a=>a.severity==='critical'&&a.scope==='scheduler');
+ if(solveFailed)h+=`<div class="banner crit"><div class="ico">⛔</div><div><b>SCHEDULER ERROR — could not solve this cycle.</b>`
+  +(r.stale
+    ?`<span class="sub">All loads were HELD; nothing was changed. The plan below is the last good one (solved ${esc(r.last_solved||'?')}).</span>`
+    :`<span class="sub">All loads were HELD; nothing was changed. No prior plan to fall back on — the panel stays empty until the next good solve.</span>`)
   +`<span class="sub">Find it in the add-on log: <span class="grep">grep 'ALERT[critical]'</span></span></div></div>`;
  if(r.preview||r.dry_run){
   const mode=r.preview?'PREVIEW':'DRY-RUN';
@@ -176,6 +188,7 @@ function planAxis(r,n){if(!n)return '';const k=Math.max(1,Math.round(n/4)),t=[];
 function planBattery(b,r){
  const n=Math.min(b.charge_kw?b.charge_kw.length:0,r.grid?r.grid.length:0);
  if(!n)return '<td class="muted">no battery plan</td>';
+ const stepH=(r.grid_minutes||15)/60; // hours per grid step (not a hard-coded 0.25)
  const cap=b.capacity_kwh||0,resv=cap?100*(b.min_soc_kwh||0)/cap:0,soc=b.soc_kwh||[];
  const W=560,H=64,X=i=>n?i/n*W:0,Y=p=>H-2-(p/100)*(H-6);
  const cls=t=>((b.charge_kw[t]||0)>0.05?'c':((b.discharge_kw[t]||0)>0.05?'d':null));
@@ -184,10 +197,10 @@ function planBattery(b,r){
  let pts='';for(let i=0;i<=n;i++){pts+=`${X(i).toFixed(1)},${Y(cap?100*(soc[i]||0)/cap:0).toFixed(1)} `;}
  const resvLine=cap?`<line x1="0" y1="${Y(resv).toFixed(1)}" x2="${W}" y2="${Y(resv).toFixed(1)}" stroke="var(--warn)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>`:'';
  const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${shade}${resvLine}<polyline fill="none" stroke="#1e88e5" stroke-width="1.6" points="${pts.trim()}"/><line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
- const rows=segs.map(s=>{const a=s.k==='c'?b.charge_kw:b.discharge_kw;let e=0,pk=0;for(let t=s.a;t<s.b;t++){e+=(a[t]||0)*0.25;pk=Math.max(pk,a[t]||0);}
+ const rows=segs.map(s=>{const a=s.k==='c'?b.charge_kw:b.discharge_kw;let e=0,pk=0;for(let t=s.a;t<s.b;t++){e+=(a[t]||0)*stepH;pk=Math.max(pk,a[t]||0);}
   const end=cap?100*(soc[Math.min(s.b,soc.length-1)]||0)/cap:0,pr=avgPrice(r,s.a,s.b);
   return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='c'?'g':'o'}"></span>${s.k==='c'?'Charge':'Discharge'}</td><td class="n">${pk.toFixed(1)} kW</td><td class="n">${s.k==='c'?'+':'−'}${e.toFixed(1)} kWh → ${end.toFixed(0)}%</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
- let ce=0,de=0,cc=0,dc=0;for(let t=0;t<n;t++){const c=b.charge_kw[t]||0,d=b.discharge_kw[t]||0,p=(r.price&&r.price[t])||0;ce+=c*0.25;de+=d*0.25;cc+=c*0.25*p;dc+=d*0.25*p;}
+ let ce=0,de=0,cc=0,dc=0;for(let t=0;t<n;t++){const c=b.charge_kw[t]||0,d=b.discharge_kw[t]||0,p=(r.price&&r.price[t])||0;ce+=c*stepH;de+=d*stepH;cc+=c*stepH*p;dc+=d*stepH*p;}
  const foot=ce>0.05?`<div class="plan-foot">charged <b>${ce.toFixed(1)} kWh</b> @ avg $${(cc/ce).toFixed(2)}${de>0.05?` · discharged <b>${de.toFixed(1)} kWh</b> into avg $${(dc/de).toFixed(2)}`:''}</div>`:'';
  return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">Power</th><th class="n">Result (end SoC)</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">no charge/discharge planned — holds steady</td></tr>'}</tbody></table>${foot}`;
 }
@@ -199,7 +212,8 @@ function planLoad(l,r){
  const segs=runs(n,cls).filter(s=>s.k);
  const bars=segs.map(s=>`<rect x="${X(s.a).toFixed(1)}" y="4" width="${Math.max(X(s.b)-X(s.a),1).toFixed(1)}" height="${H-8}" rx="2" fill="${s.k==='m'?'#03a9f4':'#4caf50'}"/>`).join('');
  const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><rect x="0" y="4" width="${W}" height="${H-8}" rx="2" fill="var(--border)" opacity="0.5"/>${bars}<line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
- let cum=0;const rows=segs.map(s=>{const mins=(s.b-s.a)*15;cum+=mins;const pr=avgPrice(r,s.a,s.b);
+ const stepMin=r.grid_minutes||15; // minutes per grid step (not a hard-coded 15)
+ let cum=0;const rows=segs.map(s=>{const mins=(s.b-s.a)*stepMin;cum+=mins;const pr=avgPrice(r,s.a,s.b);
   return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='m'?'b':'k'}"></span>${s.k==='m'?'Run':'Can-take'}</td><td class="n">${dur(mins)}</td><td class="n">${dur(cum)} total</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
  return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">For</th><th class="n">Cumulative</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">nothing scheduled this horizon</td></tr>'}</tbody></table>`;
 }

@@ -816,6 +816,7 @@ impl Cycle {
         SolveReport {
             at: now.to_rfc3339(),
             solver_ms: started.elapsed().as_millis() as u64,
+            grid_minutes: self.registry.global.planning.grid_minutes,
             dry_run: self.dry_run,
             global_enabled,
             preview,
@@ -842,16 +843,19 @@ impl Cycle {
                     } else {
                         "idle"
                     };
-                    // A device is "actuated" when any direction is authorised
-                    // (Optimiser); otherwise the plan is advisory.
-                    let authority = storage_controls
-                        .iter()
-                        .find(|c| c.id == b.id)
-                        .map(|c| {
-                            c.charge.as_ref().map(|d| d.authority).unwrap_or(false)
-                                || c.discharge.as_ref().map(|d| d.authority).unwrap_or(false)
-                        })
+                    // Per-direction authority: a direction is actuated only when it
+                    // is configured AND authorised (`execute_storage` gates each one
+                    // independently). The device-level `authority` (any direction) is
+                    // kept for the chip; the action pill keys off its own direction so
+                    // a charge-only cabinet shows a planned discharge as advisory.
+                    let ctrl = storage_controls.iter().find(|c| c.id == b.id);
+                    let charge_authority =
+                        ctrl.and_then(|c| c.charge.as_ref()).map(|d| d.authority).unwrap_or(false);
+                    let discharge_authority = ctrl
+                        .and_then(|c| c.discharge.as_ref())
+                        .map(|d| d.authority)
                         .unwrap_or(false);
+                    let authority = charge_authority || discharge_authority;
                     let reasoning = self
                         .registry
                         .global
@@ -871,6 +875,8 @@ impl Cycle {
                         discharge_kw: b.discharge_kw.clone(),
                         action: action.into(),
                         authority,
+                        charge_authority,
+                        discharge_authority,
                         target_unmet: b.target_unmet,
                         reasoning,
                     }
