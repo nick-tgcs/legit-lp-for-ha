@@ -16,17 +16,74 @@ pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
 #horizon svg{width:100%;height:auto;display:block}
 #horizon .hit:hover{fill:rgba(127,127,127,.08)}
 #xhair{position:absolute;top:0;width:1px;background:var(--warn);opacity:0;pointer-events:none;z-index:4}
-#tip{position:absolute;pointer-events:none;z-index:5;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:.76rem;line-height:1.5;white-space:pre;box-shadow:0 2px 10px rgba(0,0,0,.22);opacity:0;transition:opacity .07s;transform:translate(-50%,-115%)}</style></head><body>
+#tip{position:absolute;pointer-events:none;z-index:5;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:.76rem;line-height:1.5;white-space:pre;box-shadow:0 2px 10px rgba(0,0,0,.22);opacity:0;transition:opacity .07s;transform:translate(-50%,-115%)}
+/* per-device Why panel (Overview + Why tabs) */
+.tabs{display:flex;gap:4px;justify-content:flex-end;margin:-2px 0 10px}
+.tab{font-size:.75rem;padding:3px 12px;border-radius:13px;color:var(--muted);cursor:pointer;border:1px solid transparent;user-select:none}
+.tab.act{background:var(--accent);color:#fff;font-weight:600}
+.tab:not(.act){border-color:var(--border)}
+.why .narr{font-size:.85rem;line-height:1.45;margin:6px 0 10px}
+.why .split{font-size:.78rem;color:var(--muted);margin:6px 0}
+.why .split b{color:var(--text)}
+.why .bar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid var(--border);margin:6px 0 8px}
+.why .bar i{display:block}
+.why .bar .av{background:var(--accent)}.why .bar .pr{background:#ffcc80}.why .bar .ot{background:var(--border)}
+.why .ledger{font-size:.74rem;color:var(--muted);margin:2px 0 8px}
+.why .plan{font-size:.78rem;color:var(--accent)}
+.why .bind{background:rgba(255,152,0,.13);border-left:3px solid var(--warn);padding:8px 10px;border-radius:6px;font-size:.8rem;line-height:1.45;margin:4px 0 10px}
+.why .bind .fix{color:var(--accent);display:block;margin-top:4px}
+.why .sec{font-size:.66rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:13px 0 6px}
+.why table.facts{width:100%;border-collapse:collapse;font-size:.78rem}
+.why table.facts td{padding:2px 0;vertical-align:top}
+.why table.facts td.k{color:var(--muted);width:96px;white-space:nowrap}
+.why table.facts td.s{color:var(--accent);text-align:right;font-size:.7rem;white-space:nowrap}
+.why table.facts td.n{text-align:right;font-variant-numeric:tabular-nums}</style></head><body>
 <div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
 <p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button>
 <label style="margin-left:14px;font-size:.9rem;color:var(--muted)" title="Solve observe-only loads to preview their plan — never controls a device"><input type="checkbox" id="preview" onchange="fetch('./api/preview?on='+this.checked,{method:'POST'})"> solve observe-only (preview)</label></p></div>
 <div class="card"><h2>The plan · next horizon</h2><div id="horizon" role="img" aria-label="plan timeline"><div id="plot"></div><div id="xhair"></div><div id="tip"></div></div>
 <p class="legend"><b style="color:#5c6bc0">━ import price</b> · <b style="color:#26a69a">┄ feed-in</b> · <b style="color:#ffb300">▰ solar</b> · <b style="color:#ef9a9a">▮ grid import</b> · <b style="color:#a5d6a7">▮ grid export</b> · <b style="color:#1e88e5">━ battery SoC</b> · <b style="color:#66bb6a">▮ charging</b> · <b style="color:#ffa726">▮ discharging</b> · <b style="color:#03a9f4">▮ load run</b> · <b style="color:#4caf50">▮ can-take</b></p></div>
 <div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
+<div class="card" id="storagecard"><h2>Storage</h2><div class="grid" id="storage"></div></div>
 <div class="card"><h2>Diagnostics</h2><pre id="diags"></pre></div>
 <script type="module">
 const chips=document.getElementById('chips'),loads=document.getElementById('loads'),diags=document.getElementById('diags');
+const storage=document.getElementById('storage'),storagecard=document.getElementById('storagecard');
+// Escape for HTML text AND quoted-attribute contexts (covers & < > " ').
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Per-device tab state, preserved across SSE re-renders (default: Overview).
+const tab={};let last=null;
+const setTab=(id,w)=>{tab[id]=w;if(last)render(last);};
+// Delegated tab clicks: cards carry data-id/data-tab (no inline onclick, so a device
+// id never lands in a JS-string context). Listener attaches once to the persistent
+// container and survives innerHTML re-renders.
+[loads,storage].forEach(el=>el&&el.addEventListener('click',e=>{
+ const t=e.target.closest&&e.target.closest('.tab');
+ if(t&&t.dataset.id!=null)setTab(t.dataset.id,t.dataset.tab);
+}));
+// The two-tab Why panel shared by load + storage cards (Overview / Why).
+function why(d){
+ const R=d.reasoning||{},act=tab[d.id]||'overview';
+ const facts=arr=>`<table class="facts">${(arr||[]).map(f=>`<tr><td class="k">${esc(f.label)}</td><td class="n">${esc(f.value)}</td><td class="s">${f.source?esc(f.source):''}</td></tr>`).join('')}</table>`;
+ const steps=R.steps||[],total=steps.reduce((a,b)=>a+b.count,0)||1;
+ const seg=(label,cls)=>{const s=steps.find(x=>x.label===label);return s&&s.count?`<i class="${cls}" style="width:${100*s.count/total}%"></i>`:'';};
+ const bar=steps.length?`<div class="bar">${seg('available','av')}${seg('over price cap','pr')}<i class="ot" style="flex:1"></i></div>`:'';
+ const ledger=steps.map(s=>`${s.label} ${s.count}`).join(' · ');
+ const blocks=R.blocks||[];
+ const planLine=blocks.length?`plan: ${blocks.map(b=>`${b.start}–${b.end}${b.kind==='can-take'?' (opt)':b.kind==='discharge'?' (out)':''}`).join(', ')}`:'';
+ const metricsLine=(R.metrics||[]).map(m=>`${esc(m.label)} <b>${esc(m.value)}</b>`).join(' · ');
+ const overview=`${R.narrative?`<div class="narr">ⓘ ${esc(R.narrative)}</div>`:''}${metricsLine?`<div class="split">${metricsLine}</div>`:''}${bar}${ledger?`<div class="ledger">${esc(ledger)}</div>`:''}${planLine?`<div class="plan">${esc(planLine)}</div>`:''}`;
+ const bind=R.binding?`<div class="bind"><b>▰ ${esc(R.binding)}</b>${R.fix_hint?`<span class="fix">→ ${esc(R.fix_hint)}</span>`:''}</div>`:'';
+ const detail=`${R.narrative?`<div class="narr">${esc(R.narrative)}</div>`:''}${bind}`
+  +((R.metrics||[]).length?`<div class="sec">Outcome</div>${facts(R.metrics)}`:'')
+  +((R.inputs||[]).length?`<div class="sec">Resolved inputs (live from HA)</div>${facts(R.inputs)}`:'')
+  +(steps.length?`<div class="sec">Step availability</div>${facts(steps.map(s=>({label:s.label,value:String(s.count)})))}`:'')
+  +(blocks.length?`<div class="sec">Plan</div>${facts(blocks.map(b=>({label:b.kind,value:`${b.start}–${b.end}`,source:`${(+b.hours).toFixed(1)} h`})))}`:'');
+ const id=esc(d.id);
+ return `<div class="tabs"><span class="tab ${act==='overview'?'act':''}" data-id="${id}" data-tab="overview">Overview</span><span class="tab ${act==='why'?'act':''}" data-id="${id}" data-tab="why">Why</span></div><div class="why">${act==='why'?detail:overview}</div>`;
+}
 function render(r){
+ last=r;
  const f=(v,d=2)=>v==null?'?':(+v).toFixed(d);
  const g0=(r.grid_kw&&r.grid_kw.length)?r.grid_kw[0]:null;
  const gridChip=g0==null?'':`<span>grid ${g0>=0?'▲ import':'▼ export'} ${f(Math.abs(g0))} kW</span>`;
@@ -40,11 +97,21 @@ function render(r){
   +`<span>price ${f(r.price_now,3)} /kWh</span><span>☀ ${f(r.pv_now)} kW</span>`
   +`<span>house ${f(r.consumption_now)} kW</span>`+gridChip+battChip
   +`<span>solve ${r.solver_ms} ms · ${r.at}</span>`;
- loads.innerHTML=r.loads.map(l=>`<div class="card"><h1>${l.id}</h1>
-  <div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>
-  <span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${l.planning}</span>
-  ${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>
-  <p style="font-size:.85rem;color:var(--muted)">${l.reason}</p></div>`).join('');
+ loads.innerHTML=r.loads.map(l=>{
+  const chipsHtml=`<div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>`
+   +`<span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${esc(l.planning)}</span>`
+   +`${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>`;
+  return `<div class="card"><h1>${esc(l.id)}</h1>${chipsHtml}${why(l)}</div>`;
+ }).join('');
+ const sto=r.storage||[];
+ if(storagecard)storagecard.style.display=sto.length?'':'none';
+ if(storage)storage.innerHTML=sto.map(b=>{
+  const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
+  const a=b.action==='charging'?'▲ charging':b.action==='discharging'?'▼ discharging':'○ idle';
+  const chipsHtml=`<div class="chips"><span>🔋 ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}%</span><span>${a}</span>`
+   +`${b.target_unmet>0.1?`<span class="warn">short ${f(b.target_unmet,1)} kWh</span>`:''}</div>`;
+  return `<div class="card"><h1>${esc(b.id)}</h1>${chipsHtml}${why(b)}</div>`;
+ }).join('');
  const pc=document.getElementById('preview'); if(pc) pc.checked=!!r.preview;
  diags.textContent=r.diagnostics.join('\n')||'all good';
  fetch('./horizon.svg',{cache:'no-store'}).then(r=>r.text()).then(svg=>{document.getElementById('plot').innerHTML=svg;});
