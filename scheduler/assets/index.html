@@ -148,11 +148,17 @@ function bannersHtml(r){
     :`<span class="sub">All loads were HELD; nothing was changed. No prior plan to fall back on — the panel stays empty until the next good solve.</span>`)
   +`<span class="sub">Find it in the add-on log: <span class="grep">grep 'ALERT[critical]'</span></span></div></div>`;
  if(r.preview||r.dry_run){
-  const mode=r.preview?'PREVIEW':'DRY-RUN';
-  const msg=r.preview?'showing exactly what the optimiser WOULD do right now. No devices are being controlled.'
-   :'the optimiser computes its calls but does not control any devices.';
-  h+=`<div class="banner info"><div class="ico">ⓘ</div><div><b>${mode} — ${msg}</b>`
-   +`<span class="sub">Each load acts only when its mode is Optimiser and the add-on dry-run is off — use this to verify the optimiser before trusting it.</span></div></div>`;
+  // Be precise about what is actuated. dry-run = the executor makes NO calls at
+  // all (globally inert). preview WITHOUT dry-run only shadow-solves observe-only
+  // devices for display; Optimiser-authorised devices are STILL controlled live —
+  // so preview alone must never be advertised as a safe dry run.
+  if(r.dry_run){
+   h+=`<div class="banner info"><div class="ico">ⓘ</div><div><b>DRY-RUN — the optimiser computes its plan but controls no devices.</b>`
+    +`<span class="sub">${r.preview?'Preview also shadow-solves observe-only loads so you can see what they would do. ':''}Nothing is actuated until you turn the add-on’s dry-run off.</span></div></div>`;
+  }else{ // preview && !dry_run
+   h+=`<div class="banner info"><div class="ico">⚠️</div><div><b>PREVIEW — observe-only devices show what they WOULD do; they are not actuated.</b>`
+    +`<span class="sub">This is <b>not</b> a global dry-run: devices in Optimiser mode are still being controlled live. Turn on the add-on’s dry-run to halt all actuation.</span></div></div>`;
+  }
  }
  return h;
 }
@@ -177,6 +183,15 @@ function alertsHtml(a){
 // and runs forward 24 h, so the "now" marker sits at the left edge. Everything here is
 // derived client-side from the already-streamed arrays — no API change.
 const hm=(r,i)=>{const g=r.grid&&r.grid[i];return g?g.slice(11,16):'';};        // step i -> "HH:MM"
+// End-of-block label. `runs()` gives an END-EXCLUSIVE index b, so the block's true
+// end is the boundary at step b (= grid[b]). At the horizon (b===n) there is no
+// grid[b], so add one step to the final step's wall-clock (wrapping past midnight).
+const hmEnd=(r,b,n,stepMin)=>{
+ if(b<n)return hm(r,b);
+ const last=hm(r,n-1);if(!last)return '';
+ const mm=(+last.slice(0,2))*60+(+last.slice(3,5))+stepMin;
+ return `${String(Math.floor(mm/60)%24).padStart(2,'0')}:${String(mm%60).padStart(2,'0')}`;
+};
 const dur=m=>m>=90?`${(m/60).toFixed(1)} h`:`${Math.round(m)} min`;
 const money=p=>p==null?'—':`$${(+p).toFixed(2)}`;
 const priceCls=p=>p==null?'':(p<0?'pf':(p>=0.30?'pp':'pc'));                     // feed-in / peak / cheap
@@ -188,7 +203,7 @@ function planAxis(r,n){if(!n)return '';const k=Math.max(1,Math.round(n/4)),t=[];
 function planBattery(b,r){
  const n=Math.min(b.charge_kw?b.charge_kw.length:0,r.grid?r.grid.length:0);
  if(!n)return '<td class="muted">no battery plan</td>';
- const stepH=(r.grid_minutes||15)/60; // hours per grid step (not a hard-coded 0.25)
+ const stepMin=r.grid_minutes||15, stepH=stepMin/60; // grid step length (not a hard-coded 15min/0.25h)
  const cap=b.capacity_kwh||0,resv=cap?100*(b.min_soc_kwh||0)/cap:0,soc=b.soc_kwh||[];
  const W=560,H=64,X=i=>n?i/n*W:0,Y=p=>H-2-(p/100)*(H-6);
  const cls=t=>((b.charge_kw[t]||0)>0.05?'c':((b.discharge_kw[t]||0)>0.05?'d':null));
@@ -199,7 +214,7 @@ function planBattery(b,r){
  const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${shade}${resvLine}<polyline fill="none" stroke="#1e88e5" stroke-width="1.6" points="${pts.trim()}"/><line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
  const rows=segs.map(s=>{const a=s.k==='c'?b.charge_kw:b.discharge_kw;let e=0,pk=0;for(let t=s.a;t<s.b;t++){e+=(a[t]||0)*stepH;pk=Math.max(pk,a[t]||0);}
   const end=cap?100*(soc[Math.min(s.b,soc.length-1)]||0)/cap:0,pr=avgPrice(r,s.a,s.b);
-  return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='c'?'g':'o'}"></span>${s.k==='c'?'Charge':'Discharge'}</td><td class="n">${pk.toFixed(1)} kW</td><td class="n">${s.k==='c'?'+':'−'}${e.toFixed(1)} kWh → ${end.toFixed(0)}%</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
+  return `<tr><td>${hm(r,s.a)}–${hmEnd(r,s.b,n,stepMin)}</td><td><span class="dot ${s.k==='c'?'g':'o'}"></span>${s.k==='c'?'Charge':'Discharge'}</td><td class="n">${pk.toFixed(1)} kW</td><td class="n">${s.k==='c'?'+':'−'}${e.toFixed(1)} kWh → ${end.toFixed(0)}%</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
  let ce=0,de=0,cc=0,dc=0;for(let t=0;t<n;t++){const c=b.charge_kw[t]||0,d=b.discharge_kw[t]||0,p=(r.price&&r.price[t])||0;ce+=c*stepH;de+=d*stepH;cc+=c*stepH*p;dc+=d*stepH*p;}
  const foot=ce>0.05?`<div class="plan-foot">charged <b>${ce.toFixed(1)} kWh</b> @ avg $${(cc/ce).toFixed(2)}${de>0.05?` · discharged <b>${de.toFixed(1)} kWh</b> into avg $${(dc/de).toFixed(2)}`:''}</div>`:'';
  return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">Power</th><th class="n">Result (end SoC)</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">no charge/discharge planned — holds steady</td></tr>'}</tbody></table>${foot}`;
@@ -214,7 +229,7 @@ function planLoad(l,r){
  const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><rect x="0" y="4" width="${W}" height="${H-8}" rx="2" fill="var(--border)" opacity="0.5"/>${bars}<line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
  const stepMin=r.grid_minutes||15; // minutes per grid step (not a hard-coded 15)
  let cum=0;const rows=segs.map(s=>{const mins=(s.b-s.a)*stepMin;cum+=mins;const pr=avgPrice(r,s.a,s.b);
-  return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='m'?'b':'k'}"></span>${s.k==='m'?'Run':'Can-take'}</td><td class="n">${dur(mins)}</td><td class="n">${dur(cum)} total</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
+  return `<tr><td>${hm(r,s.a)}–${hmEnd(r,s.b,n,stepMin)}</td><td><span class="dot ${s.k==='m'?'b':'k'}"></span>${s.k==='m'?'Run':'Can-take'}</td><td class="n">${dur(mins)}</td><td class="n">${dur(cum)} total</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
  return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">For</th><th class="n">Cumulative</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">nothing scheduled this horizon</td></tr>'}</tbody></table>`;
 }
 function planView(d,r){
