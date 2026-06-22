@@ -66,6 +66,9 @@ fn full_report() -> SolveReport {
             charge_kw: vec![2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             discharge_kw: vec![0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 0.0, 0.0],
             action: "charging".into(),
+            authority: true,
+            charge_authority: true,
+            discharge_authority: false,
             target_unmet: 0.0,
             reasoning: Default::default(),
         }],
@@ -214,10 +217,23 @@ async fn w11_index_has_per_device_why_panels_for_loads_and_storage() {
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
     assert!(html.contains("setTab"), "tab switching is wired");
-    assert!(html.contains(">Overview<") && html.contains(">Why<"), "both tabs are present");
+    assert!(
+        html.contains(">Overview<") && html.contains(">Why<") && html.contains(">Plan<"),
+        "all three tabs are present (Overview / Why / Plan)"
+    );
     assert!(html.contains(r#"id="storage""#), "storage devices get their own cards");
     assert!(html.contains("reasoning"), "cards render the reasoning view-model");
     assert!(html.contains("Resolved inputs"), "the Why tab lists resolved live inputs");
+    // The Plan tab renders each device's full-horizon schedule from the streamed
+    // arrays (no API change): a sparkline + an exact per-block table.
+    assert!(
+        html.contains("planView") && html.contains("planBattery") && html.contains("planLoad"),
+        "the Plan tab builds per-device full-horizon views"
+    );
+    assert!(
+        html.contains("class=\"plan-tbl\"") || html.contains("plan-tbl"),
+        "the Plan tab renders the exact per-block table"
+    );
 }
 
 #[tokio::test]
@@ -291,4 +307,30 @@ async fn w2_health_is_ok() {
     let resp =
         router(s).oneshot(Request::get("/health").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn w12_panel_applies_the_pr35_review_fixes() {
+    // Three PR #35 Codex review fixes are wired into the served panel asset:
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    // (1) The red solve-failure banner keys off the critical scheduler alert, not
+    //     `stale` alone — so a first-cycle failure with no last-good plan still shows.
+    assert!(
+        html.contains("a.scope==='scheduler'") && html.contains("solveFailed"),
+        "the failure banner triggers on the critical scheduler alert"
+    );
+    // (2) The storage action pill tags by the ACTIVE direction's authority, so a
+    //     charge-only cabinet's advisory discharge is not mislabelled "live".
+    assert!(
+        html.contains("charge_authority") && html.contains("discharge_authority"),
+        "the storage pill uses per-direction authority"
+    );
+    // (3) Plan-tab durations / energy derive from the report's grid step length
+    //     rather than assuming 15-minute steps.
+    assert!(
+        html.contains("r.grid_minutes"),
+        "plan durations derive from grid_minutes, not a hard-coded 15"
+    );
 }

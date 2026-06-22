@@ -296,6 +296,24 @@ fn p1_preview_plans_observe_only_loads_without_commanding_them() {
 }
 
 #[test]
+fn p1b_preview_reports_the_real_would_stop_intent() {
+    // The whole point of preview: show what the optimiser WOULD do. An observe-only
+    // load that is running, with min_run already met and nothing required now at a
+    // dear price, WOULD be stopped. Preview must surface that real intent (action
+    // Stop) so the panel can show "STOP (preview)" — the executor's authority gate
+    // still guarantees it is never actually commanded.
+    let now = sydney(2026, 6, 10, 10, 0); // outside the 00:00-06:30 must-have window
+    let mut c = runtime_contract();
+    c.authority = false; // observe-only
+    c.obs.running = Some(true); // running (switched on by hand); min_run long since met
+    let world = flat_world(now, STEPS, 0.30); // dear; can-take ceiling 0.10 -> nothing optional
+    let out = planner().plan_with_preview(&world, std::slice::from_ref(&c), true);
+    assert_eq!(out.decisions[0].action, Action::Stop, "preview surfaces the real would-be stop");
+    assert!(out.decisions[0].reason.contains("preview"), "{}", out.decisions[0].reason);
+    assert!(out.decisions[0].reason.contains("not executed"), "{}", out.decisions[0].reason);
+}
+
+#[test]
 fn p2_preview_is_additive_authorised_loads_still_command() {
     // Preview only widens WHICH loads are solved; an AUTHORISED load still plans
     // and commands exactly as before.
@@ -322,6 +340,49 @@ fn p3_preview_off_with_unknown_running_state_is_still_observe_only() {
         "{}",
         out.decisions[0].reason
     );
+}
+
+#[test]
+fn p4_preview_running_outside_window_stays_feasible() {
+    // REGRESSION (the "preview crashes" bug): a manually-run observe-only load
+    // can be ON outside its must-have window AND over its price ceiling, with
+    // min_run NOT yet met. The initial min-run lock forced `x[0] >= 1` while the
+    // per-step price gate forced `x[0] <= 0` — an INFEASIBLE MILP. `solve()`
+    // returned Err, the planner fell back to `hold_all`, and the panel blanked to
+    // "no plan solved yet" with every load + the battery at 0. That is the crash
+    // the user saw; preview is the trigger because it is the only path that pulls
+    // an observe-only load (which a human can leave running anywhere) into the
+    // solve. Fix: min_run outranks the price ceiling, so the locked step is
+    // exempt from the price gate — the model stays feasible.
+    //
+    // now = 14:00, OUTSIDE the must-have window (00:00-06:30), price 0.30 above
+    // the 0.10 ceiling everywhere, running 5 min into a 20 min min_run.
+    let now = sydney(2026, 6, 10, 14, 0);
+    let mut c = runtime_contract();
+    c.authority = false; // observe-only — manually switched on by the human
+    c.must_have.max_price = Some(0.10); // a ceiling current price exceeds
+    c.obs.running = Some(true);
+    c.obs.current_stretch = std::time::Duration::from_secs(5 * 60); // < 20m min_run -> lock armed
+    let world = flat_world(now, STEPS, 0.30); // 0.30 > 0.10 ceiling everywhere
+
+    let out = planner().plan_with_preview(&world, std::slice::from_ref(&c), true);
+
+    // FEASIBLE: a real grid is produced (not the empty grid `hold_all` emits),
+    // so the panel renders a plan instead of crashing.
+    assert!(!out.grid.is_empty(), "preview must not blank the plan (hold_all)");
+    assert_eq!(out.grid.len(), STEPS, "full horizon solved");
+    assert_eq!(out.decisions[0].action, Action::NoChange, "observe-only -> never commands");
+    assert!(
+        !out.decisions[0].reason.contains("solver error"),
+        "must not be a solver error: {}",
+        out.decisions[0].reason
+    );
+    // Precedence, visible in the shadow plan: min_run HOLDS the in-progress run
+    // for its remaining step (step 0 stays on, over the ceiling), then the
+    // envelope — not a crash — releases it (off once the lock clears).
+    let plan = out.plans.iter().find(|p| p.id == c.id).expect("preview plan present");
+    assert!(plan.on[0], "min_run holds the running load through the locked step");
+    assert!(!plan.on[1], "past the min_run lock the price/window envelope turns it off");
 }
 
 // ---- site balance reporting (grid_kw) ----------------------------------
