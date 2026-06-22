@@ -254,7 +254,22 @@ async fn build_storage<A: HaApi>(
         resolve(ha, &sc.round_trip_efficiency, diags).await.unwrap_or(0.9).clamp(0.05, 1.0);
     let cycle_cost = resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await.unwrap_or(0.001).max(0.0);
     let allow_grid_charge = resolve_bool(ha, &sc.allow_grid_charge, diags).await.unwrap_or(true);
-    let max_soc_pct = resolve(ha, &sc.max_soc_pct, diags).await.unwrap_or(100.0).clamp(0.0, 100.0);
+    // Fail CLOSED: max_soc_pct is the user's charge ceiling. A literal/default always
+    // resolves; only an entity-ref that reads unavailable returns None — and defaulting
+    // that to 100% would let the LP charge PAST the user's (currently unknown) ceiling.
+    // Instead hold the ceiling at the present SoC so this cycle cannot charge any higher,
+    // and surface a diagnostic. Discharge stays available — lowering SoC is always safe
+    // w.r.t. a max ceiling.
+    let max_soc_pct = match resolve(ha, &sc.max_soc_pct, diags).await {
+        Some(v) => v.clamp(0.0, 100.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': max_soc_pct entity unreadable; holding ceiling at current SoC ({:.0}%) this cycle (no charge past unknown ceiling)",
+                sc.id, avg_pct
+            ));
+            avg_pct.clamp(0.0, 100.0)
+        }
+    };
 
     let mut min_kwh = reserve_pct / 100.0 * capacity_kwh;
     let max_kwh = max_soc_pct / 100.0 * capacity_kwh;
@@ -501,14 +516,34 @@ impl Cycle {
             };
             let mh = patch_completed(mh, obs.runtime_in_mh_window);
             // Hard-rule limits resolved live (literal or entity-ref) — never hardcoded.
-            let min_run_min = resolve(ha, &l.hard_rules.min_run_minutes, &mut diags)
-                .await
-                .unwrap_or(0.0)
-                .max(0.0);
-            let min_off_min = resolve(ha, &l.hard_rules.min_off_minutes, &mut diags)
-                .await
-                .unwrap_or(0.0)
-                .max(0.0);
+            // Fail CLOSED: a literal/default always resolves; only an entity-ref that
+            // reads unavailable returns None. Defaulting min_run/min_off to 0 would
+            // silently DROP the short-cycle lockout — an authorised compressor could be
+            // stopped before its minimum run or restarted before its minimum off. So when
+            // a configured timing entity can't be read, hold the load observe-only this
+            // cycle (preserve whatever state it's in) rather than actuating unprotected.
+            let min_run_min = match resolve(ha, &l.hard_rules.min_run_minutes, &mut diags).await {
+                Some(v) => v.max(0.0),
+                None => {
+                    diags.push(format!(
+                        "load '{}': min_run_minutes entity unreadable; holding (observe-only) to preserve short-cycle protection",
+                        l.id
+                    ));
+                    authority = false;
+                    0.0
+                }
+            };
+            let min_off_min = match resolve(ha, &l.hard_rules.min_off_minutes, &mut diags).await {
+                Some(v) => v.max(0.0),
+                None => {
+                    diags.push(format!(
+                        "load '{}': min_off_minutes entity unreadable; holding (observe-only) to preserve short-cycle protection",
+                        l.id
+                    ));
+                    authority = false;
+                    0.0
+                }
+            };
             // Daily start ceiling. A configured-but-unreadable entity-ref leaves the
             // ceiling unenforced this cycle (extra wear, not unsafe) — surface it so a
             // flaky sensor isn't silent, rather than looking like "no ceiling set".

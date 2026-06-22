@@ -139,6 +139,79 @@ async fn c1b_unreadable_entity_ref_power_holds_the_load_observe_only() {
 }
 
 #[tokio::test]
+async fn c1c_unreadable_min_run_entity_holds_the_load_observe_only() {
+    // De-hardcoding fail-CLOSED guard: min_run/min_off are the short-cycle lockout.
+    // If they are entity-ref'd and the helper is unavailable, resolve -> None.
+    // Defaulting to 0 would DROP the lockout (an authorised compressor could be stopped
+    // before its minimum run / restarted before its minimum off). The cycle must instead
+    // hold the load observe-only + surface a diagnostic, never command it.
+    let mut reg = registry();
+    let hw = reg.loads.iter_mut().find(|l| l.id == "hot_water").expect("hot_water load");
+    hw.hard_rules.min_run_minutes =
+        config::ValueRef::Entity { entity: "input_number.missing_min_run".into() };
+    let mut ha = canned_ha();
+    // Grant authority so the ONLY thing that can hold the load is the fail-closed guard.
+    set_state(&mut ha, "binary_sensor.hot_water_automated", "on");
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let hw = report.loads.iter().find(|l| l.id == "hot_water").unwrap();
+    assert!(hw.reason.contains("observe-only"), "held observe-only: {}", hw.reason);
+    assert!(
+        report.diagnostics.iter().any(|d| d.contains("min_run_minutes")),
+        "min_run fail-closed diagnostic surfaced: {:?}",
+        report.diagnostics
+    );
+}
+
+#[tokio::test]
+async fn c1d_unreadable_max_soc_pct_holds_ceiling_at_current_soc() {
+    // De-hardcoding fail-CLOSED guard: max_soc_pct is the user's charge ceiling. If it
+    // is entity-ref'd and the helper is unavailable, resolve -> None. Defaulting to 100%
+    // would let the LP charge PAST the user's (now unknown) ceiling. The cycle must hold
+    // the ceiling at the present SoC (no further charge) + surface a diagnostic.
+    let mut reg = registry();
+    let s = reg.global.storage.iter_mut().find(|s| s.id == "sonnen01").expect("sonnen01 storage");
+    s.max_soc_pct = config::ValueRef::Entity { entity: "input_number.missing_max_soc".into() };
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let st = report.storage.iter().find(|s| s.id == "sonnen01").unwrap();
+    // SoC is 52% of 9.0 kWh ≈ 4.68; the ceiling must hold there, NOT expand to full 9.0.
+    assert!(
+        st.max_soc_kwh < st.capacity_kwh - 0.01,
+        "ceiling must not expand to full capacity: max {} of {} kWh",
+        st.max_soc_kwh,
+        st.capacity_kwh
+    );
+    assert!(
+        (st.max_soc_kwh - st.soc_now_kwh).abs() < 0.01,
+        "ceiling held at current SoC: max {} vs soc_now {}",
+        st.max_soc_kwh,
+        st.soc_now_kwh
+    );
+    assert!(
+        report.diagnostics.iter().any(|d| d.contains("max_soc_pct")),
+        "max_soc_pct fail-closed diagnostic surfaced: {:?}",
+        report.diagnostics
+    );
+}
+
+#[tokio::test]
 async fn c2_live_cycle_issues_exactly_the_planned_call() {
     let mut ha = canned_ha();
     // Humid house, price between hot-water ct ceiling (0.10) and dehumidifier
