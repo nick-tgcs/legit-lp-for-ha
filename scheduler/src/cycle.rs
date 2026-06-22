@@ -77,6 +77,73 @@ fn diag_scope(d: &str) -> String {
     "scheduler".to_string()
 }
 
+/// Build the triaged alert list (the layer above the raw `diags` bag) from a cycle's
+/// outcome. Pure, so it is unit-tested directly. Precedence: Critical (the solve
+/// failed) > Warning (a fail-closed config/sensor read, or an unmet must-have) > Info
+/// (preview / dry-run mode — "nothing is being controlled").
+fn derive_alerts(
+    solver_error: &Option<String>,
+    diags: &[String],
+    plans: &[crate::lp::LoadPlan],
+    preview: bool,
+    dry_run: bool,
+) -> Vec<Alert> {
+    let mut alerts: Vec<Alert> = Vec::new();
+    if let Some(err) = solver_error {
+        alerts.push(Alert::new(
+            Severity::Critical,
+            "scheduler",
+            "Could not solve",
+            format!(
+                "{err}. All loads were held; nothing was changed — the last good plan is shown, stale."
+            ),
+        ));
+    }
+    // Config / sensor reads that failed and changed behaviour (held a load fail-closed,
+    // disabled a demand, unmodelled a battery). Benign notes stay in `diagnostics` only.
+    for d in diags {
+        if diag_is_actionable(d) {
+            alerts.push(Alert::new(
+                Severity::Warning,
+                diag_scope(d),
+                "Config or sensor issue",
+                d.clone(),
+            ));
+        }
+    }
+    // A load whose must-have can't be met inside its legal/price envelope.
+    for p in plans {
+        if p.unmet > 1.0 {
+            alerts.push(Alert::new(
+                Severity::Warning,
+                p.id.0.clone(),
+                "Demand short",
+                format!(
+                    "{:.0} min short — the must-have can't be met inside its window/price cap. Widen the window, raise the price cap, or lower the requirement.",
+                    p.unmet
+                ),
+            ));
+        }
+    }
+    // Make "nothing is being controlled" explicit while in preview / dry-run.
+    if preview {
+        alerts.push(Alert::new(
+            Severity::Info,
+            "scheduler",
+            "Preview",
+            "Preview mode active — decisions are advisory (what the optimiser WOULD do); no devices are being controlled.",
+        ));
+    } else if dry_run {
+        alerts.push(Alert::new(
+            Severity::Info,
+            "scheduler",
+            "Dry-run",
+            "Dry-run mode — the optimiser computes its calls but does not control any devices.",
+        ));
+    }
+    alerts
+}
+
 async fn resolve<A: HaApi>(ha: &A, vr: &ValueRef, diags: &mut Vec<String>) -> Option<f64> {
     match vr {
         ValueRef::Plain(value) | ValueRef::Literal { value } => Some(*value),
@@ -743,62 +810,8 @@ impl Cycle {
         let surplus: Vec<f64> =
             (0..n).map(|t| (world.pv[t] - world.baseload[t]).max(0.0)).collect();
 
-        // ---- triaged alerts: the human-facing layer above the raw `diags` bag ----
-        let mut alerts: Vec<Alert> = Vec::new();
-        // Critical: the solve failed and every load was held this cycle.
-        if let Some(err) = &out.solver_error {
-            alerts.push(Alert::new(
-                Severity::Critical,
-                "scheduler",
-                "Could not solve",
-                format!(
-                    "{err}. All loads were held; nothing was changed — the last good plan is shown, stale."
-                ),
-            ));
-        }
-        // Warning: configuration / sensor reads that failed and changed behaviour
-        // (held a load fail-closed, disabled a demand, unmodelled a battery). Benign
-        // notes stay in `diagnostics` only.
-        for d in &diags {
-            if diag_is_actionable(d) {
-                alerts.push(Alert::new(
-                    Severity::Warning,
-                    diag_scope(d),
-                    "Config or sensor issue",
-                    d.clone(),
-                ));
-            }
-        }
-        // Warning: a load whose must-have can't be met inside its legal/price envelope.
-        for p in &out.plans {
-            if p.unmet > 1.0 {
-                alerts.push(Alert::new(
-                    Severity::Warning,
-                    p.id.0.clone(),
-                    "Demand short",
-                    format!(
-                        "{:.0} min short — the must-have can't be met inside its window/price cap. Widen the window, raise the price cap, or lower the requirement.",
-                        p.unmet
-                    ),
-                ));
-            }
-        }
-        // Info: make "nothing is being controlled" explicit while in preview/dry-run.
-        if preview {
-            alerts.push(Alert::new(
-                Severity::Info,
-                "scheduler",
-                "Preview",
-                "Preview mode active — decisions are advisory (what the optimiser WOULD do); no devices are being controlled.",
-            ));
-        } else if self.dry_run {
-            alerts.push(Alert::new(
-                Severity::Info,
-                "scheduler",
-                "Dry-run",
-                "Dry-run mode — the optimiser computes its calls but does not control any devices.",
-            ));
-        }
+        // Triaged alerts: the human-facing layer above the raw `diags` bag.
+        let alerts = derive_alerts(&out.solver_error, &diags, &out.plans, preview, self.dry_run);
 
         SolveReport {
             at: now.to_rfc3339(),
@@ -1055,7 +1068,47 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 
 #[cfg(test)]
 mod tests {
-    use super::{diag_is_actionable, diag_scope};
+    use super::{derive_alerts, diag_is_actionable, diag_scope};
+    use crate::lp::LoadPlan;
+    use crate::model::LoadId;
+    use crate::status::Severity;
+
+    fn plan(id: &str, unmet: f64) -> LoadPlan {
+        LoadPlan { id: LoadId(id.into()), on: vec![], ct: vec![], unmet }
+    }
+
+    #[test]
+    fn derive_alerts_triages_each_signal() {
+        let diags = vec![
+            "load 'hot_water': run window unresolved; holding (observe-only)".to_string(),
+            "forecast 4m old".to_string(), // benign -> NOT promoted
+        ];
+        // Solve failed + a fail-closed diag + an unmet load + preview on.
+        let a = derive_alerts(
+            &Some("solver error: Infeasible".into()),
+            &diags,
+            &[plan("hot_water", 90.0), plan("aircon", 0.0)],
+            true,
+            true,
+        );
+        assert_eq!(a.iter().filter(|x| x.severity == Severity::Critical).count(), 1, "{a:?}");
+        assert!(a.iter().any(|x| x.severity == Severity::Warning
+            && x.scope == "hot_water"
+            && x.detail.contains("window")));
+        assert!(a.iter().any(|x| x.severity == Severity::Warning && x.title == "Demand short"));
+        // Preview wins the Info line over dry-run; benign diag is not promoted.
+        assert!(a.iter().any(|x| x.severity == Severity::Info && x.detail.contains("Preview")));
+        assert!(!a.iter().any(|x| x.detail.contains("Dry-run")));
+        assert!(!a.iter().any(|x| x.detail.contains("forecast")));
+
+        // Dry-run (no preview), clean solve, no unmet -> only the Dry-run Info line.
+        let b = derive_alerts(&None, &[], &[plan("hot_water", 0.0)], false, true);
+        assert_eq!(b.len(), 1);
+        assert!(b[0].severity == Severity::Info && b[0].detail.contains("Dry-run"));
+
+        // Fully clear -> no alerts.
+        assert!(derive_alerts(&None, &[], &[], false, false).is_empty());
+    }
 
     #[test]
     fn actionable_diags_are_the_behaviour_changing_ones() {

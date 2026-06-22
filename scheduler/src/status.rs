@@ -200,6 +200,28 @@ impl SolveReport {
         self.alerts.iter().any(|a| a.severity == Severity::Critical && a.scope == "scheduler")
     }
 
+    /// A STALE view: keep THIS report's plan (the last good solve) but overlay
+    /// `fresh`'s live context — the current time, price/PV/consumption, mode flags,
+    /// alerts and diagnostics. The run loop sends this when the current solve fails,
+    /// so the panel shows the last good plan marked stale instead of blanking to zeros.
+    pub fn stale_view(&self, fresh: &SolveReport) -> SolveReport {
+        SolveReport {
+            stale: true,
+            last_solved: self.last_solved.clone(), // when the SHOWN plan was solved
+            at: fresh.at.clone(),                  // ...stamped with the current time
+            solver_ms: fresh.solver_ms,
+            global_enabled: fresh.global_enabled,
+            dry_run: fresh.dry_run,
+            preview: fresh.preview,
+            price_now: fresh.price_now,
+            pv_now: fresh.pv_now,
+            consumption_now: fresh.consumption_now,
+            alerts: fresh.alerts.clone(),
+            diagnostics: fresh.diagnostics.clone(),
+            ..self.clone() // the PLAN (grid, loads, storage, series) is retained
+        }
+    }
+
     pub fn log_lines(&self) -> Vec<String> {
         self.loads
             .iter()
@@ -339,10 +361,46 @@ mod tests {
         assert_eq!(v["severity"], "critical", "severity serialises lowercase for the panel");
         assert_eq!(v["scope"], "scheduler");
         assert_eq!(a.log_line(), "ALERT[critical] scheduler: hot_water infeasible; all loads held");
+        // Each severity maps to its own greppable level tag.
+        let w = Alert::new(Severity::Warning, "hot_water", "t", "held");
+        let i = Alert::new(Severity::Info, "scheduler", "t", "preview");
+        assert_eq!(w.log_line(), "ALERT[warning] hot_water: held");
+        assert_eq!(i.log_line(), "ALERT[info] scheduler: preview");
         // A bare report carries an empty alerts array + non-stale defaults.
         let v: serde_json::Value = serde_json::to_value(SolveReport::default()).unwrap();
         assert!(v["alerts"].as_array().unwrap().is_empty());
         assert_eq!(v["stale"], false);
+    }
+
+    #[test]
+    fn stale_view_keeps_the_plan_but_overlays_fresh_context() {
+        let prev = SolveReport {
+            at: "t1".into(),
+            last_solved: "t1".into(),
+            preview: true,
+            grid: vec!["g0".into(), "g1".into()],
+            price_now: Some(0.10),
+            ..Default::default()
+        };
+        let fresh = SolveReport {
+            at: "t2".into(),
+            preview: false,
+            dry_run: true,
+            price_now: Some(0.42),
+            alerts: vec![Alert::new(Severity::Critical, "scheduler", "Could not solve", "boom")],
+            diagnostics: vec!["x".into()],
+            ..Default::default()
+        };
+        let v = prev.stale_view(&fresh);
+        assert!(v.stale);
+        assert_eq!(v.last_solved, "t1", "shows when the displayed plan was solved");
+        assert_eq!(v.at, "t2", "but stamps the current time");
+        assert_eq!(v.grid, prev.grid, "the last good PLAN is retained");
+        assert_eq!(v.price_now, Some(0.42), "fresh price context");
+        assert!(!v.preview, "fresh mode flags");
+        assert!(v.dry_run);
+        assert_eq!(v.alerts.len(), 1, "fresh alerts (incl. the critical)");
+        assert!(v.is_solver_failure(), "the carried-over view still reads as a failure cycle");
     }
 
     #[test]

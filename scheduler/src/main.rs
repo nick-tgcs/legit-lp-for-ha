@@ -104,22 +104,8 @@ async fn main() -> anyhow::Result<()> {
         // solve becomes the new fallback.
         let to_send = if report.is_solver_failure() {
             match &last_good {
-                Some(prev) => {
-                    let mut d = prev.clone();
-                    d.stale = true;
-                    d.last_solved = prev.last_solved.clone(); // when the shown plan was solved
-                    d.at = report.at.clone();
-                    d.solver_ms = report.solver_ms;
-                    d.global_enabled = report.global_enabled;
-                    d.dry_run = report.dry_run;
-                    d.preview = report.preview;
-                    d.price_now = report.price_now;
-                    d.pv_now = report.pv_now;
-                    d.consumption_now = report.consumption_now;
-                    d.alerts = report.alerts.clone();
-                    d.diagnostics = report.diagnostics.clone();
-                    d
-                }
+                // Keep the last good plan, marked stale, with this cycle's fresh context.
+                Some(prev) => prev.stale_view(&report),
                 None => report, // no good plan yet — show the empty report + banner
             }
         } else {
