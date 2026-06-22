@@ -95,10 +95,63 @@ pub struct StorageReport {
     pub discharge_kw: Vec<f64>,
     /// Current-step action: "charging" | "discharging" | "idle".
     pub action: String,
+    /// Any direction authorised (Optimiser)? false => the trajectory is advisory
+    /// (the panel shows it as "(preview)"/"(dry-run)", never executed).
+    pub authority: bool,
+    /// Per-direction authority: true when THAT direction is configured AND
+    /// authorised — i.e. exactly when `execute_storage` will drive it. The panel
+    /// tags the current action by its OWN direction, so a charge-only device shows
+    /// a planned discharge as advisory (it won't be actuated), not "live · executes".
+    pub charge_authority: bool,
+    pub discharge_authority: bool,
     /// Unmet target energy (kWh) across this device's deadline goals; 0 = met.
     pub target_unmet: f64,
     /// The "Why" explanation behind this device's planned trajectory.
     pub reasoning: Reasoning,
+}
+
+/// Triage level for a per-cycle issue. Serialises lowercase ("critical"/…) so the
+/// panel can class rows and `main.rs` can pick the log level.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    Warning,
+    Info,
+}
+
+/// A triaged, human-facing issue for this cycle — the layer above the raw
+/// `diagnostics` bag. Surfaced three ways (banner, header chip, Alerts section) and
+/// logged at its own level with a greppable `ALERT[<sev>]` prefix.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Alert {
+    pub severity: Severity,
+    /// "scheduler" | a load id | a storage id.
+    pub scope: String,
+    /// Short headline, e.g. "Run window unreadable".
+    pub title: String,
+    /// What happened + why + what the user can do about it.
+    pub detail: String,
+}
+
+impl Alert {
+    pub fn new(
+        severity: Severity,
+        scope: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self { severity, scope: scope.into(), title: title.into(), detail: detail.into() }
+    }
+    /// The leveled, greppable log line for this alert.
+    pub fn log_line(&self) -> String {
+        let sev = match self.severity {
+            Severity::Critical => "critical",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+        };
+        format!("ALERT[{sev}] {}: {}", self.scope, self.detail)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -106,6 +159,10 @@ pub struct SolveReport {
     /// RFC3339 local timestamps (view-model: strings, not chrono types).
     pub at: String,
     pub solver_ms: u64,
+    /// Grid step length in minutes (the solve resolution). The panel's Plan tab
+    /// derives block durations / kWh / avg-price from this instead of assuming
+    /// 15-minute steps, so a non-15 `grid_minutes` renders correct runtimes.
+    pub grid_minutes: u32,
     pub dry_run: bool,
     pub global_enabled: bool,
     /// Effective preview (shadow-solve) state this cycle: observe-only loads are
@@ -133,9 +190,48 @@ pub struct SolveReport {
     pub storage: Vec<StorageReport>,
     pub loads: Vec<LoadReport>,
     pub diagnostics: Vec<String>,
+    /// Triaged issues for this cycle (Critical/Warning/Info), derived from the
+    /// signals behind `diagnostics` + the solve outcome. Empty = nothing to flag.
+    pub alerts: Vec<Alert>,
+    /// True when this report's PLAN is a carried-over previous cycle (the current
+    /// solve failed). The price/now/alerts are fresh; the plan is `last_solved` old.
+    pub stale: bool,
+    /// Local timestamp (RFC3339) the on-screen plan was actually solved. Equals
+    /// `at` for a fresh report; an earlier time when `stale`.
+    pub last_solved: String,
 }
 
 impl SolveReport {
+    /// True when this cycle's SOLVE failed (a scheduler-scoped Critical alert) — the
+    /// signal the run loop uses to keep the last good plan on screen, marked stale.
+    /// A load-scoped critical (e.g. an unreadable control) does NOT count: the rest
+    /// of the plan is still valid.
+    pub fn is_solver_failure(&self) -> bool {
+        self.alerts.iter().any(|a| a.severity == Severity::Critical && a.scope == "scheduler")
+    }
+
+    /// A STALE view: keep THIS report's plan (the last good solve) but overlay
+    /// `fresh`'s live context — the current time, price/PV/consumption, mode flags,
+    /// alerts and diagnostics. The run loop sends this when the current solve fails,
+    /// so the panel shows the last good plan marked stale instead of blanking to zeros.
+    pub fn stale_view(&self, fresh: &SolveReport) -> SolveReport {
+        SolveReport {
+            stale: true,
+            last_solved: self.last_solved.clone(), // when the SHOWN plan was solved
+            at: fresh.at.clone(),                  // ...stamped with the current time
+            solver_ms: fresh.solver_ms,
+            global_enabled: fresh.global_enabled,
+            dry_run: fresh.dry_run,
+            preview: fresh.preview,
+            price_now: fresh.price_now,
+            pv_now: fresh.pv_now,
+            consumption_now: fresh.consumption_now,
+            alerts: fresh.alerts.clone(),
+            diagnostics: fresh.diagnostics.clone(),
+            ..self.clone() // the PLAN (grid, loads, storage, series) is retained
+        }
+    }
+
     pub fn log_lines(&self) -> Vec<String> {
         self.loads
             .iter()
@@ -227,6 +323,9 @@ mod tests {
                 charge_kw: vec![4.0],
                 discharge_kw: vec![0.0],
                 action: "charging".into(),
+                authority: true,
+                charge_authority: true,
+                discharge_authority: false,
                 target_unmet: 0.0,
                 reasoning: Reasoning::default(),
             }],
@@ -240,6 +339,10 @@ mod tests {
         assert_eq!(v["storage"][0]["id"], "sonnen");
         assert_eq!(v["storage"][0]["action"], "charging");
         assert_eq!(v["storage"][0]["soc_kwh"][1], 6.0);
+        // Per-direction authority is exposed so the panel can tag the active
+        // direction correctly (charge authorised here, discharge advisory).
+        assert_eq!(v["storage"][0]["charge_authority"], true);
+        assert_eq!(v["storage"][0]["discharge_authority"], false);
         // The Why panel's reasoning view-model is always serialised (object form).
         assert!(v["storage"][0]["reasoning"].is_object(), "reasoning present in storage JSON");
         // A no-storage report is structurally clean — storage is an empty array.
@@ -260,6 +363,60 @@ mod tests {
         assert_eq!(v["preview"], false, "preview present in the JSON and defaults off");
         let on = SolveReport { preview: true, ..Default::default() };
         assert_eq!(serde_json::to_value(&on).unwrap()["preview"], true);
+    }
+
+    #[test]
+    fn alerts_serialise_with_lowercase_severity_and_greppable_log_line() {
+        let a = Alert::new(
+            Severity::Critical,
+            "scheduler",
+            "Could not solve",
+            "hot_water infeasible; all loads held",
+        );
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["severity"], "critical", "severity serialises lowercase for the panel");
+        assert_eq!(v["scope"], "scheduler");
+        assert_eq!(a.log_line(), "ALERT[critical] scheduler: hot_water infeasible; all loads held");
+        // Each severity maps to its own greppable level tag.
+        let w = Alert::new(Severity::Warning, "hot_water", "t", "held");
+        let i = Alert::new(Severity::Info, "scheduler", "t", "preview");
+        assert_eq!(w.log_line(), "ALERT[warning] hot_water: held");
+        assert_eq!(i.log_line(), "ALERT[info] scheduler: preview");
+        // A bare report carries an empty alerts array + non-stale defaults.
+        let v: serde_json::Value = serde_json::to_value(SolveReport::default()).unwrap();
+        assert!(v["alerts"].as_array().unwrap().is_empty());
+        assert_eq!(v["stale"], false);
+    }
+
+    #[test]
+    fn stale_view_keeps_the_plan_but_overlays_fresh_context() {
+        let prev = SolveReport {
+            at: "t1".into(),
+            last_solved: "t1".into(),
+            preview: true,
+            grid: vec!["g0".into(), "g1".into()],
+            price_now: Some(0.10),
+            ..Default::default()
+        };
+        let fresh = SolveReport {
+            at: "t2".into(),
+            preview: false,
+            dry_run: true,
+            price_now: Some(0.42),
+            alerts: vec![Alert::new(Severity::Critical, "scheduler", "Could not solve", "boom")],
+            diagnostics: vec!["x".into()],
+            ..Default::default()
+        };
+        let v = prev.stale_view(&fresh);
+        assert!(v.stale);
+        assert_eq!(v.last_solved, "t1", "shows when the displayed plan was solved");
+        assert_eq!(v.at, "t2", "but stamps the current time");
+        assert_eq!(v.grid, prev.grid, "the last good PLAN is retained");
+        assert_eq!(v.price_now, Some(0.42), "fresh price context");
+        assert!(!v.preview, "fresh mode flags");
+        assert!(v.dry_run);
+        assert_eq!(v.alerts.len(), 1, "fresh alerts (incl. the critical)");
+        assert!(v.is_solver_failure(), "the carried-over view still reads as a failure cycle");
     }
 
     #[test]

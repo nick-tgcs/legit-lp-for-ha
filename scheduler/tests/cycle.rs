@@ -9,6 +9,7 @@ use legit_lp_scheduler::cycle::Cycle;
 use legit_lp_scheduler::ha_client::{history_rows, RecordingHa};
 use legit_lp_scheduler::lp::LpPlanner;
 use legit_lp_scheduler::profile::Profiles;
+use legit_lp_scheduler::status::Severity;
 use legit_lp_scheduler::testkit::sydney;
 use serde_json::{json, Value};
 
@@ -136,6 +137,17 @@ async fn c1b_unreadable_entity_ref_power_holds_the_load_observe_only() {
         "power_kw fail-closed diagnostic surfaced: {:?}",
         report.diagnostics
     );
+    // …and that fail-closed hold is promoted to a Warning alert (the triaged surface),
+    // not just buried in the diagnostics bag. It is NOT a solve failure.
+    assert!(
+        report
+            .alerts
+            .iter()
+            .any(|a| a.severity == Severity::Warning && a.detail.contains("power_kw")),
+        "fail-closed hold surfaced as a Warning alert: {:?}",
+        report.alerts
+    );
+    assert!(!report.is_solver_failure(), "a held load is not a scheduler failure");
 }
 
 #[tokio::test]
@@ -288,6 +300,16 @@ async fn c5_preview_solves_observe_only_loads_without_controlling_them() {
     assert!(report.loads.iter().any(|l| l.reason.contains("preview")), "preview reason shown");
     assert!(ha.calls.lock().unwrap().is_empty(), "preview must NOT call HA, even live");
     assert!(report.preview, "the HA preview boolean drives the effective preview flag");
+    // The mode is surfaced as an Info alert so the panel can explain "nothing is being
+    // controlled" — and it is NOT a failure.
+    assert!(
+        report.alerts.iter().any(|a| a.severity == Severity::Info
+            && a.scope == "scheduler"
+            && a.detail.to_lowercase().contains("preview")),
+        "preview mode surfaced as an Info alert: {:?}",
+        report.alerts
+    );
+    assert!(!report.is_solver_failure());
 }
 
 #[tokio::test]
@@ -398,6 +420,22 @@ async fn c10_charge_authority_writes_only_the_charge_rate_per_direction() {
         !calls.iter().any(|(t, _)| t.contains("grid_discharge_rate")),
         "export stays Manual => no discharge rate written: {calls:?}"
     );
+}
+
+#[tokio::test]
+async fn c10b_report_carries_per_direction_authority_for_the_panel() {
+    // Same one-sided fixture (charge Optimiser, export Manual). The view-model must
+    // expose per-direction authority so the panel tags the ACTIVE direction by what
+    // will actually be actuated: `execute_storage` drives charge but never discharge.
+    // Device-level `authority` stays true (the cabinet IS partly controllable).
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 storage");
+    assert!(s.charge_authority, "charge is in Optimiser => its direction is authorised");
+    assert!(!s.discharge_authority, "export stays Manual => discharge is advisory");
+    assert!(s.authority, "device-level authority is true when any direction is authorised");
 }
 
 #[tokio::test]
