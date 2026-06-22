@@ -59,6 +59,11 @@ pub struct PlanOutput {
     pub grid_kw: Vec<f64>,
     /// Planned trajectory per storage device (empty when none modelled/solved).
     pub storage: Vec<StoragePlan>,
+    /// `Some(detail)` when the solve FAILED and every load was held (`hold_all`).
+    /// The caller turns this into a Critical alert and keeps the last good plan on
+    /// screen marked stale. `None` on a normal solve (incl. the global-disabled
+    /// hold, which is an intentional state, not a failure).
+    pub solver_error: Option<String>,
 }
 
 /// Per-load variable bundle inside the MILP.
@@ -102,7 +107,14 @@ impl LpPlanner {
                     reason: "blocked; global scheduler disabled".into(),
                 })
                 .collect();
-            return PlanOutput { decisions, plans, grid: vec![], grid_kw: vec![], storage: vec![] };
+            return PlanOutput {
+                decisions,
+                plans,
+                grid: vec![],
+                grid_kw: vec![],
+                storage: vec![],
+                solver_error: None, // global-disabled is an intentional state, not a failure
+            };
         }
 
         let grid = match Grid::build(world.now, self.grid_minutes, self.horizon_hours) {
@@ -168,13 +180,19 @@ impl LpPlanner {
             let running = c.obs.running.unwrap_or(false);
             let want_on = lp.on[0];
             let price = world.price_now.map(|p| format!("{p:.3}")).unwrap_or("?".into());
-            let (action, reason) = if c.authority {
-                let action = match (running, want_on) {
-                    (false, true) => Action::Start,
-                    (true, false) => Action::Stop,
-                    _ => Action::NoChange,
-                };
-                let reason = match action {
+            // Intent: the call the optimiser WOULD make this step, computed the
+            // SAME way whether or not we will actuate. Authority + the executor
+            // decide execution; in preview an observe-only load shows its intent
+            // but is NEVER commanded — the executor's authority gate is the
+            // backstop and `executed` stays false. This is what lets the panel say
+            // "STOP (preview)" instead of a meaningless "no change".
+            let action = match (running, want_on) {
+                (false, true) => Action::Start,
+                (true, false) => Action::Stop,
+                _ => Action::NoChange,
+            };
+            let reason = if c.authority {
+                match action {
                     Action::Start if lp.ct[0] => format!("start; can-take step (price {price})"),
                     Action::Start => format!("start; lp plan (price {price})"),
                     Action::Stop => format!("stop; lp plan (price {price})"),
@@ -186,23 +204,41 @@ impl LpPlanner {
                     Action::NoChange => {
                         format!("{}; lp plan", if running { "run" } else { "idle" })
                     }
-                };
-                (action, reason)
+                }
             } else {
-                // Preview (shadow) plan: solved for the panel, but an
-                // unauthorised load is NEVER commanded — the current-step
-                // action is held and the executor's authority gate is the backstop.
-                (
-                    Action::NoChange,
-                    format!("observe-only; preview plan (price {price}, not executed)"),
-                )
+                // Advisory wording (the panel renders the pill from `action`; this
+                // is the log line + fallback). Always flagged "not executed".
+                match action {
+                    Action::Start => {
+                        format!("START (preview); would run now (price {price}, not executed)")
+                    }
+                    Action::Stop => {
+                        format!("STOP (preview); would stop now (price {price}, not executed)")
+                    }
+                    Action::NoChange if lp.unmet > 1e-6 => {
+                        format!(
+                            "hold (preview); would stay put, {:.0} unmet (not executed)",
+                            lp.unmet
+                        )
+                    }
+                    Action::NoChange => {
+                        format!("hold (preview); within plan (price {price}, not executed)")
+                    }
+                }
             };
             decisions[i] = Some(Decision { load_id: c.id.clone(), action, reason });
             plans.push(LoadPlan { id: c.id.clone(), on: lp.on, ct: lp.ct, unmet: lp.unmet });
         }
 
         let decisions = decisions.into_iter().map(Option::unwrap).collect();
-        PlanOutput { decisions, plans, grid: grid.steps.clone(), grid_kw, storage }
+        PlanOutput {
+            decisions,
+            plans,
+            grid: grid.steps.clone(),
+            grid_kw,
+            storage,
+            solver_error: None,
+        }
     }
 
     fn hold_all(&self, loads: &[LoadContract], reason: String) -> PlanOutput {
@@ -215,7 +251,14 @@ impl LpPlanner {
                 reason: reason.clone(),
             })
             .collect();
-        PlanOutput { decisions, plans: vec![], grid: vec![], grid_kw: vec![], storage: vec![] }
+        PlanOutput {
+            decisions,
+            plans: vec![],
+            grid: vec![],
+            grid_kw: vec![],
+            storage: vec![],
+            solver_error: Some(reason),
+        }
     }
 
     #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
@@ -251,13 +294,37 @@ impl LpPlanner {
                 })
                 .collect();
 
-            // Hard windows + per-demand price gate (x <= ok_mh + ct).
+            // Initial min-run lock, computed up front because the price gate
+            // below must know which steps it covers. Precedence (hardest first):
+            // HARD WINDOW > min_run lock > price ceiling. The ON lock keeps an
+            // already-running load on until min_run is met, but it must NEVER be
+            // forced where the hard window forbids running — that is absolute, and
+            // an unsatisfiable `x >= 1` there makes the MILP infeasible, so
+            // `solve()` errors and the planner falls back to `hold_all`, blanking
+            // the ENTIRE panel ("no plan solved yet", every load + the battery at
+            // 0). That crash only ever surfaced under preview — the one path that
+            // pulls observe-only loads (which a human can leave running anywhere,
+            // outside any window) into the solve. Clamp the lock to the leading run
+            // of hard-window-OK steps; past that edge the envelope (not a crash)
+            // stops the load.
+            let lock = rules::initial_lock(c, grid);
+            let mut on_lock = 0;
+            while on_lock < lock.on_steps.min(n) && masks.hard_ok[on_lock] {
+                on_lock += 1;
+            }
+
+            // Hard windows + per-demand price gate (x <= ok_mh + ct). A min-run
+            // locked step is EXEMPT from the price ceiling (min_run outranks price,
+            // per `min_run_holds_a_stop`): `+ locked` opens the gate so the load
+            // can be held through a price spike without making the model
+            // infeasible. The hard-window cap (`x <= 0`) is never relaxed.
             for t in 0..n {
                 if !masks.hard_ok[t] {
                     constraints.push(constraint!(x[t] <= 0));
                 }
                 let mh_ok = f64::from(u8::from(masks.ok_mh[t]));
-                constraints.push(constraint!(x[t] <= mh_ok + ct[t]));
+                let locked = f64::from(u8::from(t < on_lock));
+                constraints.push(constraint!(x[t] <= mh_ok + ct[t] + locked));
                 if !masks.ok_ct[t] {
                     constraints.push(constraint!(ct[t] <= 0));
                 }
@@ -288,8 +355,10 @@ impl LpPlanner {
                     constraints.push(constraint!(sum <= 1 - x[t]));
                 }
             }
-            let lock = rules::initial_lock(c, grid);
-            for t in 0..lock.on_steps.min(n) {
+            // Apply the (hard-window-clamped) ON lock and the OFF lock. The OFF
+            // lock only forces `x <= 0`, always feasible against the gates and the
+            // soft (slacked) demand, so it needs no clamp.
+            for t in 0..on_lock {
                 constraints.push(constraint!(x[t] >= 1));
             }
             for t in 0..lock.off_steps.min(n) {

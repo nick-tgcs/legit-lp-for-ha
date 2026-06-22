@@ -9,7 +9,7 @@ use legit_lp_scheduler::cycle::Cycle;
 use legit_lp_scheduler::ha_client::{resolve_endpoint, HaClient};
 use legit_lp_scheduler::lp::LpPlanner;
 use legit_lp_scheduler::profile::Profiles;
-use legit_lp_scheduler::status::SolveReport;
+use legit_lp_scheduler::status::{Severity, SolveReport};
 use legit_lp_scheduler::web::{router, WebState};
 use tokio::sync::{watch, Notify};
 
@@ -72,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tick = tokio::time::interval(Duration::from_secs(interval));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // single-flight
+                                                                          // Last successfully-solved report, kept so a failed solve can show the previous
+                                                                          // plan marked stale instead of blanking the panel to zeros.
+    let mut last_good: Option<SolveReport> = None;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
@@ -86,6 +89,45 @@ async fn main() -> anyhow::Result<()> {
         for line in report.log_lines() {
             tracing::info!("{line}");
         }
-        tx.send_replace(report);
+        // Each triaged alert at its own level, with a greppable `ALERT[<sev>]` prefix
+        // so a critical is one `grep` away in the add-on log.
+        for a in &report.alerts {
+            match a.severity {
+                Severity::Critical => tracing::error!("{}", a.log_line()),
+                Severity::Warning => tracing::warn!("{}", a.log_line()),
+                Severity::Info => tracing::info!("{}", a.log_line()),
+            }
+        }
+        // On a SOLVE failure, keep the last good plan on screen, marked stale, with
+        // this cycle's fresh context (price/now) and the critical alert overlaid —
+        // never blank to zeros while a prior plan exists. A successful, non-empty
+        // solve becomes the new fallback.
+        let to_send = if report.is_solver_failure() {
+            match &last_good {
+                Some(prev) => {
+                    let mut d = prev.clone();
+                    d.stale = true;
+                    d.last_solved = prev.last_solved.clone(); // when the shown plan was solved
+                    d.at = report.at.clone();
+                    d.solver_ms = report.solver_ms;
+                    d.global_enabled = report.global_enabled;
+                    d.dry_run = report.dry_run;
+                    d.preview = report.preview;
+                    d.price_now = report.price_now;
+                    d.pv_now = report.pv_now;
+                    d.consumption_now = report.consumption_now;
+                    d.alerts = report.alerts.clone();
+                    d.diagnostics = report.diagnostics.clone();
+                    d
+                }
+                None => report, // no good plan yet — show the empty report + banner
+            }
+        } else {
+            if !report.grid.is_empty() {
+                last_good = Some(report.clone()); // a real solved plan; remember it
+            }
+            report
+        };
+        tx.send_replace(to_send);
     }
 }

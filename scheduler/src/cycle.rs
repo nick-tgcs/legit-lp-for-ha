@@ -16,7 +16,7 @@ use crate::lp::LpPlanner;
 use crate::model::*;
 use crate::profile::Profiles;
 use crate::reasoning;
-use crate::status::{LoadReport, SolveReport, StorageReport};
+use crate::status::{Alert, LoadReport, Severity, SolveReport, StorageReport};
 use crate::time::{in_window, local_midnight, Grid};
 
 pub struct Cycle {
@@ -43,6 +43,38 @@ async fn state_of<A: HaApi>(ha: &A, entity: &str, diags: &mut Vec<String>) -> Op
 
 async fn f64_of<A: HaApi>(ha: &A, entity: &str, diags: &mut Vec<String>) -> Option<f64> {
     state_of(ha, entity, diags).await.and_then(|s| s.as_f64())
+}
+
+/// A diagnostic worth promoting to a Warning alert: a configuration / sensor read
+/// that failed and CHANGED behaviour (held a load fail-closed, disabled a demand,
+/// unmodelled a battery). Benign notes (forecast age, optional 404s) are left in the
+/// `diagnostics` bag only, so the Alerts surface stays signal, not noise.
+fn diag_is_actionable(d: &str) -> bool {
+    let dl = d.to_lowercase();
+    [
+        "unreadable",
+        "unresolved",
+        "unavailable",
+        "holding (observe-only)",
+        "demand disabled",
+        "unmodelled",
+    ]
+    .iter()
+    .any(|k| dl.contains(k))
+}
+
+/// Best-effort alert scope from a diagnostic: the device id when the message names
+/// one (`load 'x': …` / `storage 'x': …`), else "scheduler". The full text is kept
+/// in the alert `detail` regardless, so a "scheduler" fallback still reads clearly.
+fn diag_scope(d: &str) -> String {
+    for tag in ["load '", "storage '"] {
+        if let Some(rest) = d.strip_prefix(tag) {
+            if let Some(end) = rest.find('\'') {
+                return rest[..end].to_string();
+            }
+        }
+    }
+    "scheduler".to_string()
 }
 
 async fn resolve<A: HaApi>(ha: &A, vr: &ValueRef, diags: &mut Vec<String>) -> Option<f64> {
@@ -711,6 +743,63 @@ impl Cycle {
         let surplus: Vec<f64> =
             (0..n).map(|t| (world.pv[t] - world.baseload[t]).max(0.0)).collect();
 
+        // ---- triaged alerts: the human-facing layer above the raw `diags` bag ----
+        let mut alerts: Vec<Alert> = Vec::new();
+        // Critical: the solve failed and every load was held this cycle.
+        if let Some(err) = &out.solver_error {
+            alerts.push(Alert::new(
+                Severity::Critical,
+                "scheduler",
+                "Could not solve",
+                format!(
+                    "{err}. All loads were held; nothing was changed — the last good plan is shown, stale."
+                ),
+            ));
+        }
+        // Warning: configuration / sensor reads that failed and changed behaviour
+        // (held a load fail-closed, disabled a demand, unmodelled a battery). Benign
+        // notes stay in `diagnostics` only.
+        for d in &diags {
+            if diag_is_actionable(d) {
+                alerts.push(Alert::new(
+                    Severity::Warning,
+                    diag_scope(d),
+                    "Config or sensor issue",
+                    d.clone(),
+                ));
+            }
+        }
+        // Warning: a load whose must-have can't be met inside its legal/price envelope.
+        for p in &out.plans {
+            if p.unmet > 1.0 {
+                alerts.push(Alert::new(
+                    Severity::Warning,
+                    p.id.0.clone(),
+                    "Demand short",
+                    format!(
+                        "{:.0} min short — the must-have can't be met inside its window/price cap. Widen the window, raise the price cap, or lower the requirement.",
+                        p.unmet
+                    ),
+                ));
+            }
+        }
+        // Info: make "nothing is being controlled" explicit while in preview/dry-run.
+        if preview {
+            alerts.push(Alert::new(
+                Severity::Info,
+                "scheduler",
+                "Preview",
+                "Preview mode active — decisions are advisory (what the optimiser WOULD do); no devices are being controlled.",
+            ));
+        } else if self.dry_run {
+            alerts.push(Alert::new(
+                Severity::Info,
+                "scheduler",
+                "Dry-run",
+                "Dry-run mode — the optimiser computes its calls but does not control any devices.",
+            ));
+        }
+
         SolveReport {
             at: now.to_rfc3339(),
             solver_ms: started.elapsed().as_millis() as u64,
@@ -768,6 +857,7 @@ impl Cycle {
                         charge_kw: b.charge_kw.clone(),
                         discharge_kw: b.discharge_kw.clone(),
                         action: action.into(),
+                        authority,
                         target_unmet: b.target_unmet,
                         reasoning,
                     }
@@ -803,6 +893,11 @@ impl Cycle {
                 })
                 .collect(),
             diagnostics: diags,
+            alerts,
+            // This report is a fresh solve (`stale`/carry-over is applied in the run
+            // loop only when a solve fails); so the on-screen plan IS this `at`.
+            stale: false,
+            last_solved: now.to_rfc3339(),
         }
     }
 
@@ -956,4 +1051,32 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
         DemandKind::Runtime { .. } => {}
     }
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diag_is_actionable, diag_scope};
+
+    #[test]
+    fn actionable_diags_are_the_behaviour_changing_ones() {
+        // Promoted to a Warning alert: config/sensor reads that changed behaviour.
+        assert!(diag_is_actionable(
+            "load 'hot_water': run window unresolved; holding (observe-only)"
+        ));
+        assert!(diag_is_actionable(
+            "load 'hot_water': power_kw unresolved/zero; holding (observe-only)"
+        ));
+        assert!(diag_is_actionable("storage 'sonnen': SoC unreadable; unmodelled this cycle"));
+        assert!(diag_is_actionable("humidity target unresolved; demand disabled"));
+        // Left in the diagnostics bag only (benign / informational).
+        assert!(!diag_is_actionable("forecast 4m old"));
+        assert!(!diag_is_actionable("input_boolean.lp_scheduler_preview: HTTP 404 Not Found"));
+    }
+
+    #[test]
+    fn diag_scope_extracts_the_device_id_or_falls_back() {
+        assert_eq!(diag_scope("load 'hot_water': run window unresolved"), "hot_water");
+        assert_eq!(diag_scope("storage 'sonnen01': SoC unreadable; unmodelled"), "sonnen01");
+        assert_eq!(diag_scope("humidity target unresolved; demand disabled"), "scheduler");
+    }
 }

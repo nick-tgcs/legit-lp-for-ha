@@ -95,10 +95,57 @@ pub struct StorageReport {
     pub discharge_kw: Vec<f64>,
     /// Current-step action: "charging" | "discharging" | "idle".
     pub action: String,
+    /// Any direction authorised (Optimiser)? false => the trajectory is advisory
+    /// (the panel shows it as "(preview)"/"(dry-run)", never executed).
+    pub authority: bool,
     /// Unmet target energy (kWh) across this device's deadline goals; 0 = met.
     pub target_unmet: f64,
     /// The "Why" explanation behind this device's planned trajectory.
     pub reasoning: Reasoning,
+}
+
+/// Triage level for a per-cycle issue. Serialises lowercase ("critical"/…) so the
+/// panel can class rows and `main.rs` can pick the log level.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    Warning,
+    Info,
+}
+
+/// A triaged, human-facing issue for this cycle — the layer above the raw
+/// `diagnostics` bag. Surfaced three ways (banner, header chip, Alerts section) and
+/// logged at its own level with a greppable `ALERT[<sev>]` prefix.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Alert {
+    pub severity: Severity,
+    /// "scheduler" | a load id | a storage id.
+    pub scope: String,
+    /// Short headline, e.g. "Run window unreadable".
+    pub title: String,
+    /// What happened + why + what the user can do about it.
+    pub detail: String,
+}
+
+impl Alert {
+    pub fn new(
+        severity: Severity,
+        scope: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self { severity, scope: scope.into(), title: title.into(), detail: detail.into() }
+    }
+    /// The leveled, greppable log line for this alert.
+    pub fn log_line(&self) -> String {
+        let sev = match self.severity {
+            Severity::Critical => "critical",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+        };
+        format!("ALERT[{sev}] {}: {}", self.scope, self.detail)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -133,9 +180,26 @@ pub struct SolveReport {
     pub storage: Vec<StorageReport>,
     pub loads: Vec<LoadReport>,
     pub diagnostics: Vec<String>,
+    /// Triaged issues for this cycle (Critical/Warning/Info), derived from the
+    /// signals behind `diagnostics` + the solve outcome. Empty = nothing to flag.
+    pub alerts: Vec<Alert>,
+    /// True when this report's PLAN is a carried-over previous cycle (the current
+    /// solve failed). The price/now/alerts are fresh; the plan is `last_solved` old.
+    pub stale: bool,
+    /// Local timestamp (RFC3339) the on-screen plan was actually solved. Equals
+    /// `at` for a fresh report; an earlier time when `stale`.
+    pub last_solved: String,
 }
 
 impl SolveReport {
+    /// True when this cycle's SOLVE failed (a scheduler-scoped Critical alert) — the
+    /// signal the run loop uses to keep the last good plan on screen, marked stale.
+    /// A load-scoped critical (e.g. an unreadable control) does NOT count: the rest
+    /// of the plan is still valid.
+    pub fn is_solver_failure(&self) -> bool {
+        self.alerts.iter().any(|a| a.severity == Severity::Critical && a.scope == "scheduler")
+    }
+
     pub fn log_lines(&self) -> Vec<String> {
         self.loads
             .iter()
@@ -227,6 +291,7 @@ mod tests {
                 charge_kw: vec![4.0],
                 discharge_kw: vec![0.0],
                 action: "charging".into(),
+                authority: false,
                 target_unmet: 0.0,
                 reasoning: Reasoning::default(),
             }],
@@ -260,6 +325,24 @@ mod tests {
         assert_eq!(v["preview"], false, "preview present in the JSON and defaults off");
         let on = SolveReport { preview: true, ..Default::default() };
         assert_eq!(serde_json::to_value(&on).unwrap()["preview"], true);
+    }
+
+    #[test]
+    fn alerts_serialise_with_lowercase_severity_and_greppable_log_line() {
+        let a = Alert::new(
+            Severity::Critical,
+            "scheduler",
+            "Could not solve",
+            "hot_water infeasible; all loads held",
+        );
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["severity"], "critical", "severity serialises lowercase for the panel");
+        assert_eq!(v["scope"], "scheduler");
+        assert_eq!(a.log_line(), "ALERT[critical] scheduler: hot_water infeasible; all loads held");
+        // A bare report carries an empty alerts array + non-stale defaults.
+        let v: serde_json::Value = serde_json::to_value(SolveReport::default()).unwrap();
+        assert!(v["alerts"].as_array().unwrap().is_empty());
+        assert_eq!(v["stale"], false);
     }
 
     #[test]

@@ -37,15 +37,58 @@ pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
 .why table.facts td{padding:2px 0;vertical-align:top}
 .why table.facts td.k{color:var(--muted);width:96px;white-space:nowrap}
 .why table.facts td.s{color:var(--accent);text-align:right;font-size:.7rem;white-space:nowrap}
-.why table.facts td.n{text-align:right;font-variant-numeric:tabular-nums}</style></head><body>
+.why table.facts td.n{text-align:right;font-variant-numeric:tabular-nums}
+/* ---- preview-as-dry-run + alerts (see docs/preview-as-dryrun-and-alerts-design.md) ---- */
+:root{--crit:#e53935;--ok:#43a047}
+.chips .alert{cursor:pointer;font-weight:600}
+.chips .alert.crit{border-color:var(--crit);color:var(--crit)}
+.banner{border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:.9rem;line-height:1.5;display:flex;gap:12px;align-items:flex-start}
+.banner .ico{font-size:1.3rem;line-height:1.2}
+.banner .sub{color:var(--muted);font-size:.82rem;display:block;margin-top:3px}
+.banner .grep{font-family:ui-monospace,Menlo,monospace;font-size:.78rem;background:rgba(127,127,127,.12);padding:1px 6px;border-radius:5px}
+.banner.info{background:rgba(3,169,244,.10);border:1px solid var(--accent)}
+.banner.crit{background:rgba(229,57,53,.10);border:1px solid var(--crit)}.banner.crit b{color:var(--crit)}
+.act{display:flex;align-items:center;gap:10px;margin:2px 0 5px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;padding:5px 12px;border-radius:9px}
+.pill.start{background:rgba(67,160,71,.14);color:var(--ok)}
+.pill.stop{background:rgba(3,169,244,.14);color:#0277bd}
+.pill.hold{background:rgba(127,127,127,.12);color:var(--muted)}
+.pill.adv{background:rgba(255,152,0,.16);color:#ef6c00}
+.adv-tag{font-size:.7rem;color:var(--warn);border:1px solid var(--warn);border-radius:12px;padding:1px 8px}
+.act-why{font-size:.8rem;color:var(--muted);margin:0 0 9px;line-height:1.4}
+.stale{background:rgba(255,152,0,.10);border:1px solid var(--warn);color:#ef6c00;border-radius:8px;padding:5px 10px;font-size:.78rem;margin:0 0 10px}
+.alerts{display:flex;flex-direction:column;gap:8px}
+.alert-row{display:grid;grid-template-columns:96px 104px 1fr;gap:10px;align-items:baseline;font-size:.82rem;padding:7px 10px;border-radius:8px;border:1px solid var(--border)}
+.alert-row .sev{font-weight:700;font-size:.72rem;letter-spacing:.03em}
+.alert-row .scope{color:var(--muted)}
+.alert-row.crit{background:rgba(229,57,53,.07);border-color:rgba(229,57,53,.4)}.alert-row.crit .sev{color:var(--crit)}
+.alert-row.warn{background:rgba(255,152,0,.06);border-color:rgba(255,152,0,.35)}.alert-row.warn .sev{color:#ef6c00}
+.alert-row.info .sev{color:var(--accent)}
+.allgood{color:var(--ok);font-size:.88rem}
+/* ---- per-device Plan tab: full-horizon sparkline + exact block table (§3.7) ---- */
+.planv{margin-top:4px}
+.spark{width:100%;height:auto;display:block;margin-bottom:2px}
+.spark .nowm{stroke:var(--crit);stroke-width:1.4}
+.plan-axis{position:relative;height:14px;font-size:.66rem;color:var(--muted);margin:0 0 9px}
+.plan-axis span{position:absolute;transform:translateX(-50%);white-space:nowrap}
+.plan-tbl{width:100%;border-collapse:collapse;font-size:.74rem}
+.plan-tbl th{text-align:left;color:var(--muted);font-weight:600;font-size:.64rem;text-transform:uppercase;letter-spacing:.03em;padding:2px 8px 4px 0;border-bottom:1px solid var(--border)}
+.plan-tbl td{padding:4px 8px 4px 0;border-bottom:1px solid var(--border);vertical-align:top}
+.plan-tbl td.n,.plan-tbl th.n{text-align:right;font-variant-numeric:tabular-nums}
+.plan-tbl td.muted{color:var(--muted);text-align:center;padding:9px}
+.plan-tbl .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+.plan-tbl .dot.g{background:#66bb6a}.plan-tbl .dot.o{background:#ffa726}.plan-tbl .dot.b{background:#03a9f4}.plan-tbl .dot.k{background:#4caf50}
+.plan-tbl .pc{color:var(--ok)}.plan-tbl .pp{color:var(--crit)}.plan-tbl .pf{color:#1e88e5}
+.plan-foot{font-size:.72rem;color:var(--muted);margin-top:8px}.plan-foot b{color:var(--text)}</style></head><body>
 <div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
 <p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button>
-<label style="margin-left:14px;font-size:.9rem;color:var(--muted)" title="Solve observe-only loads to preview their plan — never controls a device"><input type="checkbox" id="preview" onchange="fetch('./api/preview?on='+this.checked,{method:'POST'})"> solve observe-only (preview)</label></p></div>
+<label style="margin-left:14px;font-size:.9rem;color:var(--muted)" title="Solve observe-only loads to preview their plan — never controls a device"><input type="checkbox" id="preview" onchange="fetch('./api/preview?on='+this.checked,{method:'POST'})"> Preview — show what it would do</label></p></div>
+<div id="banners"></div>
 <div class="card"><h2>The plan · next horizon</h2><div id="horizon" role="img" aria-label="plan timeline"><div id="plot"></div><div id="xhair"></div><div id="tip"></div></div>
 <p class="legend"><b style="color:#5c6bc0">━ import price</b> · <b style="color:#26a69a">┄ feed-in</b> · <b style="color:#ffb300">▰ solar</b> · <b style="color:#ef9a9a">▮ grid import</b> · <b style="color:#a5d6a7">▮ grid export</b> · <b style="color:#1e88e5">━ battery SoC</b> · <b style="color:#66bb6a">▮ charging</b> · <b style="color:#ffa726">▮ discharging</b> · <b style="color:#03a9f4">▮ load run</b> · <b style="color:#4caf50">▮ can-take</b></p></div>
 <div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
 <div class="card" id="storagecard"><h2>Storage</h2><div class="grid" id="storage"></div></div>
-<div class="card"><h2>Diagnostics</h2><pre id="diags"></pre></div>
+<div class="card"><h2>Alerts &amp; diagnostics</h2><div class="alerts" id="alerts"></div><pre id="diags" style="margin-top:10px"></pre></div>
 <script type="module">
 const chips=document.getElementById('chips'),loads=document.getElementById('loads'),diags=document.getElementById('diags');
 const storage=document.getElementById('storage'),storagecard=document.getElementById('storagecard');
@@ -61,8 +104,111 @@ const setTab=(id,w)=>{tab[id]=w;if(last)render(last);};
  const t=e.target.closest&&e.target.closest('.tab');
  if(t&&t.dataset.id!=null)setTab(t.dataset.id,t.dataset.tab);
 }));
-// The two-tab Why panel shared by load + storage cards (Overview / Why).
-function why(d){
+const bannersEl=document.getElementById('banners'),alertsEl=document.getElementById('alerts');
+// "What it would do NOW" pill + reason. A device is `advisory` (never executed)
+// when it lacks authority OR the add-on is in dry-run; the tag says which.
+const ACT={Start:['start','▶','START'],Stop:['stop','■','STOP'],NoChange:['hold','●','hold']};
+function pillLine(cls,ico,verb,isHold,advisory,tag,reason){
+ const label=isHold?(advisory?`hold (${tag})`:'hold'):(advisory?`${verb} (${tag})`:`${verb} now`);
+ const t=advisory?'<span class="adv-tag">advisory · not executed</span>'
+  :'<span class="adv-tag" style="color:var(--ok);border-color:var(--ok)">live · executes</span>';
+ return `<div class="act"><span class="pill ${cls}${advisory?' adv':''}">${ico} ${esc(label)}</span>${t}</div>`
+  +(reason?`<div class="act-why">${esc(reason)}</div>`:'');
+}
+function loadAction(l,r){
+ if(!l.on||!l.on.length)return ''; // not solved (observe-only with preview off)
+ const [cls,ico,verb]=ACT[l.action]||ACT.NoChange;
+ const advisory=!l.authority||r.dry_run, tag=l.authority?'dry-run':'preview';
+ return pillLine(cls,ico,verb,l.action==='NoChange',advisory,tag,l.reason);
+}
+function storageAction(b,r){
+ const ch=(b.charge_kw&&b.charge_kw[0])||0, dis=(b.discharge_kw&&b.discharge_kw[0])||0;
+ const advisory=!b.authority||r.dry_run, tag=b.authority?'dry-run':'preview';
+ const why=(b.reasoning&&b.reasoning.narrative)||'';
+ if(b.action==='charging')return pillLine('start','▲',`CHARGE ${ch.toFixed(1)} kW`,false,advisory,tag,why);
+ if(b.action==='discharging')return pillLine('stop','▼',`DISCHARGE ${dis.toFixed(1)} kW`,false,advisory,tag,why);
+ return pillLine('hold','●','hold',true,advisory,tag,why);
+}
+// Full-width mode (info) + solve-failure (critical) banners.
+function bannersHtml(r){
+ let h='';
+ if(r.stale)h+=`<div class="banner crit"><div class="ico">⛔</div><div><b>SCHEDULER ERROR — could not solve this cycle.</b>`
+  +`<span class="sub">All loads were HELD; nothing was changed. The plan below is the last good one (solved ${esc(r.last_solved||'?')}).</span>`
+  +`<span class="sub">Find it in the add-on log: <span class="grep">grep 'ALERT[critical]'</span></span></div></div>`;
+ if(r.preview||r.dry_run){
+  const mode=r.preview?'PREVIEW':'DRY-RUN';
+  const msg=r.preview?'showing exactly what the optimiser WOULD do right now. No devices are being controlled.'
+   :'the optimiser computes its calls but does not control any devices.';
+  h+=`<div class="banner info"><div class="ico">ⓘ</div><div><b>${mode} — ${msg}</b>`
+   +`<span class="sub">Each load acts only when its mode is Optimiser and the add-on dry-run is off — use this to verify the optimiser before trusting it.</span></div></div>`;
+ }
+ return h;
+}
+// Header chip summarising open alerts (click scrolls to the Alerts section).
+function alertChip(a){
+ a=a||[];const c=a.filter(x=>x.severity==='critical').length,w=a.filter(x=>x.severity==='warning').length;
+ if(!c&&!w)return '';
+ const parts=[];if(c)parts.push(`⛔ ${c} critical`);if(w)parts.push(`⚠ ${w} warning${w>1?'s':''}`);
+ return `<span class="${c?'alert crit':'warn alert'}" onclick="document.getElementById('alerts').scrollIntoView({behavior:'smooth'})">${parts.join(' · ')}</span>`;
+}
+const SEV={critical:['crit','⛔ CRITICAL'],warning:['warn','⚠ WARNING'],info:['info','ⓘ INFO']},SORD={critical:0,warning:1,info:2};
+function alertsHtml(a){
+ a=a||[];
+ if(!a.length)return '<div class="allgood">✓ all good — no warnings this cycle.</div>';
+ return a.slice().sort((x,y)=>(SORD[x.severity]??9)-(SORD[y.severity]??9)).map(al=>{
+  const [cls,label]=SEV[al.severity]||SEV.info;
+  return `<div class="alert-row ${cls}"><span class="sev">${label}</span><span class="scope">${esc(al.scope)}</span><span class="det">${esc(al.detail)}</span></div>`;
+ }).join('');
+}
+// ---- Plan tab: ONE device's full-horizon schedule (sparkline + exact block table) ----
+// The MILP solves all 96 steps; the horizon is anchored at NOW (grid[0] contains now)
+// and runs forward 24 h, so the "now" marker sits at the left edge. Everything here is
+// derived client-side from the already-streamed arrays — no API change.
+const hm=(r,i)=>{const g=r.grid&&r.grid[i];return g?g.slice(11,16):'';};        // step i -> "HH:MM"
+const dur=m=>m>=90?`${(m/60).toFixed(1)} h`:`${Math.round(m)} min`;
+const money=p=>p==null?'—':`$${(+p).toFixed(2)}`;
+const priceCls=p=>p==null?'':(p<0?'pf':(p>=0.30?'pp':'pc'));                     // feed-in / peak / cheap
+function avgPrice(r,a,b){let s=0,k=0;for(let t=a;t<b;t++){const p=r.price&&r.price[t];if(p!=null){s+=p;k++;}}return k?s/k:null;}
+// Contiguous blocks from a per-step classifier (null => off/skip). Returns {k,a,b}.
+function runs(n,cls){const out=[];let s=0,c=null;for(let t=0;t<=n;t++){const k=t<n?cls(t):null;if(k!==c){if(c!=null)out.push({k:c,a:s,b:t});c=k;s=t;}}return out;}
+// A few wall-clock hour ticks across the horizon.
+function planAxis(r,n){if(!n)return '';const k=Math.max(1,Math.round(n/4)),t=[];for(let i=0;i<n;i+=k)t.push(`<span style="left:${(100*i/n).toFixed(1)}%">${hm(r,i)}</span>`);return `<div class="plan-axis">${t.join('')}</div>`;}
+function planBattery(b,r){
+ const n=Math.min(b.charge_kw?b.charge_kw.length:0,r.grid?r.grid.length:0);
+ if(!n)return '<td class="muted">no battery plan</td>';
+ const cap=b.capacity_kwh||0,resv=cap?100*(b.min_soc_kwh||0)/cap:0,soc=b.soc_kwh||[];
+ const W=560,H=64,X=i=>n?i/n*W:0,Y=p=>H-2-(p/100)*(H-6);
+ const cls=t=>((b.charge_kw[t]||0)>0.05?'c':((b.discharge_kw[t]||0)>0.05?'d':null));
+ const segs=runs(n,cls).filter(s=>s.k);
+ const shade=segs.map(s=>`<rect x="${X(s.a).toFixed(1)}" y="0" width="${(X(s.b)-X(s.a)).toFixed(1)}" height="${H}" fill="${s.k==='c'?'#66bb6a':'#ffa726'}" fill-opacity="0.18"/>`).join('');
+ let pts='';for(let i=0;i<=n;i++){pts+=`${X(i).toFixed(1)},${Y(cap?100*(soc[i]||0)/cap:0).toFixed(1)} `;}
+ const resvLine=cap?`<line x1="0" y1="${Y(resv).toFixed(1)}" x2="${W}" y2="${Y(resv).toFixed(1)}" stroke="var(--warn)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>`:'';
+ const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${shade}${resvLine}<polyline fill="none" stroke="#1e88e5" stroke-width="1.6" points="${pts.trim()}"/><line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
+ const rows=segs.map(s=>{const a=s.k==='c'?b.charge_kw:b.discharge_kw;let e=0,pk=0;for(let t=s.a;t<s.b;t++){e+=(a[t]||0)*0.25;pk=Math.max(pk,a[t]||0);}
+  const end=cap?100*(soc[Math.min(s.b,soc.length-1)]||0)/cap:0,pr=avgPrice(r,s.a,s.b);
+  return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='c'?'g':'o'}"></span>${s.k==='c'?'Charge':'Discharge'}</td><td class="n">${pk.toFixed(1)} kW</td><td class="n">${s.k==='c'?'+':'−'}${e.toFixed(1)} kWh → ${end.toFixed(0)}%</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
+ let ce=0,de=0,cc=0,dc=0;for(let t=0;t<n;t++){const c=b.charge_kw[t]||0,d=b.discharge_kw[t]||0,p=(r.price&&r.price[t])||0;ce+=c*0.25;de+=d*0.25;cc+=c*0.25*p;dc+=d*0.25*p;}
+ const foot=ce>0.05?`<div class="plan-foot">charged <b>${ce.toFixed(1)} kWh</b> @ avg $${(cc/ce).toFixed(2)}${de>0.05?` · discharged <b>${de.toFixed(1)} kWh</b> into avg $${(dc/de).toFixed(2)}`:''}</div>`:'';
+ return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">Power</th><th class="n">Result (end SoC)</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">no charge/discharge planned — holds steady</td></tr>'}</tbody></table>${foot}`;
+}
+function planLoad(l,r){
+ const n=Math.min(l.on?l.on.length:0,r.grid?r.grid.length:0);
+ if(!n)return '<table class="plan-tbl"><tbody><tr><td class="muted">not solved this horizon (observe-only with preview off)</td></tr></tbody></table>';
+ const W=560,H=26,X=i=>n?i/n*W:0;
+ const cls=t=>(l.on[t]?((l.ct&&l.ct[t])?'t':'m'):null);
+ const segs=runs(n,cls).filter(s=>s.k);
+ const bars=segs.map(s=>`<rect x="${X(s.a).toFixed(1)}" y="4" width="${Math.max(X(s.b)-X(s.a),1).toFixed(1)}" height="${H-8}" rx="2" fill="${s.k==='m'?'#03a9f4':'#4caf50'}"/>`).join('');
+ const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><rect x="0" y="4" width="${W}" height="${H-8}" rx="2" fill="var(--border)" opacity="0.5"/>${bars}<line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
+ let cum=0;const rows=segs.map(s=>{const mins=(s.b-s.a)*15;cum+=mins;const pr=avgPrice(r,s.a,s.b);
+  return `<tr><td>${hm(r,s.a)}–${hm(r,Math.min(s.b,n-1))}</td><td><span class="dot ${s.k==='m'?'b':'k'}"></span>${s.k==='m'?'Run':'Can-take'}</td><td class="n">${dur(mins)}</td><td class="n">${dur(cum)} total</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
+ return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">For</th><th class="n">Cumulative</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">nothing scheduled this horizon</td></tr>'}</tbody></table>`;
+}
+function planView(d,r){
+ if(!r.grid||!r.grid.length)return '<div class="plan-tbl"><tbody><tr><td class="muted">no plan solved yet</td></tr></tbody></div>';
+ return `<div class="planv">${d.soc_kwh!==undefined?planBattery(d,r):planLoad(d,r)}</div>`;
+}
+// The per-device tabs panel shared by load + storage cards (Overview / Why / Plan).
+function why(d,r){
  const R=d.reasoning||{},act=tab[d.id]||'overview';
  const facts=arr=>`<table class="facts">${(arr||[]).map(f=>`<tr><td class="k">${esc(f.label)}</td><td class="n">${esc(f.value)}</td><td class="s">${f.source?esc(f.source):''}</td></tr>`).join('')}</table>`;
  const steps=R.steps||[],total=steps.reduce((a,b)=>a+b.count,0)||1;
@@ -80,7 +226,11 @@ function why(d){
   +(steps.length?`<div class="sec">Step availability</div>${facts(steps.map(s=>({label:s.label,value:String(s.count)})))}`:'')
   +(blocks.length?`<div class="sec">Plan</div>${facts(blocks.map(b=>({label:b.kind,value:`${b.start}–${b.end}`,source:`${(+b.hours).toFixed(1)} h`})))}`:'');
  const id=esc(d.id);
- return `<div class="tabs"><span class="tab ${act==='overview'?'act':''}" data-id="${id}" data-tab="overview">Overview</span><span class="tab ${act==='why'?'act':''}" data-id="${id}" data-tab="why">Why</span></div><div class="why">${act==='why'?detail:overview}</div>`;
+ const content=act==='plan'?planView(d,r):act==='why'?detail:overview;
+ return `<div class="tabs"><span class="tab ${act==='overview'?'act':''}" data-id="${id}" data-tab="overview">Overview</span>`
+  +`<span class="tab ${act==='why'?'act':''}" data-id="${id}" data-tab="why">Why</span>`
+  +`<span class="tab ${act==='plan'?'act':''}" data-id="${id}" data-tab="plan">Plan</span></div>`
+  +`<div class="why">${content}</div>`;
 }
 function render(r){
  last=r;
@@ -94,14 +244,16 @@ function render(r){
   battChip+=`<span>🔋 ${b.id} ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}% · ${a}${u}</span>`;});
  chips.innerHTML=`<span class="${r.global_enabled?'on':'warn'}">${r.global_enabled?'enabled':'disabled'}</span>`
   +(r.dry_run?'<span class="warn">observing · dry-run</span>':'')
+  +alertChip(r.alerts)
   +`<span>price ${f(r.price_now,3)} /kWh</span><span>☀ ${f(r.pv_now)} kW</span>`
   +`<span>house ${f(r.consumption_now)} kW</span>`+gridChip+battChip
   +`<span>solve ${r.solver_ms} ms · ${r.at}</span>`;
+ bannersEl.innerHTML=bannersHtml(r);
  loads.innerHTML=r.loads.map(l=>{
   const chipsHtml=`<div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>`
    +`<span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${esc(l.planning)}</span>`
    +`${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>`;
-  return `<div class="card"><h1>${esc(l.id)}</h1>${chipsHtml}${why(l)}</div>`;
+  return `<div class="card"><h1>${esc(l.id)}</h1>${chipsHtml}${loadAction(l,r)}${why(l,r)}</div>`;
  }).join('');
  const sto=r.storage||[];
  if(storagecard)storagecard.style.display=sto.length?'':'none';
@@ -109,11 +261,14 @@ function render(r){
   const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
   const a=b.action==='charging'?'▲ charging':b.action==='discharging'?'▼ discharging':'○ idle';
   const chipsHtml=`<div class="chips"><span>🔋 ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}%</span><span>${a}</span>`
+   +`<span class="${b.authority?'on':'warn'}">${b.authority?'AUTH ✓':'observe-only'}</span>`
    +`${b.target_unmet>0.1?`<span class="warn">short ${f(b.target_unmet,1)} kWh</span>`:''}</div>`;
-  return `<div class="card"><h1>${esc(b.id)}</h1>${chipsHtml}${why(b)}</div>`;
+  return `<div class="card"><h1>${esc(b.id)}</h1>${chipsHtml}${storageAction(b,r)}${why(b,r)}</div>`;
  }).join('');
  const pc=document.getElementById('preview'); if(pc) pc.checked=!!r.preview;
- diags.textContent=r.diagnostics.join('\n')||'all good';
+ alertsEl.innerHTML=alertsHtml(r.alerts);
+ // The raw diagnostics bag stays below the triaged alerts (detail for the curious).
+ diags.textContent=r.diagnostics.join('\n');
  fetch('./horizon.svg',{cache:'no-store'}).then(r=>r.text()).then(svg=>{document.getElementById('plot').innerHTML=svg;});
 }
 // Instant crosshair tooltip: reuse the per-step <title> readouts the server

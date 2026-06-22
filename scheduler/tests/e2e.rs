@@ -102,6 +102,16 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
         .spawn()
         .expect("binary spawns");
 
+    // Drain the child's stdout continuously, like the add-on supervisor does in
+    // prod. Without this, the solve loop's per-cycle log lines fill the 64KB pipe
+    // buffer and `tracing` BLOCKS the loop mid-run — it would stop solving and the
+    // panel would freeze on a stale report. (The binary logs to stdout.)
+    let mut child_stdout = child.stdout.take().unwrap();
+    let stdout_drain = std::thread::spawn(move || {
+        let mut sink = String::new();
+        child_stdout.read_to_string(&mut sink).ok();
+    });
+
     // Give it time to boot + at least one solve cycle.
     tokio::time::sleep(Duration::from_secs(4)).await;
 
@@ -191,6 +201,7 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
 
     child.kill().unwrap();
     child.wait().unwrap(); // reap; clippy zombie_processes
+    stdout_drain.join().ok(); // reap the stdout-drain thread once stdout closes
     let mut err = String::new();
     child.stderr.take().unwrap().read_to_string(&mut err).ok();
 

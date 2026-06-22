@@ -9,6 +9,7 @@ use legit_lp_scheduler::cycle::Cycle;
 use legit_lp_scheduler::ha_client::{history_rows, RecordingHa};
 use legit_lp_scheduler::lp::LpPlanner;
 use legit_lp_scheduler::profile::Profiles;
+use legit_lp_scheduler::status::Severity;
 use legit_lp_scheduler::testkit::sydney;
 use serde_json::{json, Value};
 
@@ -136,6 +137,17 @@ async fn c1b_unreadable_entity_ref_power_holds_the_load_observe_only() {
         "power_kw fail-closed diagnostic surfaced: {:?}",
         report.diagnostics
     );
+    // …and that fail-closed hold is promoted to a Warning alert (the triaged surface),
+    // not just buried in the diagnostics bag. It is NOT a solve failure.
+    assert!(
+        report
+            .alerts
+            .iter()
+            .any(|a| a.severity == Severity::Warning && a.detail.contains("power_kw")),
+        "fail-closed hold surfaced as a Warning alert: {:?}",
+        report.alerts
+    );
+    assert!(!report.is_solver_failure(), "a held load is not a scheduler failure");
 }
 
 #[tokio::test]
@@ -288,6 +300,16 @@ async fn c5_preview_solves_observe_only_loads_without_controlling_them() {
     assert!(report.loads.iter().any(|l| l.reason.contains("preview")), "preview reason shown");
     assert!(ha.calls.lock().unwrap().is_empty(), "preview must NOT call HA, even live");
     assert!(report.preview, "the HA preview boolean drives the effective preview flag");
+    // The mode is surfaced as an Info alert so the panel can explain "nothing is being
+    // controlled" — and it is NOT a failure.
+    assert!(
+        report.alerts.iter().any(|a| a.severity == Severity::Info
+            && a.scope == "scheduler"
+            && a.detail.to_lowercase().contains("preview")),
+        "preview mode surfaced as an Info alert: {:?}",
+        report.alerts
+    );
+    assert!(!report.is_solver_failure());
 }
 
 #[tokio::test]

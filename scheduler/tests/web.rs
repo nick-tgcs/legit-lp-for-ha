@@ -66,6 +66,7 @@ fn full_report() -> SolveReport {
             charge_kw: vec![2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             discharge_kw: vec![0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 0.0, 0.0],
             action: "charging".into(),
+            authority: false,
             target_unmet: 0.0,
             reasoning: Default::default(),
         }],
@@ -214,10 +215,23 @@ async fn w11_index_has_per_device_why_panels_for_loads_and_storage() {
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
     assert!(html.contains("setTab"), "tab switching is wired");
-    assert!(html.contains(">Overview<") && html.contains(">Why<"), "both tabs are present");
+    assert!(
+        html.contains(">Overview<") && html.contains(">Why<") && html.contains(">Plan<"),
+        "all three tabs are present (Overview / Why / Plan)"
+    );
     assert!(html.contains(r#"id="storage""#), "storage devices get their own cards");
     assert!(html.contains("reasoning"), "cards render the reasoning view-model");
     assert!(html.contains("Resolved inputs"), "the Why tab lists resolved live inputs");
+    // The Plan tab renders each device's full-horizon schedule from the streamed
+    // arrays (no API change): a sparkline + an exact per-block table.
+    assert!(
+        html.contains("planView") && html.contains("planBattery") && html.contains("planLoad"),
+        "the Plan tab builds per-device full-horizon views"
+    );
+    assert!(
+        html.contains("class=\"plan-tbl\"") || html.contains("plan-tbl"),
+        "the Plan tab renders the exact per-block table"
+    );
 }
 
 #[tokio::test]
