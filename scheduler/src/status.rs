@@ -18,6 +18,65 @@ pub struct LoadReport {
     /// Planned on/off + can-take credit over the horizon (grid-aligned).
     pub on: Vec<bool>,
     pub ct: Vec<bool>,
+    /// The "Why" explanation behind this plan (Overview + Why tabs).
+    pub reasoning: Reasoning,
+}
+
+/// A single labelled fact in a Why panel. `source` is the HA entity the value came
+/// from (`None` = a literal in the registry), so the user sees which control drove
+/// it — the de-hardcoding made every operational value entity-traceable.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct ReasonFact {
+    pub label: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl ReasonFact {
+    pub fn new(label: impl Into<String>, value: impl Into<String>, source: Option<String>) -> Self {
+        Self { label: label.into(), value: value.into(), source }
+    }
+}
+
+/// One bucket of the per-step availability breakdown (why steps were/weren't usable).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StepBucket {
+    pub label: String,
+    pub count: u32,
+}
+
+/// A planned contiguous block rendered as human times.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PlanBlock {
+    pub start: String,
+    pub end: String,
+    pub hours: f64,
+    /// "must-have" | "can-take" | "charge" | "discharge".
+    pub kind: String,
+}
+
+/// The "Why" explanation for one device (load or storage). Built once per cycle in
+/// `reasoning.rs` and serialised into the panel — works for observe-only devices too.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct Reasoning {
+    /// One-line plain-English overview (the Overview tab).
+    pub narrative: String,
+    /// The constraint that bound the outcome, when the device fell short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    /// Plain "what would change it" hint when something is unmet (the user's call —
+    /// the LP only reports; it never edits the settings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<String>,
+    /// Outcome metrics (required/planned/unmet, or SoC/target) — label/value.
+    pub metrics: Vec<ReasonFact>,
+    /// Resolved live inputs the LP used, each with its source entity.
+    pub inputs: Vec<ReasonFact>,
+    /// Per-step availability breakdown (loads only; empty for storage).
+    pub steps: Vec<StepBucket>,
+    /// Planned run/charge blocks as time ranges.
+    pub blocks: Vec<PlanBlock>,
 }
 
 /// The planned trajectory of one storage device, mirrored from the solver for
@@ -38,6 +97,8 @@ pub struct StorageReport {
     pub action: String,
     /// Unmet target energy (kWh) across this device's deadline goals; 0 = met.
     pub target_unmet: f64,
+    /// The "Why" explanation behind this device's planned trajectory.
+    pub reasoning: Reasoning,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -136,6 +197,7 @@ mod tests {
                 executed: true,
                 on: vec![true],
                 ct: vec![false],
+                reasoning: Reasoning::default(),
             }],
             diagnostics: vec!["forecast 4m old".into()],
             ..Default::default()
@@ -166,6 +228,7 @@ mod tests {
                 discharge_kw: vec![0.0],
                 action: "charging".into(),
                 target_unmet: 0.0,
+                reasoning: Reasoning::default(),
             }],
             ..Default::default()
         };
@@ -177,6 +240,8 @@ mod tests {
         assert_eq!(v["storage"][0]["id"], "sonnen");
         assert_eq!(v["storage"][0]["action"], "charging");
         assert_eq!(v["storage"][0]["soc_kwh"][1], 6.0);
+        // The Why panel's reasoning view-model is always serialised (object form).
+        assert!(v["storage"][0]["reasoning"].is_object(), "reasoning present in storage JSON");
         // A no-storage report is structurally clean — storage is an empty array.
         let bare = SolveReport::default();
         let v: serde_json::Value = serde_json::to_value(&bare).unwrap();
