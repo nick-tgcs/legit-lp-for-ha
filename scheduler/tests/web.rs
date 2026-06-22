@@ -334,3 +334,28 @@ async fn w12_panel_applies_the_pr35_review_fixes() {
         "plan durations derive from grid_minutes, not a hard-coded 15"
     );
 }
+
+#[tokio::test]
+async fn w13_panel_applies_the_pr36_review_fixes() {
+    // Two PR #36 Codex review fixes are wired into the served panel asset:
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    // (1) Plan-tab block end times use the END-EXCLUSIVE boundary (hmEnd), not the
+    //     off-by-one `Math.min(s.b,n-1)` that rendered every block one step short.
+    assert!(html.contains("hmEnd("), "plan rows render end times via hmEnd");
+    assert!(
+        !html.contains("Math.min(s.b,n-1)"),
+        "the off-by-one end-index clamp is gone from the time labels"
+    );
+    // (2) The preview banner no longer overclaims safety: in live preview (no
+    //     dry-run) it warns that Optimiser-mode devices are still actuated.
+    assert!(
+        !html.contains("No devices are being controlled"),
+        "the misleading 'nothing controlled' preview text is gone"
+    );
+    assert!(
+        html.contains("still being controlled live"),
+        "live preview warns that Optimiser devices still actuate"
+    );
+}
