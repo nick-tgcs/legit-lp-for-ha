@@ -391,7 +391,9 @@ impl LpPlanner {
                     for inst in window_instances(window, grid) {
                         let completed =
                             if inst.steps.start == 0 { f64::from(*completed_minutes) } else { 0.0 };
-                        let required = f64::from(*minutes);
+                        // Pro-rated: a window instance only partly inside the horizon
+                        // demands only its share, never a full day (shared with reasoning.rs).
+                        let required = inst.required_minutes(*minutes);
                         let u = vars.add(variable().min(0));
                         unmet_vars.push(u);
                         let credit: Expression =

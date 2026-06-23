@@ -347,12 +347,49 @@ async fn build_storage<A: HaApi>(
             return None;
         }
     };
-    let reserve_pct =
-        resolve(ha, &sc.reserve_soc_pct, diags).await.unwrap_or(0.0).clamp(0.0, 100.0);
-    let efficiency =
-        resolve(ha, &sc.round_trip_efficiency, diags).await.unwrap_or(0.9).clamp(0.05, 1.0);
-    let cycle_cost = resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await.unwrap_or(0.001).max(0.0);
-    let allow_grid_charge = resolve_bool(ha, &sc.allow_grid_charge, diags).await.unwrap_or(true);
+    // No-hardcoding rule: an unreadable operational entity-ref NEVER falls back to an
+    // invented number. It fails LOUD (actionable diagnostic → Warning alert) + SAFE
+    // (freeze the floor / drop the device / hold grid-charge off) for this cycle.
+    let reserve_pct = match resolve(ha, &sc.reserve_soc_pct, diags).await {
+        Some(v) => v.clamp(0.0, 100.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': reserve_soc_pct entity unreadable; freezing discharge floor at current SoC ({:.0}%) this cycle (no discharge below an unknown floor)",
+                sc.id, avg_pct
+            ));
+            avg_pct.clamp(0.0, 100.0)
+        }
+    };
+    let efficiency = match resolve(ha, &sc.round_trip_efficiency, diags).await {
+        Some(v) => v.clamp(0.05, 1.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': round_trip_efficiency entity unreadable; unmodelled this cycle",
+                sc.id
+            ));
+            return None;
+        }
+    };
+    let cycle_cost = match resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await {
+        Some(v) => v.max(0.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': cycle_cost_aud_per_kwh entity unreadable; unmodelled this cycle",
+                sc.id
+            ));
+            return None;
+        }
+    };
+    let allow_grid_charge = match resolve_bool(ha, &sc.allow_grid_charge, diags).await {
+        Some(b) => b,
+        None => {
+            diags.push(format!(
+                "storage '{}': allow_grid_charge entity unreadable; holding grid-charge OFF this cycle",
+                sc.id
+            ));
+            false
+        }
+    };
     // Fail CLOSED: max_soc_pct is the user's charge ceiling. A literal/default always
     // resolves; only an entity-ref that reads unavailable returns None — and defaulting
     // that to 100% would let the LP charge PAST the user's (currently unknown) ceiling.
@@ -719,7 +756,8 @@ impl Cycle {
 
         // ---- site power + learned profiles ----
         let (mut pv_now_kw, mut cons_now_kw) = (None, None);
-        let mut baseload = vec![0.8; n];
+        // No power config => no baseload signal => assume none (0), never an invented 0.8.
+        let mut baseload = vec![0.0; n];
         let mut pv = vec![0.0; n];
         if let Some(p) = &g.power {
             cons_now_kw = f64_of(ha, &p.consumption_entity, &mut diags).await.map(|w| w / 1000.0);
@@ -743,7 +781,18 @@ impl Cycle {
                 ),
                 None => (None, None),
             };
-            let baseline_kw = resolve(ha, &p.baseline_kw, &mut diags).await.unwrap_or(0.8).max(0.0);
+            // Required field; an unreadable entity-ref fails loud + safe (0 kW assumed
+            // headroom — under-subtracting can't cause an overrun; inventing a baseload could).
+            let baseline_kw = match resolve(ha, &p.baseline_kw, &mut diags).await {
+                Some(v) => v.max(0.0),
+                None => {
+                    diags.push(
+                        "power.baseline_kw entity unreadable; using 0 kW baseline this cycle"
+                            .into(),
+                    );
+                    0.0
+                }
+            };
             baseload = profiles.baseload_curve(&grid, baseline_kw, cons_now_kw);
             pv = profiles.pv_curve(&grid, |d| if d == today { t_today } else { t_tom }, pv_now_kw);
             if let Some(path) = &self.profile_path {

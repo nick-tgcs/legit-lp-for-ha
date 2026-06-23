@@ -219,12 +219,12 @@ pub fn for_load(
     let mut fix_hint = None;
 
     if let DemandKind::Runtime { minutes, completed_minutes, window } = &c.must_have.kind {
-        // `minutes` is required PER window instance; the LP enforces it for each
-        // instance in the horizon (lp.rs) and `unmet`/`scheduled_min` are horizon-wide
-        // sums. Scale required by the instance count so Required/Planned/Unmet
-        // reconcile (else a recurring daily window shows "Scheduled 11h of 6h — short").
-        let instances = window_instances(window, grid).len().max(1) as f64;
-        let required = f64::from(*minutes) * instances;
+        // `minutes` is required PER window instance, PRO-RATED so a partial (horizon-
+        // clipped) instance never demands a full day — the same per-instance amount the
+        // LP enforces (lp.rs), via the shared `WindowInstance::required_minutes`. Summed
+        // so Required/Planned/Unmet reconcile (a no-instance horizon shows Required 0).
+        let required: f64 =
+            window_instances(window, grid).iter().map(|i| i.required_minutes(*minutes)).sum();
         let completed = f64::from(*completed_minutes); // credited to instance 0 only
         metrics.push(ReasonFact::new("Required", dur_minutes(required), None));
         if completed > 0.0 {
@@ -469,10 +469,11 @@ loads:
         let win = r.inputs.iter().find(|f| f.label == "Window end").expect("window end input");
         assert_eq!(win.source.as_deref(), Some("input_datetime.hw_deadline"));
         assert!(r.steps.iter().any(|b| b.label == "available"));
-        // 24 h horizon + a daily 00:00–06:30 window = 2 instances → Required is the
-        // horizon-wide 2×90 min = 3.0 h (reconciles with horizon-wide Planned/Unmet).
+        // The 24 h horizon from 04:00 catches a daily 00:00–06:30 window as TWO partial
+        // fragments (today 04:00–06:30 + tomorrow 00:00–03:45). Pro-rated, they sum to
+        // exactly one full window's 90 min = 1.5 h — NOT a doubled 3.0 h phantom.
         let req = r.metrics.iter().find(|m| m.label == "Required").expect("required metric");
-        assert_eq!(req.value, "3.0 h", "required scaled by instance count");
+        assert_eq!(req.value, "1.5 h", "pro-rated to one window's worth, not 2x");
     }
 
     #[test]
@@ -480,14 +481,15 @@ loads:
         let cfg = hot_water_cfg();
         let mut c = runtime_contract();
         if let DemandKind::Runtime { minutes, .. } = &mut c.must_have.kind {
-            *minutes = 360; // 6 h required into a 00:00–06:30 window, at 04:00
+            *minutes = 420; // 7 h required into a WHOLE 00:00–06:30 (6.5 h) window — genuinely too tight
         }
-        // Short horizon: only 04:00–06:30 (150 min) is in-window — genuinely too tight.
-        let grid = Grid::build(sydney(2026, 6, 10, 4, 0), 15, 4).unwrap();
+        // Grid at local midnight so the 00:00–06:30 window is fully in the horizon (one
+        // FULL instance, fraction 1) — the shortfall is real, not a horizon-clip artefact.
+        let grid = Grid::build(sydney(2026, 6, 10, 0, 0), 15, 24).unwrap();
         let n = grid.steps.len();
         let mut on = vec![false; n];
-        on[0] = true; // 15 min scheduled
-        let plan = LoadPlan { id: c.id.clone(), on, ct: vec![false; n], unmet: 345.0 };
+        on.iter_mut().take(26).for_each(|s| *s = true); // fill the 6.5 h window = 390 min
+        let plan = LoadPlan { id: c.id.clone(), on, ct: vec![false; n], unmet: 30.0 };
         let r = for_load(&cfg, &c, Some(&plan), &grid, &vec![Some(0.17); n], &vec![0.0; n]);
 
         assert!(r.narrative.contains("short"), "narrative: {}", r.narrative);
@@ -556,7 +558,11 @@ global:
       capacity_kwh: { entity: sensor.cap }
       max_charge_kw: 4.0
       max_discharge_kw: 4.0
+      round_trip_efficiency: { entity: sensor.rte }
       reserve_soc_pct: { entity: input_number.reserve }
+      max_soc_pct: 100
+      allow_grid_charge: true
+      cycle_cost_aud_per_kwh: 0.001
       goals:
         - kind: target
           soc_pct: { entity: input_number.target_soc }

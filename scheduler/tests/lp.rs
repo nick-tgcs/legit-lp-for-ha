@@ -180,6 +180,42 @@ fn l6_can_take_valuation_runs_only_below_ceiling_and_within_cap() {
 }
 
 #[test]
+fn l9_partial_window_does_not_demand_a_full_day() {
+    // REGRESSION (the "12 h required / 15 min short" phantom): a daily window
+    // 00:00–15:00 with NOW at 09:00. The 24 h horizon straddles two FRAGMENTS of
+    // that window (today 09:00–15:00 + tomorrow 00:00–09:00), each only partly in
+    // the horizon. Neither may demand the full 6 h: pro-rated they total exactly one
+    // window's worth (~6 h), so with cheap prices the plan meets it with ~no unmet
+    // and never schedules a doubled (12 h) day.
+    let now = sydney(2026, 6, 10, 9, 0);
+    let mut c = runtime_contract();
+    if let DemandKind::Runtime { minutes, window, .. } = &mut c.must_have.kind {
+        *minutes = 360; // 6 h "per day"
+        *window = Window { start: t(0, 0), end: t(15, 0) };
+    }
+    let out = planner().plan(&flat_world(now, STEPS, 0.05), &[c]); // cheap everywhere
+    let plan = &out.plans[0];
+    assert!(plan.unmet < 1.0, "no phantom shortfall, got {}", plan.unmet);
+    let scheduled = plan.on.iter().filter(|v| **v).count() * 15; // minutes
+    assert!(scheduled < 12 * 60, "not a doubled day, scheduled {scheduled} min");
+    assert!(scheduled >= 5 * 60, "but ~one window's 6 h IS met, scheduled {scheduled} min");
+}
+
+#[test]
+fn l10_full_in_horizon_window_demands_full_amount() {
+    // The other side: a window WHOLLY inside the horizon (00:00–06:30 from local
+    // midnight) is a FULL instance (fraction 1). Pro-rating must NOT erode it — the
+    // full 90 min is still demanded and met.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let c = runtime_contract(); // 90 min into 00:00–06:30, both inside [00:00, 24:00)
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[c]);
+    let plan = &out.plans[0];
+    assert_eq!(plan.unmet, 0.0, "feasible");
+    let scheduled = plan.on.iter().filter(|v| **v).count() * 15;
+    assert!(scheduled >= 90, "full 90 min still demanded, scheduled {scheduled} min");
+}
+
+#[test]
 fn l7_predictive_dynamics_keep_the_band_or_report() {
     // Aircon at 27°C, band [19,25], hot ambient, cheap flat power: the plan
     // must cool into the band (unmet 0) and actually run.

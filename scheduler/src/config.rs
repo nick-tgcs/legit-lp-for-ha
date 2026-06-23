@@ -142,14 +142,11 @@ pub struct PricingConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ForecastConfig {
     pub entity: String,
-    #[serde(default = "default_forecast_attribute")]
+    /// Attribute on `entity` holding the forecast list. Required — the engine never
+    /// assumes a provider's attribute name (no-hardcoding rule).
     pub attribute: String,
     /// Provider field-map -> canonical schema. Omit if already canonical.
     pub fields: Option<FieldMap>,
-}
-
-fn default_forecast_attribute() -> String {
-    "forecast".into()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -193,26 +190,22 @@ pub struct StorageConfig {
     /// Per-cabinet charge power limit (kW) — literal or entity-ref.
     /// `max_discharge_kw == 0` = charge-only.
     pub max_charge_kw: ValueRef,
-    #[serde(default = "default_zero_ref")]
+    /// Per-cabinet discharge power limit (kW). `0` = charge-only. Required — the
+    /// engine never assumes a discharge rating (no-hardcoding rule).
     pub max_discharge_kw: ValueRef,
-    /// Round-trip efficiency in (0,1] — literal or entity-ref.
-    #[serde(default = "default_round_trip_ref")]
+    /// Round-trip efficiency in (0,1] — literal or entity-ref. Required.
     pub round_trip_efficiency: ValueRef,
     /// Reserve floor (% of capacity) — the hard discharge floor. Literal or an
-    /// entity-ref (e.g. an export-limit slider).
-    #[serde(default = "default_zero_ref")]
+    /// entity-ref (e.g. an export-limit slider). Required.
     pub reserve_soc_pct: ValueRef,
-    /// Usable ceiling, as a percentage of `capacity_kwh` — literal or entity-ref.
-    #[serde(default = "default_max_soc_pct_ref")]
+    /// Usable ceiling, as a percentage of `capacity_kwh` — literal or entity-ref. Required.
     pub max_soc_pct: ValueRef,
     /// If false, may only charge from instantaneous PV (never the grid). Literal
-    /// (`true`/`false`) or an entity-ref to a toggle.
-    #[serde(default = "default_true_ref")]
+    /// (`true`/`false`) or an entity-ref to a toggle. Required.
     pub allow_grid_charge: BoolRef,
     /// Optional binary sensor; when off the device is idle (e.g. EV unplugged).
     pub available_entity: Option<String>,
-    /// Throughput wear cost (AUD/kWh) — literal or entity-ref.
-    #[serde(default = "default_cycle_cost_ref")]
+    /// Throughput wear cost (AUD/kWh) — literal or entity-ref. Required.
     pub cycle_cost_aud_per_kwh: ValueRef,
     /// Composable charging goals (deadline targets, opportunistic price). A
     /// dischargeable device self-arbitrages even with no goals.
@@ -279,21 +272,9 @@ pub enum StorageGoalCfg {
     Price { below: ValueRef, up_to_soc_pct: Option<ValueRef> },
 }
 
-fn default_round_trip_ref() -> ValueRef {
-    ValueRef::Literal { value: 0.9 }
-}
-fn default_zero_ref() -> ValueRef {
-    ValueRef::Literal { value: 0.0 }
-}
-fn default_max_soc_pct_ref() -> ValueRef {
-    ValueRef::Literal { value: 100.0 }
-}
-fn default_true_ref() -> BoolRef {
-    BoolRef::Plain(true)
-}
-fn default_cycle_cost_ref() -> ValueRef {
-    ValueRef::Literal { value: 0.001 }
-}
+// No `default_*` value fns: the engine never assumes an operational magnitude.
+// Every operational field is required (a missing key is a hard parse error); only
+// the structural grid/horizon below keep defaults (solve mechanics, not config).
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PlanningConfig {
@@ -401,10 +382,10 @@ pub struct CapabilityCfg {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HardRulesCfg {
     /// Minimum continuous run once started (minutes) — literal or entity-ref.
-    #[serde(default = "default_zero_ref")]
+    /// Required (use a literal `0` for "no minimum"); the engine never defaults it.
     pub min_run_minutes: ValueRef,
     /// Minimum off-time between runs (minutes) — literal or entity-ref.
-    #[serde(default = "default_zero_ref")]
+    /// Required (use a literal `0` for "no minimum"); the engine never defaults it.
     pub min_off_minutes: ValueRef,
     /// Daily on-transition ceiling — literal or entity-ref; absent = unbounded.
     pub max_starts_per_day: Option<ValueRef>,
@@ -766,40 +747,55 @@ mod tests {
         assert_eq!(cfg.global.storage[1].id, "sonnen02");
     }
 
+    /// A complete storage spec: every operational field is REQUIRED now (no engine
+    /// defaults), so each device must spell them out (literal or entity-ref).
+    fn storage_required_fields() -> &'static str {
+        "      round_trip_efficiency: 0.9
+      reserve_soc_pct: 0
+      max_soc_pct: 100
+      allow_grid_charge: true
+      cycle_cost_aud_per_kwh: 0.001\n"
+    }
+
     #[test]
-    fn storage_list_parses_devices_goals_and_defaults() {
-        let yaml = "
+    fn storage_list_parses_devices_and_goals() {
+        let req = storage_required_fields();
+        let yaml = format!(
+            "
 global:
   enabled_entity: input_boolean.x
-  pricing: { import_entity: sensor.p }
+  pricing: {{ import_entity: sensor.p }}
   storage:
     - id: home
       soc_entities: [sensor.home_soc]
       capacity_kwh: 10
       max_charge_kw: 5
       max_discharge_kw: 5
-    - id: ev
+{req}    - id: ev
       soc_entities: [sensor.ev_soc]
       capacity_kwh: 60
       max_charge_kw: 7
-      available_entity: binary_sensor.ev_plugged_in
+      max_discharge_kw: 0
+{req}      available_entity: binary_sensor.ev_plugged_in
       goals:
         - kind: target
-          soc_pct: { value: 80 }
+          soc_pct: {{ value: 80 }}
           ready_by: \"07:00\"
         - kind: price
-          below: { value: 0.10 }
+          below: {{ value: 0.10 }}
 loads: []
-";
-        let cfg = parse(yaml).expect("storage list parses");
+"
+        );
+        let cfg = parse(&yaml).expect("storage list parses");
         assert_eq!(cfg.global.storage.len(), 2);
         let home = &cfg.global.storage[0];
+        // The fields are now explicit, not defaulted — assert the supplied values.
         assert_eq!(home.round_trip_efficiency.as_literal(), Some(0.9));
         assert_eq!(home.max_soc_pct.as_literal(), Some(100.0));
         assert_eq!(home.reserve_soc_pct.as_literal(), Some(0.0));
         assert!(home.allow_grid_charge == BoolRef::Plain(true) && home.available_entity.is_none());
         let ev = &cfg.global.storage[1];
-        assert_eq!(ev.max_discharge_kw.as_literal(), Some(0.0), "charge-only by default");
+        assert_eq!(ev.max_discharge_kw.as_literal(), Some(0.0), "charge-only (explicit 0)");
         assert_eq!(ev.available_entity.as_deref(), Some("binary_sensor.ev_plugged_in"));
         assert_eq!(ev.goals.len(), 2);
         assert!(matches!(&ev.goals[0], StorageGoalCfg::Target { ready_by, .. }
@@ -815,7 +811,7 @@ global:
   enabled_entity: input_boolean.x
   pricing: { import_entity: sensor.p }
   storage:
-    - { id: a, soc_entities: [sensor.s], capacity_kwh: 10, max_charge_kw: 5, reserve_soc_pct: 100 }
+    - { id: a, soc_entities: [sensor.s], capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 5, round_trip_efficiency: 0.9, reserve_soc_pct: 100, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
 loads: []
 ";
         assert!(
@@ -830,7 +826,7 @@ global:
   enabled_entity: input_boolean.x
   pricing: { import_entity: sensor.p }
   storage:
-    - { id: a, soc_entities: [sensor.s], capacity_kwh: 0, max_charge_kw: 5 }
+    - { id: a, soc_entities: [sensor.s], capacity_kwh: 0, max_charge_kw: 5, max_discharge_kw: 0, round_trip_efficiency: 0.9, reserve_soc_pct: 0, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
 loads: []
 ";
         assert!(matches!(parse(y), Err(SchedulerError::Config(m)) if m.contains("capacity_kwh")));
@@ -847,6 +843,12 @@ global:
       soc_entities: [sensor.s]
       capacity_kwh: 10
       max_charge_kw: 5
+      max_discharge_kw: 0
+      round_trip_efficiency: 0.9
+      reserve_soc_pct: 0
+      max_soc_pct: 100
+      allow_grid_charge: true
+      cycle_cost_aud_per_kwh: 0.001
       goals: [{ kind: target, soc_pct: { value: 80 }, ready_by: \"99:99\" }]
 loads: []
 ";
@@ -858,8 +860,8 @@ global:
   enabled_entity: input_boolean.x
   pricing: { import_entity: sensor.p }
   storage:
-    - { id: a, soc_entities: [sensor.s1], capacity_kwh: 10, max_charge_kw: 5 }
-    - { id: a, soc_entities: [sensor.s2], capacity_kwh: 10, max_charge_kw: 5 }
+    - { id: a, soc_entities: [sensor.s1], capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 0, round_trip_efficiency: 0.9, reserve_soc_pct: 0, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
+    - { id: a, soc_entities: [sensor.s2], capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 0, round_trip_efficiency: 0.9, reserve_soc_pct: 0, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
 loads: []
 ";
         assert!(
@@ -893,6 +895,49 @@ loads: []
     fn rejects_predictive_without_rates() {
         let r = mutate_example("change_per_hour: 1.5", "unused_field_xx: 1.5");
         assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("predictive")));
+    }
+
+    // ---- Guard A: the no-hardcoding rule, enforced in the engine itself ----
+    // (See docs/lp-no-hardcoding.md.) The engine must NEVER assume an operational
+    // magnitude: every operational field is REQUIRED, and there are no `default_*`
+    // value fns. These two tests fail the moment that regresses.
+
+    #[test]
+    fn guard_omitting_a_required_operational_field_is_a_parse_error() {
+        // Each operational field, when omitted, must be a hard parse error — not a
+        // silent engine default. Re-adding a serde default flips a case to Ok and fails.
+        for field in [
+            "round_trip_efficiency",
+            "reserve_soc_pct",
+            "max_soc_pct",
+            "allow_grid_charge",
+            "cycle_cost_aud_per_kwh",
+            "max_discharge_kw",
+        ] {
+            let r = mutate_example(&format!("{field}:"), &format!("{field}_omitted_xx:"));
+            assert!(
+                matches!(&r, Err(SchedulerError::Config(m)) if m.contains(field)),
+                "omitting an operational field must error (no engine default for {field}); got {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_no_operational_default_fns_remain() {
+        // Source-scan: no `default_*` value fn for an operational field may exist. The
+        // needles are assembled at runtime so this test's own source can't trip it.
+        let src = include_str!("config.rs");
+        for suffix in
+            ["zero_ref", "round_trip_ref", "cycle_cost_ref", "true_ref", "max_soc_pct_ref"]
+        {
+            let banned = format!("fn default_{suffix}");
+            assert!(
+                !src.contains(banned.as_str()),
+                "operational default fn reintroduced: {banned}"
+            );
+        }
+        // Only the two STRUCTURAL defaults (grid/horizon mechanics) are permitted.
+        assert!(src.contains(&format!("fn default_{}", "grid_minutes")), "structural default kept");
     }
 
     #[test]
