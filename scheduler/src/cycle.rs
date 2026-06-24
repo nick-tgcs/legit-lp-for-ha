@@ -322,11 +322,27 @@ async fn resolve_direction<A: HaApi>(
 /// control, and zeroes a configured-but-unauthorised direction's power (so the LP
 /// neither plans nor actuates it). None (with a diagnostic) if SoC or capacity is
 /// unreadable this cycle — the plan proceeds without this device.
+/// One storage device resolved for a cycle. `input` is `None` when the device could
+/// not be modelled this cycle (an operational spec read unavailable): it is then
+/// EXCLUDED from the LP, but its `control` is still returned so the executor drives it
+/// IDLE rather than leaving HA on a prior cycle's active charge/discharge command.
+struct StorageBuild {
+    input: Option<StorageInput>,
+    control: StorageControl,
+}
+
 async fn build_storage<A: HaApi>(
     ha: &A,
     sc: &config::StorageConfig,
     diags: &mut Vec<String>,
-) -> Option<(StorageInput, StorageControl)> {
+) -> Option<StorageBuild> {
+    // Resolve the control surface FIRST: it does not depend on the LP specs, and we need
+    // it to drive the device IDLE on any cycle we cannot model. resolve_direction also
+    // reads each direction's authority, reused below for the LP power limits.
+    let charge = resolve_direction(ha, sc.charge.as_ref(), diags).await;
+    let discharge = resolve_direction(ha, sc.discharge.as_ref(), diags).await;
+    let control = StorageControl { id: sc.id.clone(), charge, discharge };
+
     let mut socs = Vec::new();
     for e in &sc.soc_entities {
         if let Some(v) = f64_of(ha, e, diags).await {
@@ -335,7 +351,7 @@ async fn build_storage<A: HaApi>(
     }
     if socs.is_empty() {
         diags.push(format!("storage '{}': SoC unreadable; unmodelled this cycle", sc.id));
-        return None;
+        return Some(StorageBuild { input: None, control });
     }
     let avg_pct = socs.iter().sum::<f64>() / socs.len() as f64;
     // Specs are literals or live entity-refs (e.g. FullChargeCapacity, the
@@ -344,15 +360,52 @@ async fn build_storage<A: HaApi>(
         Some(c) if c.is_finite() && c > 0.0 => c,
         _ => {
             diags.push(format!("storage '{}': capacity unreadable/invalid; unmodelled", sc.id));
-            return None;
+            return Some(StorageBuild { input: None, control });
         }
     };
-    let reserve_pct =
-        resolve(ha, &sc.reserve_soc_pct, diags).await.unwrap_or(0.0).clamp(0.0, 100.0);
-    let efficiency =
-        resolve(ha, &sc.round_trip_efficiency, diags).await.unwrap_or(0.9).clamp(0.05, 1.0);
-    let cycle_cost = resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await.unwrap_or(0.001).max(0.0);
-    let allow_grid_charge = resolve_bool(ha, &sc.allow_grid_charge, diags).await.unwrap_or(true);
+    // No-hardcoding rule: an unreadable operational entity-ref NEVER falls back to an
+    // invented number. It fails LOUD (actionable diagnostic → Warning alert) + SAFE
+    // (freeze the floor / drop the device / hold grid-charge off) for this cycle.
+    let reserve_pct = match resolve(ha, &sc.reserve_soc_pct, diags).await {
+        Some(v) => v.clamp(0.0, 100.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': reserve_soc_pct entity unreadable; freezing discharge floor at current SoC ({:.0}%) this cycle (no discharge below an unknown floor)",
+                sc.id, avg_pct
+            ));
+            avg_pct.clamp(0.0, 100.0)
+        }
+    };
+    let efficiency = match resolve(ha, &sc.round_trip_efficiency, diags).await {
+        Some(v) => v.clamp(0.05, 1.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': round_trip_efficiency entity unreadable; unmodelled this cycle",
+                sc.id
+            ));
+            return Some(StorageBuild { input: None, control });
+        }
+    };
+    let cycle_cost = match resolve(ha, &sc.cycle_cost_aud_per_kwh, diags).await {
+        Some(v) => v.max(0.0),
+        None => {
+            diags.push(format!(
+                "storage '{}': cycle_cost_aud_per_kwh entity unreadable; unmodelled this cycle",
+                sc.id
+            ));
+            return Some(StorageBuild { input: None, control });
+        }
+    };
+    let allow_grid_charge = match resolve_bool(ha, &sc.allow_grid_charge, diags).await {
+        Some(b) => b,
+        None => {
+            diags.push(format!(
+                "storage '{}': allow_grid_charge entity unreadable; holding grid-charge OFF this cycle",
+                sc.id
+            ));
+            false
+        }
+    };
     // Fail CLOSED: max_soc_pct is the user's charge ceiling. A literal/default always
     // resolves; only an entity-ref that reads unavailable returns None — and defaulting
     // that to 100% would let the LP charge PAST the user's (currently unknown) ceiling.
@@ -381,14 +434,12 @@ async fn build_storage<A: HaApi>(
         None => true,
     };
 
-    // Per-direction control + authority. A configured-but-unauthorised direction
-    // is owned by the Manual/Scheduled path, so zero its power: the LP neither
-    // plans nor actuates it. An UNCONFIGURED direction keeps its limit and stays
-    // advisory (planned + reported, never actuated — no control surface).
-    let charge = resolve_direction(ha, sc.charge.as_ref(), diags).await;
-    let discharge = resolve_direction(ha, sc.discharge.as_ref(), diags).await;
-    let charge_auth = charge.as_ref().map(|d| d.authority).unwrap_or(false);
-    let discharge_auth = discharge.as_ref().map(|d| d.authority).unwrap_or(false);
+    // Per-direction authority (resolved with the control surface at the top). A
+    // configured-but-unauthorised direction is owned by the Manual/Scheduled path, so
+    // zero its power: the LP neither plans nor actuates it. An UNCONFIGURED direction
+    // keeps its limit and stays advisory (planned + reported, never actuated).
+    let charge_auth = control.charge.as_ref().map(|d| d.authority).unwrap_or(false);
+    let discharge_auth = control.discharge.as_ref().map(|d| d.authority).unwrap_or(false);
     let rated_charge_kw = resolve(ha, &sc.max_charge_kw, diags).await.unwrap_or(0.0).max(0.0);
     let rated_discharge_kw = resolve(ha, &sc.max_discharge_kw, diags).await.unwrap_or(0.0).max(0.0);
     // Parse-time validation only guards a LITERAL max_charge_kw > 0; an entity-ref
@@ -445,8 +496,7 @@ async fn build_storage<A: HaApi>(
         cycle_cost_aud_per_kwh: cycle_cost,
         goals,
     };
-    let control = StorageControl { id: sc.id.clone(), charge, discharge };
-    Some((input, control))
+    Some(StorageBuild { input: Some(input), control })
 }
 
 /// Absolute range of the CURRENT instance of a daily window, up to `now`
@@ -719,7 +769,8 @@ impl Cycle {
 
         // ---- site power + learned profiles ----
         let (mut pv_now_kw, mut cons_now_kw) = (None, None);
-        let mut baseload = vec![0.8; n];
+        // No power config => no baseload signal => assume none (0), never an invented 0.8.
+        let mut baseload = vec![0.0; n];
         let mut pv = vec![0.0; n];
         if let Some(p) = &g.power {
             cons_now_kw = f64_of(ha, &p.consumption_entity, &mut diags).await.map(|w| w / 1000.0);
@@ -743,9 +794,32 @@ impl Cycle {
                 ),
                 None => (None, None),
             };
-            let baseline_kw = resolve(ha, &p.baseline_kw, &mut diags).await.unwrap_or(0.8).max(0.0);
+            // Required field. If its entity-ref is unreadable we must NOT invent a
+            // baseload — but nor may we treat the gap as FREE PV headroom: with an
+            // understated baseload the LP's surplus (pv − baseload) marks steps `sun_pays`
+            // and opens price-capped must/can-take ABOVE their ceiling, importing at peak.
+            // So flag it and, once pv is known, assume the house self-consumes its PV this
+            // cycle (baseload = pv ⇒ zero surplus, balance-neutral) until the entity
+            // returns. resolve() on a literal never fails; only an entity-ref can.
+            let mut baseline_known = true;
+            let baseline_kw = match resolve(ha, &p.baseline_kw, &mut diags).await {
+                Some(v) => v.max(0.0),
+                None => {
+                    baseline_known = false;
+                    diags.push(
+                        "power.baseline_kw entity unreadable; assuming PV self-consumed (no surplus credit) this cycle".into(),
+                    );
+                    0.0
+                }
+            };
             baseload = profiles.baseload_curve(&grid, baseline_kw, cons_now_kw);
             pv = profiles.pv_curve(&grid, |d| if d == today { t_today } else { t_tom }, pv_now_kw);
+            if !baseline_known {
+                // Unknown baseload ⇒ no free headroom. baseload = pv makes surplus
+                // (pv − baseload) zero and the site balance (baseload − pv) neutral, so the
+                // LP never opens price-capped loads on phantom solar this cycle.
+                baseload.clone_from(&pv);
+            }
             if let Some(path) = &self.profile_path {
                 if let Err(e) = profiles.save(path) {
                     diags.push(format!("profile save: {e}"));
@@ -754,12 +828,19 @@ impl Cycle {
         }
 
         // ---- site storage (optional): live SoC reads + per-direction control ----
+        // `storage` feeds the LP; `storage_controls` holds EVERY device's control surface
+        // (modelled and not). A device we couldn't model (`input: None`) is excluded from
+        // the LP but recorded in `idle_storage_ids` so we still command it idle below.
         let mut storage = Vec::new();
         let mut storage_controls = Vec::new();
+        let mut idle_storage_ids = Vec::new();
         for sc in &g.storage {
-            if let Some((s, ctrl)) = build_storage(ha, sc, &mut diags).await {
-                storage.push(s);
-                storage_controls.push(ctrl);
+            if let Some(b) = build_storage(ha, sc, &mut diags).await {
+                match b.input {
+                    Some(s) => storage.push(s),
+                    None => idle_storage_ids.push(b.control.id.clone()),
+                }
+                storage_controls.push(b.control);
             }
         }
 
@@ -779,7 +860,7 @@ impl Cycle {
         // Storage: map each device's slot-0 plan to a current-step command, then
         // actuate the authorised directions (mirrors the load executor; the
         // unauthorised/unconfigured ones are skipped inside execute_storage).
-        let storage_decisions: Vec<StorageDecision> = out
+        let mut storage_decisions: Vec<StorageDecision> = out
             .storage
             .iter()
             .map(|sp| {
@@ -795,6 +876,17 @@ impl Cycle {
                 }
             })
             .collect();
+        // Unmodelled devices are absent from `out.storage`; command them IDLE (0 W → rate
+        // 0 + idle threshold via the executor) so a prior cycle's active command can't
+        // persist. Fail-loud (the diagnostic) + fail-safe (the device actually stops).
+        for id in &idle_storage_ids {
+            storage_decisions.push(StorageDecision {
+                storage_id: id.clone(),
+                charge_watts: 0.0,
+                discharge_watts: 0.0,
+                reason: "unmodelled this cycle (unreadable spec); commanded idle".into(),
+            });
+        }
         let storage_executed = executor
             .execute_storage(ha, global_enabled, &storage_controls, &storage_decisions)
             .await;

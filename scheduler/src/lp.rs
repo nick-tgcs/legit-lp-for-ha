@@ -391,7 +391,10 @@ impl LpPlanner {
                     for inst in window_instances(window, grid) {
                         let completed =
                             if inst.steps.start == 0 { f64::from(*completed_minutes) } else { 0.0 };
-                        let required = f64::from(*minutes);
+                        // The current occurrence demands its FULL runtime (completed,
+                        // above, covers the part already run); only a FUTURE horizon-clipped
+                        // occurrence is pro-rated. Shared with reasoning.rs so they can't drift.
+                        let required = inst.required_minutes(*minutes);
                         let u = vars.add(variable().min(0));
                         unmet_vars.push(u);
                         let credit: Expression =

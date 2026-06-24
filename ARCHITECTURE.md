@@ -10,6 +10,18 @@ The scheduler is a pure decision engine. It reads state from Home Assistant,
 applies rules, solves for an optimal schedule, and writes back only the current
 timestep's actions through Home Assistant's own service API.
 
+### Design rule: nothing operational is hardcoded in the engine
+
+The engine holds **structural mechanics only** (solver, grid resolution, the schema
+of a load, tie-break epsilons). It holds **no operational magnitude** — every price,
+window, runtime, power, SoC limit, efficiency and wear cost comes from the registry,
+and there are **no `default_*` value functions**: every operational config field is
+*required* (a missing key is a hard parse error). When a live entity-ref can't be read
+this cycle the engine **fails loud + safe** (an actionable diagnostic + a conservative
+hold/skip), and never substitutes an invented number. This is enforced by the
+`config.rs` `guard_*` tests. Full statement + the registry side of the rule:
+`docs/lp-no-hardcoding.md` in the consuming HA-config repo.
+
 ## 2. Load Declaration
 
 Each schedulable load declares:
