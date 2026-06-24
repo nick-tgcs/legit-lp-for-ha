@@ -497,9 +497,10 @@ async fn c13_export_authority_writes_only_the_discharge_rate_per_direction() {
 #[tokio::test]
 async fn c14_unreadable_storage_specs_fail_loud_not_to_an_invented_number() {
     // No-hardcoding fail-LOUD + SAFE: efficiency / cycle-cost are not safely guessable,
-    // so an unreadable entity-ref DROPS that device for the cycle (never invents 0.9 /
-    // 0.001) with an actionable diagnostic; the other cabinet is unaffected. Reserve,
-    // by contrast, freezes the discharge floor at the current SoC (a safe non-action).
+    // so an unreadable entity-ref EXCLUDES that device from the LP for the cycle (never
+    // invents 0.9 / 0.001) with an actionable diagnostic; the other cabinet is unaffected.
+    // Reserve, by contrast, freezes the discharge floor at the current SoC (a safe
+    // non-action). The excluded device is still commanded IDLE — see c15.
     let mut reg = registry();
     let s = reg.global.storage.iter_mut().find(|s| s.id == "sonnen01").expect("sonnen01");
     s.round_trip_efficiency = config::ValueRef::Entity { entity: "sensor.missing_rte".into() };
@@ -523,4 +524,70 @@ async fn c14_unreadable_storage_specs_fail_loud_not_to_an_invented_number() {
         report.diagnostics
     );
     assert!(!report.is_solver_failure(), "a dropped device is not a scheduler failure");
+}
+
+#[tokio::test]
+async fn c15_unmodelled_storage_is_commanded_idle_not_left_on_its_last_command() {
+    // PR #41 review (Codex P1): a device we cannot model (sonnen01's efficiency entity is
+    // unreadable) is excluded from the LP — but it must still be driven IDLE, or a prior
+    // cycle's active charge/discharge command persists in HA (fail-loud but NOT fail-safe).
+    // Live (dry_run=false) so the executor actually writes: assert a zero-rate command for
+    // sonnen01's charge AND discharge rate entities.
+    let mut reg = registry();
+    reg.global
+        .storage
+        .iter_mut()
+        .find(|s| s.id == "sonnen01")
+        .expect("sonnen01")
+        .round_trip_efficiency = config::ValueRef::Entity { entity: "sensor.missing_rte".into() };
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: false,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on");
+    set_state(&mut ha, "binary_sensor.battery_export_automated", "on");
+    let mut profiles = Profiles::default();
+    let _ = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+
+    let calls = ha.calls.lock().unwrap();
+    let idle_rate_writes: Vec<_> = calls
+        .iter()
+        .filter(|c| c.target_entity.contains("sonnen01") && c.target_entity.contains("rate"))
+        .collect();
+    assert!(!idle_rate_writes.is_empty(), "sonnen01 must be commanded idle, got calls: {calls:?}");
+    assert!(
+        idle_rate_writes.iter().all(|c| c.data == json!({ "value": 0.0 })),
+        "idle = zero rate, got: {idle_rate_writes:?}"
+    );
+}
+
+#[tokio::test]
+async fn c16_unreadable_baseline_does_not_become_free_pv_headroom() {
+    // PR #41 review (Codex P2): when power.baseline_kw is an unreadable entity-ref, the
+    // engine must NOT treat the unknown baseload as free PV headroom (that would let the
+    // LP's surplus open price-capped loads above their ceiling). Fail-loud (actionable
+    // diagnostic) + fail-safe (no panic, a valid plan); the safe degradation is enforced
+    // by baseload = pv (zero surplus) in cycle.rs.
+    let mut reg = registry();
+    reg.global.power.as_mut().expect("power").baseline_kw =
+        config::ValueRef::Entity { entity: "sensor.missing_baseline".into() };
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&canned_ha(), &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert!(
+        report.diagnostics.iter().any(|d| d.contains("baseline_kw") && d.contains("unreadable")),
+        "fail-loud diagnostic surfaced: {:?}",
+        report.diagnostics
+    );
+    assert!(!report.is_solver_failure(), "an unreadable baseline still yields a valid plan");
 }
