@@ -125,17 +125,29 @@ pub struct WindowInstance {
     /// Steps a complete occurrence of this window would span (see `full_window_steps`).
     pub full_steps: usize,
     /// True when this instance is clipped by the horizon (front=NOW or back=end), so
-    /// `steps.len() < full_steps`. A partial instance must NOT demand a full day.
+    /// `steps.len() < full_steps`. A FUTURE partial (back-clipped) is pro-rated; the
+    /// CURRENT occurrence (front-clipped) still demands its full runtime — see
+    /// `required_minutes`.
     pub partial: bool,
 }
 
 impl WindowInstance {
-    /// The runtime this instance requires: the per-day `minutes` pro-rated by the
-    /// fraction of the window actually inside the horizon. `full_steps >= steps.len()`,
-    /// so the result is `<= minutes` (a partial instance never demands a full day).
-    /// The SINGLE source of truth for the requirement — `lp.rs` enforces it and
-    /// `reasoning.rs` reports it, so the solver and the panel can never disagree.
+    /// The runtime this instance requires for the LP constraint. The SINGLE source of
+    /// truth — `lp.rs` enforces it and `reasoning.rs` reports it, so the solver and the
+    /// panel can never disagree.
+    ///
+    /// The CURRENT occurrence (its first step is NOW, so `steps.start == 0`) demands the
+    /// FULL per-occurrence `minutes`: any steps it is missing lie in the PAST and are
+    /// already credited by the caller's `completed_minutes`. Pro-rating it would
+    /// double-discount — shrinking the target AND crediting work already done — and
+    /// starve a window we are partway through (e.g. 90 min needed, 40 done, 50 still due
+    /// before the deadline). Only a FUTURE occurrence clipped by the horizon END is
+    /// pro-rated to its visible share, so we don't raise a spurious shortfall for a
+    /// window whose tail we cannot see yet; MPC re-plans it next cycle.
     pub fn required_minutes(&self, minutes: u32) -> f64 {
+        if self.steps.start == 0 {
+            return f64::from(minutes);
+        }
         f64::from(minutes) * (self.steps.len() as f64 / self.full_steps.max(1) as f64)
     }
 }
@@ -283,13 +295,18 @@ mod tests {
         assert_eq!(g.steps[inst[0].steps.end], sydney(2026, 6, 10, 22, 0));
         assert_eq!(inst[1].date, chrono::NaiveDate::from_ymd_opt(2026, 6, 11).unwrap());
         assert_eq!(g.steps[inst[1].steps.start], sydney(2026, 6, 11, 7, 0));
-        // Both fragments are PARTIAL (clipped by NOW at the front, horizon at the back)
-        // of a 15 h = 60-step window. Pro-rated, the two halves of one daily window add
-        // up to exactly one full day's requirement, never two.
+        // Both fragments are PARTIAL (clipped by NOW at the front, horizon at the back) of
+        // a 15 h = 60-step window. The CURRENT occurrence (front-clipped, steps.start == 0)
+        // still demands its full 900 min — completed_minutes covers what already ran; only
+        // the FUTURE fragment (12/60 steps in-horizon) is pro-rated, to 180 min. Never the
+        // doubled 1800 min, never eroding the current window below 900.
         assert_eq!(inst[0].full_steps, 60);
         assert!(inst[0].partial && inst[1].partial);
+        assert_eq!(inst[0].steps.start, 0); // current occurrence
+        assert!((inst[0].required_minutes(900) - 900.0).abs() < 1e-9, "current = full");
+        assert!((inst[1].required_minutes(900) - 180.0).abs() < 1.0, "future = pro-rated");
         let req: f64 = inst.iter().map(|i| i.required_minutes(900)).sum();
-        assert!((req - 900.0).abs() < 1.0, "two fragments = one window's 900 min, got {req}");
+        assert!((req - 1080.0).abs() < 1.0, "current full + future pro-rated, got {req}");
     }
 
     #[test]

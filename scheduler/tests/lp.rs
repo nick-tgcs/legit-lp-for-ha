@@ -182,11 +182,10 @@ fn l6_can_take_valuation_runs_only_below_ceiling_and_within_cap() {
 #[test]
 fn l9_partial_window_does_not_demand_a_full_day() {
     // REGRESSION (the "12 h required / 15 min short" phantom): a daily window
-    // 00:00–15:00 with NOW at 09:00. The 24 h horizon straddles two FRAGMENTS of
-    // that window (today 09:00–15:00 + tomorrow 00:00–09:00), each only partly in
-    // the horizon. Neither may demand the full 6 h: pro-rated they total exactly one
-    // window's worth (~6 h), so with cheap prices the plan meets it with ~no unmet
-    // and never schedules a doubled (12 h) day.
+    // 00:00–15:00 with NOW at 09:00. The 24 h horizon straddles two FRAGMENTS of that
+    // window: the CURRENT occurrence (today 09:00–15:00, demands its full 6 h) and a
+    // FUTURE fragment (tomorrow 00:00–09:00, pro-rated to its visible share). Together
+    // ~9.75 h — never the doubled 12 h day, and with cheap prices met with ~no unmet.
     let now = sydney(2026, 6, 10, 9, 0);
     let mut c = runtime_contract();
     if let DemandKind::Runtime { minutes, window, .. } = &mut c.must_have.kind {
@@ -213,6 +212,31 @@ fn l10_full_in_horizon_window_demands_full_amount() {
     assert_eq!(plan.unmet, 0.0, "feasible");
     let scheduled = plan.on.iter().filter(|v| **v).count() * 15;
     assert!(scheduled >= 90, "full 90 min still demanded, scheduled {scheduled} min");
+}
+
+#[test]
+fn l11_clipped_current_window_still_schedules_its_remaining_work() {
+    // REGRESSION (Codex PR #40 P1): when NOW is already INSIDE a must-have window, the
+    // current (front-clipped) instance must still demand its FULL runtime —
+    // completed_minutes covers only what already ran, the rest is still due before the
+    // deadline. 00:00–06:30 window, 90 min required, 40 already done, NOW 04:00 → 50 min
+    // still owed with 2.5 h of room. The bug pro-rated the current instance, credited the
+    // 40 min against the reduced target, and scheduled NOTHING before 06:30.
+    let now = sydney(2026, 6, 10, 4, 0);
+    let mut c = runtime_contract(); // 90 min into 00:00–06:30
+    if let DemandKind::Runtime { completed_minutes, .. } = &mut c.must_have.kind {
+        *completed_minutes = 40;
+    }
+    let out = planner().plan(&flat_world(now, STEPS, 0.05), &[c]); // cheap
+    let plan = &out.plans[0];
+    assert!(plan.unmet < 1.0, "feasible — 50 min fits in 2.5 h, got unmet {}", plan.unmet);
+    // The remaining ~50 min must land in the CURRENT window: the first 10 steps cover
+    // 04:00–06:15 (06:30 exclusive), the only steps that count toward this instance.
+    let in_window_min = plan.on.iter().take(10).filter(|v| **v).count() * 15;
+    assert!(
+        in_window_min >= 50,
+        "remaining work scheduled before the deadline, got {in_window_min} min"
+    );
 }
 
 #[test]

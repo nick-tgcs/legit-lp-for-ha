@@ -219,10 +219,11 @@ pub fn for_load(
     let mut fix_hint = None;
 
     if let DemandKind::Runtime { minutes, completed_minutes, window } = &c.must_have.kind {
-        // `minutes` is required PER window instance, PRO-RATED so a partial (horizon-
-        // clipped) instance never demands a full day — the same per-instance amount the
-        // LP enforces (lp.rs), via the shared `WindowInstance::required_minutes`. Summed
-        // so Required/Planned/Unmet reconcile (a no-instance horizon shows Required 0).
+        // `minutes` is required PER window instance via the shared
+        // `WindowInstance::required_minutes` (the same amount the LP enforces in lp.rs):
+        // the CURRENT occurrence demands its full runtime (`completed`, below, covers the
+        // part already run), a FUTURE horizon-clipped occurrence is pro-rated to its
+        // visible share. Summed so Required/Planned/Unmet reconcile (no instances ⇒ 0).
         let required: f64 =
             window_instances(window, grid).iter().map(|i| i.required_minutes(*minutes)).sum();
         let completed = f64::from(*completed_minutes); // credited to instance 0 only
@@ -469,11 +470,12 @@ loads:
         let win = r.inputs.iter().find(|f| f.label == "Window end").expect("window end input");
         assert_eq!(win.source.as_deref(), Some("input_datetime.hw_deadline"));
         assert!(r.steps.iter().any(|b| b.label == "available"));
-        // The 24 h horizon from 04:00 catches a daily 00:00–06:30 window as TWO partial
-        // fragments (today 04:00–06:30 + tomorrow 00:00–03:45). Pro-rated, they sum to
-        // exactly one full window's 90 min = 1.5 h — NOT a doubled 3.0 h phantom.
+        // The 24 h horizon from 04:00 catches the daily 00:00–06:30 window as the CURRENT
+        // occurrence (04:00–06:30 today, demands its full 90 min) plus a FUTURE fragment
+        // (tomorrow 00:00–03:45, pro-rated to its visible ~55 min) = ~2.4 h — never the old
+        // doubled 3.0 h phantom, and never eroding the current window below its full 90 min.
         let req = r.metrics.iter().find(|m| m.label == "Required").expect("required metric");
-        assert_eq!(req.value, "1.5 h", "pro-rated to one window's worth, not 2x");
+        assert_eq!(req.value, "2.4 h", "current window full + future fragment pro-rated");
     }
 
     #[test]
