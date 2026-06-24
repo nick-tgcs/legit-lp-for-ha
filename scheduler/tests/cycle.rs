@@ -393,14 +393,38 @@ fn storage_rate_calls(ha: &RecordingHa) -> Vec<(String, f64)> {
 
 #[tokio::test]
 async fn c9_storage_unauthorised_is_modelled_advisory_but_never_actuated() {
-    // Shared fixture: both directions configured but their authority is OFF
-    // (Manual/Scheduled). Both cabinets are still modelled from their live specs
-    // and planned, yet the LP must write NO rate to either — even live.
-    let ha = canned_ha();
+    // Both directions configured but their authority is OFF (Manual/Scheduled). The
+    // cabinets must STILL be modelled AND planned at full RATED power — the advisory plan
+    // is what the LP WOULD do — yet NO rate may be written to either, even live. Seeing
+    // that plan before cutting over is the entire point of preview. REGRESSION GUARD: an
+    // earlier build zeroed an unauthorised direction's power, so preview showed a frozen
+    // battery that "never planned" to charge toward its target. Cheap-now / dear-later
+    // guarantees the LP wants to charge now, so a zeroed plan would be all-idle and fail.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "sensor.current_grid_cost", "0.02");
+    ha.states.insert(
+        "sensor.beckton_general_forecast".into(),
+        json!({"state": "0.02", "attributes": {"forecasts": [
+            {"per_kwh": 0.02, "start_time": "2026-06-10T00:00:00+00:00", "end_time": "2026-06-10T01:00:00+00:00"},
+            {"per_kwh": 0.60, "start_time": "2026-06-10T01:00:00+00:00", "end_time": "2026-06-11T00:00:00+00:00"}
+        ]}}),
+    );
     let mut profiles = Profiles::default();
+    // dry_run=false (LIVE): proves AUTHORITY — not dry-run — is what blocks actuation.
     let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
     assert_eq!(report.storage.len(), 2, "both cabinets modelled from entity-ref specs");
-    assert!(storage_rate_calls(&ha).is_empty(), "unauthorised storage is never actuated");
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 storage");
+    assert!(!s.charge_authority && !s.discharge_authority, "neither direction is authorised");
+    assert!(
+        s.charge_kw.iter().any(|&kw| kw > 0.0),
+        "advisory plan must still charge — preview shows what it WOULD do: {:?}",
+        s.charge_kw
+    );
+    assert!(
+        storage_rate_calls(&ha).is_empty(),
+        "unauthorised storage is never actuated, even live: {:?}",
+        storage_rate_calls(&ha)
+    );
 }
 
 #[tokio::test]
