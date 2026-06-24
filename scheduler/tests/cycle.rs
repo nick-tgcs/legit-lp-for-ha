@@ -493,3 +493,34 @@ async fn c13_export_authority_writes_only_the_discharge_rate_per_direction() {
         "charge stays Manual => no charge rate written: {calls:?}"
     );
 }
+
+#[tokio::test]
+async fn c14_unreadable_storage_specs_fail_loud_not_to_an_invented_number() {
+    // No-hardcoding fail-LOUD + SAFE: efficiency / cycle-cost are not safely guessable,
+    // so an unreadable entity-ref DROPS that device for the cycle (never invents 0.9 /
+    // 0.001) with an actionable diagnostic; the other cabinet is unaffected. Reserve,
+    // by contrast, freezes the discharge floor at the current SoC (a safe non-action).
+    let mut reg = registry();
+    let s = reg.global.storage.iter_mut().find(|s| s.id == "sonnen01").expect("sonnen01");
+    s.round_trip_efficiency = config::ValueRef::Entity { entity: "sensor.missing_rte".into() };
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&canned_ha(), &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert!(report.storage.iter().all(|s| s.id != "sonnen01"), "sonnen01 dropped (not invented)");
+    assert!(report.storage.iter().any(|s| s.id == "sonnen02"), "the other cabinet still modelled");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("round_trip_efficiency") && d.contains("unmodelled")),
+        "fail-loud diagnostic surfaced: {:?}",
+        report.diagnostics
+    );
+    assert!(!report.is_solver_failure(), "a dropped device is not a scheduler failure");
+}

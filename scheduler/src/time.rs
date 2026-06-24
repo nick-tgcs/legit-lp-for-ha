@@ -94,6 +94,25 @@ pub fn round_up_to_steps(d: Duration, step_minutes: u32) -> u32 {
     d.as_secs().div_ceil(step_secs) as u32
 }
 
+/// How many grid steps a COMPLETE (untruncated) occurrence of window `w` spans, at
+/// `step_minutes` resolution. Midnight-cross aware (`end < start` wraps; `start ==
+/// end` is the full day). Rounds UP, so it is an upper bound on any instance's step
+/// count — a partial instance (clipped by the horizon) always has fewer.
+pub fn full_window_steps(w: &Window, step_minutes: u32) -> usize {
+    let span_min: i64 = if w.start == w.end {
+        24 * 60
+    } else {
+        let d = (w.end - w.start).num_minutes();
+        if d > 0 {
+            d
+        } else {
+            24 * 60 + d
+        }
+    };
+    let secs = Duration::from_secs(span_min.max(0) as u64 * 60);
+    (round_up_to_steps(secs, step_minutes) as usize).max(1)
+}
+
 /// A window instance: a run of consecutive grid steps inside the window,
 /// tagged with the local date its first step falls on (daily windows recur
 /// across a >24h or midnight-crossing horizon).
@@ -103,22 +122,57 @@ pub struct WindowInstance {
     pub date: chrono::NaiveDate,
     /// Step index range [start, end) into `Grid::steps`.
     pub steps: std::ops::Range<usize>,
+    /// Steps a complete occurrence of this window would span (see `full_window_steps`).
+    pub full_steps: usize,
+    /// True when this instance is clipped by the horizon (front=NOW or back=end), so
+    /// `steps.len() < full_steps`. A FUTURE partial (back-clipped) is pro-rated; the
+    /// CURRENT occurrence (front-clipped) still demands its full runtime — see
+    /// `required_minutes`.
+    pub partial: bool,
+}
+
+impl WindowInstance {
+    /// The runtime this instance requires for the LP constraint. The SINGLE source of
+    /// truth — `lp.rs` enforces it and `reasoning.rs` reports it, so the solver and the
+    /// panel can never disagree.
+    ///
+    /// The CURRENT occurrence (its first step is NOW, so `steps.start == 0`) demands the
+    /// FULL per-occurrence `minutes`: any steps it is missing lie in the PAST and are
+    /// already credited by the caller's `completed_minutes`. Pro-rating it would
+    /// double-discount — shrinking the target AND crediting work already done — and
+    /// starve a window we are partway through (e.g. 90 min needed, 40 done, 50 still due
+    /// before the deadline). Only a FUTURE occurrence clipped by the horizon END is
+    /// pro-rated to its visible share, so we don't raise a spurious shortfall for a
+    /// window whose tail we cannot see yet; MPC re-plans it next cycle.
+    pub fn required_minutes(&self, minutes: u32) -> f64 {
+        if self.steps.start == 0 {
+            return f64::from(minutes);
+        }
+        f64::from(minutes) * (self.steps.len() as f64 / self.full_steps.max(1) as f64)
+    }
 }
 
 /// Enumerate the window's instances over the grid: maximal runs of consecutive
 /// steps whose local start time lies inside `w`.
 pub fn window_instances(w: &Window, grid: &Grid) -> Vec<WindowInstance> {
+    let full = full_window_steps(w, grid.step_minutes);
+    let mk = |grid: &Grid, s: usize, e: usize| WindowInstance {
+        date: grid.steps[s].date_naive(),
+        steps: s..e,
+        full_steps: full,
+        partial: (e - s) < full,
+    };
     let mut out: Vec<WindowInstance> = Vec::new();
     let mut run_start: Option<usize> = None;
     for (i, t) in grid.steps.iter().enumerate() {
         if in_window(t.time(), w) {
             run_start.get_or_insert(i);
         } else if let Some(s) = run_start.take() {
-            out.push(WindowInstance { date: grid.steps[s].date_naive(), steps: s..i });
+            out.push(mk(grid, s, i));
         }
     }
     if let Some(s) = run_start {
-        out.push(WindowInstance { date: grid.steps[s].date_naive(), steps: s..grid.steps.len() });
+        out.push(mk(grid, s, grid.steps.len()));
     }
     out
 }
@@ -241,6 +295,38 @@ mod tests {
         assert_eq!(g.steps[inst[0].steps.end], sydney(2026, 6, 10, 22, 0));
         assert_eq!(inst[1].date, chrono::NaiveDate::from_ymd_opt(2026, 6, 11).unwrap());
         assert_eq!(g.steps[inst[1].steps.start], sydney(2026, 6, 11, 7, 0));
+        // Both fragments are PARTIAL (clipped by NOW at the front, horizon at the back) of
+        // a 15 h = 60-step window. The CURRENT occurrence (front-clipped, steps.start == 0)
+        // still demands its full 900 min — completed_minutes covers what already ran; only
+        // the FUTURE fragment (12/60 steps in-horizon) is pro-rated, to 180 min. Never the
+        // doubled 1800 min, never eroding the current window below 900.
+        assert_eq!(inst[0].full_steps, 60);
+        assert!(inst[0].partial && inst[1].partial);
+        assert_eq!(inst[0].steps.start, 0); // current occurrence
+        assert!((inst[0].required_minutes(900) - 900.0).abs() < 1e-9, "current = full");
+        assert!((inst[1].required_minutes(900) - 180.0).abs() < 1.0, "future = pro-rated");
+        let req: f64 = inst.iter().map(|i| i.required_minutes(900)).sum();
+        assert!((req - 1080.0).abs() < 1.0, "current full + future pro-rated, got {req}");
+    }
+
+    #[test]
+    fn full_window_steps_handles_overnight_and_full_day() {
+        assert_eq!(full_window_steps(&w(0, 0, 6, 30), 15), 26); // 6.5 h
+        assert_eq!(full_window_steps(&w(22, 0, 6, 30), 15), 34); // overnight 8.5 h
+        assert_eq!(full_window_steps(&w(0, 0, 0, 0), 15), 96); // full day
+        assert_eq!(full_window_steps(&w(7, 0, 22, 0), 15), 60); // 15 h
+    }
+
+    #[test]
+    fn full_in_horizon_instance_is_not_partial() {
+        // 00:00-06:30 from local midnight is wholly inside the 24 h horizon: a FULL
+        // instance (fraction 1), so it demands the entire per-day amount.
+        let g = Grid::build(sydney(2026, 6, 10, 0, 0), 15, 24).unwrap();
+        let inst = window_instances(&w(0, 0, 6, 30), &g);
+        assert_eq!(inst.len(), 1);
+        assert!(!inst[0].partial, "wholly-in-horizon window is a full instance");
+        assert_eq!(inst[0].steps.len(), inst[0].full_steps);
+        assert!((inst[0].required_minutes(90) - 90.0).abs() < 1e-9);
     }
 
     #[test]
