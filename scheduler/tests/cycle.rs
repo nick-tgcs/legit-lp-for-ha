@@ -1,4 +1,4 @@
-//! One full solve cycle over the module seams: real example registry, real
+//! One full solve cycle over the module seams: real test registry fixture, real
 //! fixture payloads, RecordingHa, real HiGHS.
 
 use std::sync::atomic::AtomicBool;
@@ -19,7 +19,7 @@ fn fixture(name: &str) -> Value {
 }
 
 fn registry() -> config::RegistryConfig {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
     config::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 

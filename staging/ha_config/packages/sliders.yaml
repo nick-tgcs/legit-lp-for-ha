@@ -1,5 +1,5 @@
-# The live-tuned input_numbers the registry (example.yaml) references —
-# production entity ids verbatim (including the doubled input_number_ prefix).
+# The live-tuned input_numbers the site registry references — production entity
+# ids verbatim (including the doubled input_number_ prefix).
 # Defaults mirror the captured production values; seed_from_fixtures.py
 # overwrites them from the fixture snapshot.
 input_number:
