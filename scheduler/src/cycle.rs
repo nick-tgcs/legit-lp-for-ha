@@ -318,10 +318,13 @@ async fn resolve_direction<A: HaApi>(
 
 /// Resolve one storage device from config + live reads into `(planner input,
 /// executor control)`. Averages the per-unit SoC into a kWh charge (clamped to
-/// [reserve, max]), resolves the entity-ref specs + per-direction authority +
-/// control, and zeroes a configured-but-unauthorised direction's power (so the LP
-/// neither plans nor actuates it). None (with a diagnostic) if SoC or capacity is
-/// unreadable this cycle — the plan proceeds without this device.
+/// [reserve, max]) and resolves the entity-ref specs + per-direction authority +
+/// control. Power limits are RATED — authority does NOT gate planning, so the panel
+/// shows the full advisory trajectory (e.g. charging to the peak-ready target) even
+/// in Manual/Scheduled mode. Actuation is gated separately, on a zeroed copy of this
+/// model (see `gate_storage_for_actuation`) plus `Executor::drive`. None (with a
+/// diagnostic) if SoC or capacity is unreadable this cycle — the plan proceeds
+/// without this device.
 /// One storage device resolved for a cycle. `input` is `None` when the device could
 /// not be modelled this cycle (an operational spec read unavailable): it is then
 /// EXCLUDED from the LP, but its `control` is still returned so the executor drives it
@@ -434,12 +437,12 @@ async fn build_storage<A: HaApi>(
         None => true,
     };
 
-    // Per-direction authority (resolved with the control surface at the top). A
-    // configured-but-unauthorised direction is owned by the Manual/Scheduled path, so
-    // zero its power: the LP neither plans nor actuates it. An UNCONFIGURED direction
-    // keeps its limit and stays advisory (planned + reported, never actuated).
-    let charge_auth = control.charge.as_ref().map(|d| d.authority).unwrap_or(false);
-    let discharge_auth = control.discharge.as_ref().map(|d| d.authority).unwrap_or(false);
+    // Power limits at RATED capacity, regardless of per-direction authority. Planning
+    // is decoupled from actuation: the panel plans (and shows) the full intended
+    // trajectory even when a direction is unauthorised (Manual/Scheduled). The caller
+    // derives a separate ZEROED model for the command it commits — see
+    // `gate_storage_for_actuation` — so a slot-0 charge can never lean on a future
+    // discharge the executor would skip; `Executor::drive` + dry-run gate again.
     let rated_charge_kw = resolve(ha, &sc.max_charge_kw, diags).await.unwrap_or(0.0).max(0.0);
     let rated_discharge_kw = resolve(ha, &sc.max_discharge_kw, diags).await.unwrap_or(0.0).max(0.0);
     // Parse-time validation only guards a LITERAL max_charge_kw > 0; an entity-ref
@@ -451,9 +454,8 @@ async fn build_storage<A: HaApi>(
             sc.id
         ));
     }
-    let max_charge_kw = if sc.charge.is_some() && !charge_auth { 0.0 } else { rated_charge_kw };
-    let max_discharge_kw =
-        if sc.discharge.is_some() && !discharge_auth { 0.0 } else { rated_discharge_kw };
+    let max_charge_kw = rated_charge_kw;
+    let max_discharge_kw = rated_discharge_kw;
 
     let mut goals = Vec::new();
     for g in &sc.goals {
@@ -497,6 +499,39 @@ async fn build_storage<A: HaApi>(
         goals,
     };
     Some(StorageBuild { input: Some(input), control })
+}
+
+/// Derive the ACTUATION storage models from the RATED (advisory) ones by zeroing the
+/// power of any configured-but-unauthorised direction. The panel plans at rated power,
+/// but the command we actually commit is read from a solve over THESE models: removing
+/// a leg the executor will skip means a slot-0 charge can never be justified by a
+/// future discharge that won't happen (the Manual/Scheduled "charge now, never
+/// discharge" trap). A fully-authorised device — or one whose unauthorised directions
+/// are UNCONFIGURED (no executor surface to skip) — is returned unchanged, so the
+/// gated set equals the rated set and no second solve is needed.
+fn gate_storage_for_actuation(
+    rated: &[StorageInput],
+    controls: &[StorageControl],
+) -> Vec<StorageInput> {
+    rated
+        .iter()
+        .map(|s| {
+            let ctrl = controls.iter().find(|c| c.id == s.id);
+            // A direction is blocked only when it is CONFIGURED (has a control surface)
+            // AND unauthorised — that is the leg `Executor::drive` would refuse.
+            let charge_blocked = ctrl.and_then(|c| c.charge.as_ref()).is_some_and(|d| !d.authority);
+            let discharge_blocked =
+                ctrl.and_then(|c| c.discharge.as_ref()).is_some_and(|d| !d.authority);
+            let mut g = s.clone();
+            if charge_blocked {
+                g.max_charge_kw = 0.0;
+            }
+            if discharge_blocked {
+                g.max_discharge_kw = 0.0;
+            }
+            g
+        })
+        .collect()
 }
 
 /// Absolute range of the CURRENT instance of a daily window, up to `now`
@@ -844,6 +879,14 @@ impl Cycle {
             }
         }
 
+        // Plan storage at RATED power for the panel (advisory), but ACTUATE from a model
+        // with every unauthorised direction zeroed. The PRIMARY solve (`out`) uses the
+        // gated model — it drives the load actuation, the grid lane, the load report AND
+        // the storage commands, so a committed slot-0 charge can never lean on a future
+        // leg the executor would skip (identical safety to the authority-gated v0.1.9).
+        let storage_gated = gate_storage_for_actuation(&storage, &storage_controls);
+        let needs_advisory = storage_gated != storage;
+
         let world = WorldState {
             now,
             global_enabled,
@@ -852,9 +895,23 @@ impl Cycle {
             feedin,
             pv,
             baseload,
-            storage,
+            storage: storage_gated,
         };
         let out = self.planner.plan_with_preview(&world, &contracts, preview);
+        // Advisory storage trajectory for the panel: a second, DISPLAY-ONLY solve at
+        // rated power, run only when gating actually changed a limit (a fully-authorised
+        // or storage-free cycle reuses `out`). Its loads/grid are discarded — only the
+        // storage cards read `storage_report`; everything actuated still comes from `out`.
+        let advisory = if needs_advisory {
+            let world_adv = WorldState { storage, ..world.clone() };
+            Some(self.planner.plan_with_preview(&world_adv, &contracts, preview))
+        } else {
+            None
+        };
+        let storage_report = advisory
+            .as_ref()
+            .map(|a| a.storage.as_slice())
+            .unwrap_or_else(|| out.storage.as_slice());
         let executor = Executor { dry_run: self.dry_run };
         let executed = executor.execute(ha, global_enabled, &contracts, &out.decisions).await;
         // Storage: map each device's slot-0 plan to a current-step command, then
@@ -922,8 +979,9 @@ impl Cycle {
             pv: world.pv.clone(),
             baseload: world.baseload.clone(),
             grid_kw: out.grid_kw.clone(),
-            storage: out
-                .storage
+            // Storage cards show the ADVISORY (rated-power) trajectory so the panel
+            // reveals the full intended plan — actuation still follows `out` (gated).
+            storage: storage_report
                 .iter()
                 .map(|b| {
                     let charge_now = b.charge_kw.first().copied().unwrap_or(0.0);

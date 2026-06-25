@@ -591,3 +591,83 @@ async fn c16_unreadable_baseline_does_not_become_free_pv_headroom() {
     );
     assert!(!report.is_solver_failure(), "an unreadable baseline still yields a valid plan");
 }
+
+/// Cheap-now / dear-later forecast (mirrors c12): one cheap hour at the injected `now`
+/// (10:00 Sydney == 00:00 UTC), dear for the rest of the horizon — a clean arbitrage.
+fn cheap_now_dear_later(ha: &mut RecordingHa) {
+    set_state(ha, "sensor.current_grid_cost", "0.02");
+    ha.states.insert(
+        "sensor.beckton_general_forecast".into(),
+        json!({"state": "0.02", "attributes": {"forecasts": [
+            {"per_kwh": 0.02, "start_time": "2026-06-10T00:00:00+00:00", "end_time": "2026-06-10T01:00:00+00:00"},
+            {"per_kwh": 0.60, "start_time": "2026-06-10T01:00:00+00:00", "end_time": "2026-06-11T00:00:00+00:00"}
+        ]}}),
+    );
+}
+
+#[tokio::test]
+async fn c17_unauthorised_storage_previews_its_full_plan_yet_actuates_nothing() {
+    // The user's demand: a Scheduled battery (BOTH directions Manual) must still PREVIEW
+    // its intended trajectory. Planning is decoupled from authority — the advisory panel
+    // plans the cheap-now/dear-later charge — while not a single rate is written (authority
+    // gates actuation). This is the symptom that started this whole thread: the cards used
+    // to show "short, never plans" because an unauthorised device was modelled frozen.
+    let mut ha = canned_ha(); // both authority sensors default OFF
+    cheap_now_dear_later(&mut ha);
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 modelled");
+    assert!(
+        !s.charge_authority && !s.discharge_authority,
+        "both directions are advisory (Scheduled)"
+    );
+    assert!(
+        s.charge_kw.iter().any(|&kw| kw > 0.1),
+        "preview shows the charge plan even while unauthorised: {:?}",
+        s.charge_kw
+    );
+    assert!(
+        storage_rate_calls(&ha).is_empty(),
+        "unauthorised storage is never actuated: {:?}",
+        storage_rate_calls(&ha)
+    );
+}
+
+#[tokio::test]
+async fn c18_charge_authorised_discharge_not_never_commits_an_arbitrage_charge() {
+    // P1 guard (the regression #43 introduced and #45 reverted): planning at rated power
+    // must not let a COMMITTED charge lean on a future discharge the executor will skip.
+    // Charge is Optimiser, export stays Manual; cheap-now/dear-later with no target goal,
+    // so the ONLY reason to charge now is arbitrage that NEEDS the (unauthorised) discharge.
+    // The advisory panel still shows the charge plan, but the actuation model has every
+    // unauthorised direction zeroed — a charge-only cabinet with no dischargeable payoff —
+    // so the committed charge rate is ~0. A real charge command here would be the P1.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on"); // export stays Manual
+    cheap_now_dear_later(&mut ha);
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+
+    // Advisory: the panel still plans the arbitrage charge (rated power, both directions).
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 modelled");
+    assert!(s.charge_authority && !s.discharge_authority, "charge Optimiser, export Manual");
+    assert!(
+        s.charge_kw.iter().any(|&kw| kw > 0.1),
+        "advisory panel shows the charge plan: {:?}",
+        s.charge_kw
+    );
+
+    // Actuation: the executor runs (charge is authorised) but the gated model commits ~0 W —
+    // no arbitrage charge that depends on the skipped discharge leg.
+    let calls = storage_rate_calls(&ha);
+    let charge =
+        calls.iter().find(|(t, _)| t == "input_number.input_number_sonnen01_grid_charge_rate");
+    assert!(
+        matches!(charge, Some((_, w)) if *w < 1.0),
+        "charge with no dischargeable payoff must commit ~0 W, got {charge:?} (all: {calls:?})"
+    );
+    assert!(
+        !calls.iter().any(|(t, _)| t.contains("grid_discharge_rate")),
+        "export stays Manual => no discharge rate written: {calls:?}"
+    );
+}
