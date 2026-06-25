@@ -1006,13 +1006,28 @@ impl Cycle {
                         .map(|d| d.authority)
                         .unwrap_or(false);
                     let authority = charge_authority || discharge_authority;
+                    // Is the SHOWN (advisory) current action actually committed this cycle?
+                    // The gated solve (`out.storage`) is what the executor writes, so a
+                    // direction is live only if it is authorised AND the gated command
+                    // drives it. An advisory charge that leans on an unauthorised discharge
+                    // (gated commits 0) is therefore tagged advisory, not "charging now".
+                    let committed = out.storage.iter().find(|g| g.id == b.id);
+                    let committed_charge =
+                        committed.and_then(|g| g.charge_kw.first().copied()).unwrap_or(0.0);
+                    let committed_discharge =
+                        committed.and_then(|g| g.discharge_kw.first().copied()).unwrap_or(0.0);
+                    let action_actuated = match action {
+                        "charging" => charge_authority && committed_charge > 1e-3,
+                        "discharging" => discharge_authority && committed_discharge > 1e-3,
+                        _ => true, // idle: nothing is written in either plan
+                    };
                     let reasoning = self
                         .registry
                         .global
                         .storage
                         .iter()
                         .find(|s| s.id == b.id)
-                        .map(|cfg| reasoning::for_storage(cfg, b, action, authority, &grid))
+                        .map(|cfg| reasoning::for_storage(cfg, b, action, action_actuated, &grid))
                         .unwrap_or_default();
                     StorageReport {
                         id: b.id.clone(),

@@ -627,6 +627,11 @@ async fn c17_unauthorised_storage_previews_its_full_plan_yet_actuates_nothing() 
         s.charge_kw
     );
     assert!(
+        s.reasoning.narrative.contains("advisory"),
+        "an unactuated plan must read as advisory, not live: {:?}",
+        s.reasoning.narrative
+    );
+    assert!(
         storage_rate_calls(&ha).is_empty(),
         "unauthorised storage is never actuated: {:?}",
         storage_rate_calls(&ha)
@@ -655,6 +660,13 @@ async fn c18_charge_authorised_discharge_not_never_commits_an_arbitrage_charge()
         s.charge_kw.iter().any(|&kw| kw > 0.1),
         "advisory panel shows the charge plan: {:?}",
         s.charge_kw
+    );
+    // P2 (Codex on #46): charge IS authorised, but the shown charge isn't committed this
+    // step, so the narrative must be tagged advisory — not described as a live "charging now".
+    assert!(
+        s.reasoning.narrative.contains("advisory"),
+        "an authorised-but-uncommitted charge must read as advisory: {:?}",
+        s.reasoning.narrative
     );
 
     // Actuation: the executor runs (charge is authorised) but the gated model commits ~0 W —
