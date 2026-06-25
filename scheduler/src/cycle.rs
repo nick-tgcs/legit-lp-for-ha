@@ -534,6 +534,32 @@ fn gate_storage_for_actuation(
         .collect()
 }
 
+/// Is the SHOWN (advisory) current-step storage command actually committed this cycle?
+/// The panel plots the advisory (rated-power) plan, but the executor writes the gated
+/// command — so the pill may show a direction/rate that is NOT what gets actuated. It is
+/// "live · executes" only when (a) the shown charge AND discharge equal the committed
+/// (gated) values to the watt, and (b) the active direction is one the executor will
+/// drive (idle => any authorised direction). Otherwise it is advisory. This keeps an
+/// advisory rate from ever being labelled live when a different gated rate is written.
+fn storage_action_actuated(
+    action: &str,
+    shown_charge_kw: f64,
+    shown_discharge_kw: f64,
+    committed_charge_kw: f64,
+    committed_discharge_kw: f64,
+    charge_authority: bool,
+    discharge_authority: bool,
+) -> bool {
+    let matches_committed = (shown_charge_kw - committed_charge_kw).abs() < 1e-3
+        && (shown_discharge_kw - committed_discharge_kw).abs() < 1e-3;
+    let direction_drivable = match action {
+        "charging" => charge_authority,
+        "discharging" => discharge_authority,
+        _ => charge_authority || discharge_authority, // idle: live only if something is driveable
+    };
+    matches_committed && direction_drivable
+}
+
 /// Absolute range of the CURRENT instance of a daily window, up to `now`
 /// (None when now is outside the window). Overnight windows reach back to
 /// yesterday's start.
@@ -1006,21 +1032,26 @@ impl Cycle {
                         .map(|d| d.authority)
                         .unwrap_or(false);
                     let authority = charge_authority || discharge_authority;
-                    // Is the SHOWN (advisory) current action actually committed this cycle?
-                    // The gated solve (`out.storage`) is what the executor writes, so a
-                    // direction is live only if it is authorised AND the gated command
-                    // drives it. An advisory charge that leans on an unauthorised discharge
-                    // (gated commits 0) is therefore tagged advisory, not "charging now".
+                    // Is the SHOWN (advisory) current command actually what gets committed
+                    // this cycle? The panel plots the advisory plan, so its slot-0 can differ
+                    // from the gated command the executor actually writes — different direction
+                    // OR a different rate (e.g. a target needs some charge but the advisory
+                    // arbitrage wants more). The pill is "live" only when they match exactly;
+                    // see `storage_action_actuated`.
                     let committed = out.storage.iter().find(|g| g.id == b.id);
                     let committed_charge =
                         committed.and_then(|g| g.charge_kw.first().copied()).unwrap_or(0.0);
                     let committed_discharge =
                         committed.and_then(|g| g.discharge_kw.first().copied()).unwrap_or(0.0);
-                    let action_actuated = match action {
-                        "charging" => charge_authority && committed_charge > 1e-3,
-                        "discharging" => discharge_authority && committed_discharge > 1e-3,
-                        _ => true, // idle: nothing is written in either plan
-                    };
+                    let action_actuated = storage_action_actuated(
+                        action,
+                        charge_now,
+                        discharge_now,
+                        committed_charge,
+                        committed_discharge,
+                        charge_authority,
+                        discharge_authority,
+                    );
                     let reasoning = self
                         .registry
                         .global
@@ -1240,13 +1271,36 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_alerts, diag_is_actionable, diag_scope};
+    use super::{derive_alerts, diag_is_actionable, diag_scope, storage_action_actuated};
     use crate::lp::LoadPlan;
     use crate::model::LoadId;
     use crate::status::Severity;
 
     fn plan(id: &str, unmet: f64) -> LoadPlan {
         LoadPlan { id: LoadId(id.into()), on: vec![], ct: vec![], unmet }
+    }
+
+    #[test]
+    fn storage_action_actuated_is_live_only_when_shown_equals_committed() {
+        // Fully authorised, advisory == gated (the no-gating case): live.
+        assert!(storage_action_actuated("charging", 4.0, 0.0, 4.0, 0.0, true, true));
+        // Charge authorised, but the shown advisory rate (4 kW) differs from the gated
+        // command actually written (1 kW for a target) — the divergent-rate case: advisory.
+        assert!(!storage_action_actuated("charging", 4.0, 0.0, 1.0, 0.0, true, false));
+        // Charge authorised but the gated command is 0 (advisory arbitrage leans on an
+        // unauthorised discharge): advisory.
+        assert!(!storage_action_actuated("charging", 4.0, 0.0, 0.0, 0.0, true, false));
+        // Charging shown but charge is NOT authorised (fully Scheduled): advisory even if
+        // the numbers happen to match.
+        assert!(!storage_action_actuated("charging", 4.0, 0.0, 4.0, 0.0, false, false));
+        // Discharge shown, discharge authorised, shown == committed: live.
+        assert!(storage_action_actuated("discharging", 0.0, 3.0, 0.0, 3.0, false, true));
+        // Discharge shown but discharge unauthorised: advisory.
+        assert!(!storage_action_actuated("discharging", 0.0, 3.0, 0.0, 0.0, true, false));
+        // Idle and genuinely idle in both plans, with an authorised direction: live hold.
+        assert!(storage_action_actuated("idle", 0.0, 0.0, 0.0, 0.0, true, false));
+        // Idle with NO authorised direction (Scheduled): not under live control.
+        assert!(!storage_action_actuated("idle", 0.0, 0.0, 0.0, 0.0, false, false));
     }
 
     #[test]
