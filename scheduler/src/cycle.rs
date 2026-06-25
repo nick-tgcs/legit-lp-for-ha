@@ -318,12 +318,10 @@ async fn resolve_direction<A: HaApi>(
 
 /// Resolve one storage device from config + live reads into `(planner input,
 /// executor control)`. Averages the per-unit SoC into a kWh charge (clamped to
-/// [reserve, max]) and resolves the entity-ref specs + per-direction authority +
-/// control. Power limits are the device's RATED capability regardless of authority,
-/// so the planner always models what it COULD do — the preview/advisory plan is the
-/// real intended charge/discharge. Authority gates ACTUATION only (`execute_storage`).
-/// None (with a diagnostic) if SoC or capacity is unreadable this cycle — the plan
-/// proceeds without this device.
+/// [reserve, max]), resolves the entity-ref specs + per-direction authority +
+/// control, and zeroes a configured-but-unauthorised direction's power (so the LP
+/// neither plans nor actuates it). None (with a diagnostic) if SoC or capacity is
+/// unreadable this cycle — the plan proceeds without this device.
 /// One storage device resolved for a cycle. `input` is `None` when the device could
 /// not be modelled this cycle (an operational spec read unavailable): it is then
 /// EXCLUDED from the LP, but its `control` is still returned so the executor drives it
@@ -340,8 +338,7 @@ async fn build_storage<A: HaApi>(
 ) -> Option<StorageBuild> {
     // Resolve the control surface FIRST: it does not depend on the LP specs, and we need
     // it to drive the device IDLE on any cycle we cannot model. resolve_direction also
-    // reads each direction's authority — used by `execute_storage` to gate ACTUATION,
-    // NOT the LP power limits (the planner always models the device's rated capability).
+    // reads each direction's authority, reused below for the LP power limits.
     let charge = resolve_direction(ha, sc.charge.as_ref(), diags).await;
     let discharge = resolve_direction(ha, sc.discharge.as_ref(), diags).await;
     let control = StorageControl { id: sc.id.clone(), charge, discharge };
@@ -437,24 +434,26 @@ async fn build_storage<A: HaApi>(
         None => true,
     };
 
-    // Power limits are the device's RATED capability — the planner ALWAYS models what
-    // the device could do, so the advisory/preview plan shows the real intended charge/
-    // discharge even for a direction that is currently unauthorised (Manual/Scheduled).
-    // Authority gates ACTUATION only: `execute_storage`/`drive` writes a rate solely for
-    // an AUTHORISED direction, and never in dry-run — so planning at rated power can never
-    // cause an unauthorised actuation. (`available` below is the genuine physical gate: an
-    // absent device, e.g. an unplugged EV, truly cannot move energy, so its power IS zeroed.)
-    let max_charge_kw = resolve(ha, &sc.max_charge_kw, diags).await.unwrap_or(0.0).max(0.0);
-    let max_discharge_kw = resolve(ha, &sc.max_discharge_kw, diags).await.unwrap_or(0.0).max(0.0);
+    // Per-direction authority (resolved with the control surface at the top). A
+    // configured-but-unauthorised direction is owned by the Manual/Scheduled path, so
+    // zero its power: the LP neither plans nor actuates it. An UNCONFIGURED direction
+    // keeps its limit and stays advisory (planned + reported, never actuated).
+    let charge_auth = control.charge.as_ref().map(|d| d.authority).unwrap_or(false);
+    let discharge_auth = control.discharge.as_ref().map(|d| d.authority).unwrap_or(false);
+    let rated_charge_kw = resolve(ha, &sc.max_charge_kw, diags).await.unwrap_or(0.0).max(0.0);
+    let rated_discharge_kw = resolve(ha, &sc.max_discharge_kw, diags).await.unwrap_or(0.0).max(0.0);
     // Parse-time validation only guards a LITERAL max_charge_kw > 0; an entity-ref
     // that reads unavailable/zero collapses to 0 (charging off) with no error. That's
     // fail-safe (no overcharge) but silently disables a core function — surface it.
-    if sc.max_charge_kw.source().is_some() && max_charge_kw <= 0.0 {
+    if sc.max_charge_kw.source().is_some() && rated_charge_kw <= 0.0 {
         diags.push(format!(
             "storage '{}': max_charge_kw entity unresolved/zero; charging disabled this cycle",
             sc.id
         ));
     }
+    let max_charge_kw = if sc.charge.is_some() && !charge_auth { 0.0 } else { rated_charge_kw };
+    let max_discharge_kw =
+        if sc.discharge.is_some() && !discharge_auth { 0.0 } else { rated_discharge_kw };
 
     let mut goals = Vec::new();
     for g in &sc.goals {
