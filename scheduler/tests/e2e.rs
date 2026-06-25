@@ -1,5 +1,5 @@
-//! The REAL binary against a stub HA (wiremock): boots, parses the example
-//! registry, solves, serves the panel — and in dry-run POSTs nothing.
+//! The REAL binary against a stub HA (wiremock): boots, parses the test
+//! registry fixture, solves, serves the panel — and in dry-run POSTs nothing.
 
 use std::io::Read;
 use std::time::Duration;
@@ -86,7 +86,7 @@ async fn stub_ha() -> MockServer {
 #[tokio::test]
 async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
     let server = stub_ha().await;
-    let registry = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
+    let registry = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
     let port = 18099;
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_legit-lp-scheduler"))
         .env("SCHED_HASS_URL", server.uri())
@@ -173,10 +173,10 @@ async fn e1_boot_solve_dry_run_no_service_posts_and_panel_serves() {
         solved_after > solved_before,
         "toggling preview solved additional observe-only loads: {solved_before} -> {solved_after}"
     );
-    // The storage device from example.yaml was read (states.json serves its
-    // SoC) and planned end-to-end: a trajectory is present and grid-aligned.
+    // The storage devices from the test registry were read (states.json serves
+    // their SoC) and planned end-to-end: a trajectory is present and grid-aligned.
     let storage = status["storage"].as_array().expect("storage array");
-    assert_eq!(storage.len(), 2, "both example cabinets were planned");
+    assert_eq!(storage.len(), 2, "both cabinets were planned");
     assert_eq!(storage[0]["id"], "sonnen01");
     let soc = storage[0]["soc_kwh"].as_array().expect("soc trajectory");
     assert!(soc.len() > 1, "SoC trajectory spans the horizon");
