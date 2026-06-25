@@ -27,14 +27,16 @@ services:
       SCHED_DRY_RUN: ${SCHED_DRY_RUN:-true}
       SCHED_INTERVAL_SECONDS: ${SCHED_INTERVAL_SECONDS:-15}
       SCHED_TIME_ZONE: Australia/Sydney
-      SCHED_LOADS_CONFIG: /config/legit_lp.yaml   # self-seeds the bundled example
+      SCHED_LOADS_CONFIG: /config/legit_lp.yaml   # the registry fixture, mounted ro below
       SCHED_DATA_DIR: /data
       RUST_LOG: info
     volumes:
-      - scheduler_config:/config
+      # The engine no longer seeds a placeholder registry — it fails loud on a
+      # missing one. Supply it explicitly (the documented non-Supervisor path):
+      # the integration-test fixture is this site's contract surface, observe-only.
+      - ../scheduler/tests/fixtures/registry.yaml:/config/legit_lp.yaml:ro
       - scheduler_data:/data
     depends_on: [homeassistant]
 
 volumes:
-  scheduler_config:
   scheduler_data:
