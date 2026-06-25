@@ -1042,6 +1042,7 @@ impl Cycle {
                         authority,
                         charge_authority,
                         discharge_authority,
+                        action_actuated,
                         target_unmet: b.target_unmet,
                         reasoning,
                     }

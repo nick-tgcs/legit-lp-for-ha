@@ -632,6 +632,10 @@ async fn c17_unauthorised_storage_previews_its_full_plan_yet_actuates_nothing() 
         s.reasoning.narrative
     );
     assert!(
+        !s.action_actuated,
+        "unauthorised => the shown action is not committed (pill: advisory)"
+    );
+    assert!(
         storage_rate_calls(&ha).is_empty(),
         "unauthorised storage is never actuated: {:?}",
         storage_rate_calls(&ha)
@@ -667,6 +671,10 @@ async fn c18_charge_authorised_discharge_not_never_commits_an_arbitrage_charge()
         s.reasoning.narrative.contains("advisory"),
         "an authorised-but-uncommitted charge must read as advisory: {:?}",
         s.reasoning.narrative
+    );
+    assert!(
+        !s.action_actuated,
+        "charge authorised but not committed this step => pill must read advisory, not live"
     );
 
     // Actuation: the executor runs (charge is authorised) but the gated model commits ~0 W —

@@ -104,6 +104,12 @@ pub struct StorageReport {
     /// a planned discharge as advisory (it won't be actuated), not "live · executes".
     pub charge_authority: bool,
     pub discharge_authority: bool,
+    /// Is the CURRENT-step `action` actually committed this cycle — i.e. the shown
+    /// direction is authorised AND the gated actuation solve drives it? The panel
+    /// pill keys "live · executes" vs "advisory · not executed" off THIS, not raw
+    /// authority: an advisory charge (rated-power plan) whose arbitrage leans on an
+    /// unauthorised discharge has `charge_authority=true` but `action_actuated=false`.
+    pub action_actuated: bool,
     /// Unmet target energy (kWh) across this device's deadline goals; 0 = met.
     pub target_unmet: f64,
     /// The "Why" explanation behind this device's planned trajectory.
@@ -326,6 +332,7 @@ mod tests {
                 authority: true,
                 charge_authority: true,
                 discharge_authority: false,
+                action_actuated: true,
                 target_unmet: 0.0,
                 reasoning: Reasoning::default(),
             }],
@@ -343,6 +350,8 @@ mod tests {
         // direction correctly (charge authorised here, discharge advisory).
         assert_eq!(v["storage"][0]["charge_authority"], true);
         assert_eq!(v["storage"][0]["discharge_authority"], false);
+        // Actuation status drives the pill's live/advisory tag (not raw authority).
+        assert_eq!(v["storage"][0]["action_actuated"], true);
         // The Why panel's reasoning view-model is always serialised (object form).
         assert!(v["storage"][0]["reasoning"].is_object(), "reasoning present in storage JSON");
         // A no-storage report is structurally clean — storage is an empty array.

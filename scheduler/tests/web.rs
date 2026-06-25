@@ -69,6 +69,7 @@ fn full_report() -> SolveReport {
             authority: true,
             charge_authority: true,
             discharge_authority: false,
+            action_actuated: true,
             target_unmet: 0.0,
             reasoning: Default::default(),
         }],
@@ -321,11 +322,14 @@ async fn w12_panel_applies_the_pr35_review_fixes() {
         html.contains("a.scope==='scheduler'") && html.contains("solveFailed"),
         "the failure banner triggers on the critical scheduler alert"
     );
-    // (2) The storage action pill tags by the ACTIVE direction's authority, so a
-    //     charge-only cabinet's advisory discharge is not mislabelled "live".
+    // (2) The storage action pill tags live vs advisory by whether the shown action is
+    //     actually committed this cycle (`action_actuated` — which folds in per-direction
+    //     authority AND the gated command), not raw authority. So an advisory charge (a
+    //     rated-power plan whose arbitrage leans on an unauthorised discharge) is not
+    //     mislabelled "live · executes".
     assert!(
-        html.contains("charge_authority") && html.contains("discharge_authority"),
-        "the storage pill uses per-direction authority"
+        html.contains("action_actuated"),
+        "the storage pill keys live/advisory off action_actuated"
     );
     // (3) Plan-tab durations / energy derive from the report's grid step length
     //     rather than assuming 15-minute steps.
