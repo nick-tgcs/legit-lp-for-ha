@@ -304,12 +304,17 @@ pub fn for_load(
     Reasoning { narrative, binding, fix_hint, metrics, inputs, steps, blocks }
 }
 
-/// The "Why" for one storage device (battery / EV).
+/// The "Why" for one storage device (battery / EV). `plan` is the ADVISORY
+/// (rated-power) trajectory shown on the panel; `action_actuated` says whether the
+/// current-step action is actually committed this cycle (the shown direction is
+/// authorised AND the gated actuation solve drives it). When false the narrative is
+/// tagged advisory — e.g. a charge planned at rated power but not written because the
+/// arbitrage leans on an unauthorised discharge.
 pub fn for_storage(
     cfg: &StorageConfig,
     plan: &StoragePlan,
     action: &str,
-    authority: bool,
+    action_actuated: bool,
     grid: &Grid,
 ) -> Reasoning {
     let soc_now = plan.soc_kwh.first().copied().unwrap_or(0.0);
@@ -402,7 +407,7 @@ pub fn for_storage(
             _ => "Holding — self-arbitraging against price.".into(),
         }
     };
-    if !authority {
+    if !action_actuated {
         narrative = format!("{narrative} (advisory — planned, not actuated)");
     }
 
@@ -620,7 +625,7 @@ loads: []
         let r = for_storage(&cfg, &plan, "charging", true, &grid);
 
         assert!(r.narrative.contains("Charging"), "narrative: {}", r.narrative);
-        assert!(!r.narrative.contains("advisory"), "authorised devices aren't advisory");
+        assert!(!r.narrative.contains("advisory"), "actuated actions aren't tagged advisory");
         assert!(r.binding.is_none());
     }
 }
