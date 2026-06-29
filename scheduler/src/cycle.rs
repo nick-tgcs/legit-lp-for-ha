@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use crate::config::{self, DemandCfg, LoadTypeCfg, PlanningMode, RegistryConfig, ValueRef};
+use crate::config::{self, DemandCfg, PlanningMode, RegistryConfig, ValueRef};
 use crate::executor::Executor;
 use crate::forecast;
 use crate::ha_client::{fold_history, on_predicate_binary, on_predicate_climate, HaApi, HaState};
@@ -29,6 +29,16 @@ pub struct Cycle {
     /// effective preview: when on, observe-only loads are solved for the panel but
     /// never executed.
     pub preview_override: Arc<AtomicBool>,
+}
+
+/// Whether a load's running-state entity should be read as a thermostat (climate)
+/// rather than a plain on/off device. Derived from the HA domain of the entity id
+/// (`climate.*`), so the engine works for ANY device kind without a closed
+/// device-type enum: a comfort load wired to a `climate.*` entity reads its
+/// hvac-mode ("running" = not off); one wired to a `switch`/`binary_sensor`/
+/// `input_boolean` reads on/off.
+pub fn reads_as_climate(running_entity: &str) -> bool {
+    running_entity.split_once('.').map(|(domain, _)| domain == "climate").unwrap_or(false)
 }
 
 async fn state_of<A: HaApi>(ha: &A, entity: &str, diags: &mut Vec<String>) -> Option<HaState> {
@@ -600,7 +610,11 @@ impl Cycle {
                     }
                 }
             }
-            let is_climate = matches!(l.load_type, LoadTypeCfg::Aircon);
+            // Read the running entity per its HA domain: a `climate.*` entity reports
+            // an hvac-mode state ("off"/"cool"/…) so "running" = state != off; anything
+            // else (switch/binary_sensor/input_boolean) reads as on/off. Derived from
+            // the entity id, not a closed device-type enum — so any device kind works.
+            let is_climate = reads_as_climate(&l.state.running_entity);
             let pred = if is_climate { on_predicate_climate } else { on_predicate_binary };
             let (running, fold) =
                 match ha.get_history(&l.state.running_entity, midnight_utc, now_utc).await {
@@ -726,13 +740,24 @@ impl Cycle {
                 .await
                 .unwrap_or(0.0)
                 .max(0.0);
+            // A `program` runs as ONE contiguous block: force the min-run to the
+            // block length (so the run can't fragment) and cap it at a single start.
+            // The whole block then lands under any price cap or not at all (a fresh,
+            // unlocked start is gated step-by-step), which is the all-or-nothing
+            // program semantics. Overrides the hard-rule values resolved above for
+            // this kind only.
+            let (min_run_min, max_starts) =
+                if matches!(l.must_have, config::DemandCfg::Program { .. }) {
+                    let block = match &mh.kind {
+                        DemandKind::Runtime { minutes, .. } => f64::from(*minutes),
+                        _ => min_run_min,
+                    };
+                    (min_run_min.max(block), Some(1))
+                } else {
+                    (min_run_min, max_starts)
+                };
             contracts.push(LoadContract {
                 id: LoadId(l.id.clone()),
-                load_type: match l.load_type {
-                    LoadTypeCfg::HotWater => LoadType::HotWater,
-                    LoadTypeCfg::Dehumidifier => LoadType::Dehumidifier,
-                    LoadTypeCfg::Aircon => LoadType::Aircon,
-                },
                 planning: match l.planning {
                     PlanningMode::Runtime => Planning::Runtime,
                     PlanningMode::Predictive => Planning::Predictive,
@@ -1068,8 +1093,9 @@ impl Cycle {
                     None => None,
                 };
                 Demand {
-                    kind: DemandKind::HumidityBelow {
-                        max: target.unwrap_or(f64::INFINITY),
+                    kind: DemandKind::Threshold {
+                        dir: ThresholdDir::Below,
+                        limit: target.unwrap_or(f64::INFINITY),
                         observed: if target.is_some() { observed } else { None },
                         start_hysteresis: resolve_opt(ha, start_hysteresis, diags)
                             .await
@@ -1079,6 +1105,75 @@ impl Cycle {
                         window,
                         cap_minutes: resolve_minutes(ha, max_minutes, diags).await,
                     },
+                    max_price: resolve_opt(ha, max_price, diags).await,
+                }
+            }
+            DemandCfg::Threshold {
+                direction,
+                value,
+                target_value,
+                start_hysteresis,
+                window,
+                max_minutes,
+                max_price,
+            } => {
+                // must-have uses `value`; the (tighter) can-take uses `target_value`.
+                let limit = match resolve_opt(ha, &Some(value.clone()), diags).await {
+                    Some(v) => Some(v),
+                    None => resolve_opt(ha, target_value, diags).await,
+                };
+                if limit.is_none() {
+                    diags.push("threshold limit unresolved; demand disabled".into());
+                }
+                let dir = match direction {
+                    config::ThresholdDirCfg::Below => ThresholdDir::Below,
+                    config::ThresholdDirCfg::Above => ThresholdDir::Above,
+                };
+                // A disabled (unresolved) limit must never read as "satisfied": for
+                // Below an infinite limit is always-OK, for Above a -infinite one is.
+                let disabled =
+                    if dir == ThresholdDir::Below { f64::INFINITY } else { f64::NEG_INFINITY };
+                let window = match window {
+                    Some(w) => resolve_window(ha, w, diags).await,
+                    None => None,
+                };
+                Demand {
+                    kind: DemandKind::Threshold {
+                        dir,
+                        limit: limit.unwrap_or(disabled),
+                        observed: if limit.is_some() { observed } else { None },
+                        start_hysteresis: resolve_opt(ha, start_hysteresis, diags)
+                            .await
+                            .unwrap_or(0.0),
+                        drop_per_hour: 0.0,
+                        drift_per_hour: 0.0,
+                        window,
+                        cap_minutes: resolve_minutes(ha, max_minutes, diags).await,
+                    },
+                    max_price: resolve_opt(ha, max_price, diags).await,
+                }
+            }
+            DemandCfg::Program { length_hours, length_minutes, window, max_price } => {
+                // A program plans as a fixed contiguous runtime block (min_run forced
+                // to the length in the contract build); resolve its length like a
+                // runtime amount.
+                let mut mins = match resolve_opt(ha, length_minutes, diags).await {
+                    Some(m) => m.ceil().max(0.0) as u32,
+                    None => match resolve_opt(ha, length_hours, diags).await {
+                        Some(h) => config::hours_to_minutes(h),
+                        None => 0,
+                    },
+                };
+                let window = match resolve_window(ha, window, diags).await {
+                    Some(w) => w,
+                    None => {
+                        diags.push("program window unresolved; demand disabled".into());
+                        mins = 0;
+                        Window { start: chrono::NaiveTime::MIN, end: chrono::NaiveTime::MIN }
+                    }
+                };
+                Demand {
+                    kind: DemandKind::Runtime { minutes: mins, window, completed_minutes: 0 },
                     max_price: resolve_opt(ha, max_price, diags).await,
                 }
             }
@@ -1124,7 +1219,7 @@ fn demand_window_of(d: &Demand) -> Option<Window> {
         DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
             Some(*window)
         }
-        DemandKind::HumidityBelow { window, .. } => *window,
+        DemandKind::Threshold { window, .. } => *window,
     }
 }
 
@@ -1155,7 +1250,7 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
             *change_per_hour = rates.change_per_hour;
             *drift_per_hour = rates.drift_per_hour;
         }
-        DemandKind::HumidityBelow { drop_per_hour, drift_per_hour, .. } => {
+        DemandKind::Threshold { drop_per_hour, drift_per_hour, .. } => {
             *drop_per_hour = rates.drop_per_hour;
             *drift_per_hour = rates.drift_per_hour;
         }
@@ -1166,13 +1261,26 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_alerts, diag_is_actionable, diag_scope};
+    use super::{derive_alerts, diag_is_actionable, diag_scope, reads_as_climate};
     use crate::lp::LoadPlan;
     use crate::model::LoadId;
     use crate::status::Severity;
 
     fn plan(id: &str, unmet: f64) -> LoadPlan {
         LoadPlan { id: LoadId(id.into()), on: vec![], ct: vec![], unmet }
+    }
+
+    #[test]
+    fn climate_running_state_is_read_by_domain_not_a_device_type() {
+        // Replaces the old `load_type == Aircon` switch: a `climate.*` running entity
+        // reads as a thermostat; everything else reads on/off. So any device kind
+        // (the wizard's runtime/comfort/threshold/program) maps correctly.
+        assert!(reads_as_climate("climate.ac_0"));
+        assert!(reads_as_climate("climate.living_room"));
+        assert!(!reads_as_climate("binary_sensor.indoor_comfort_hot_water_running"));
+        assert!(!reads_as_climate("switch.pool_pump"));
+        assert!(!reads_as_climate("input_boolean.aircon"));
+        assert!(!reads_as_climate("no_domain"));
     }
 
     #[test]

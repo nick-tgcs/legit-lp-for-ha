@@ -1,7 +1,7 @@
 //! Hard rules → pure data the MILP consumes: per-step masks, initial
 //! min-run/min-off locks, and start budgets. No solver types in here.
 
-use crate::model::{Demand, DemandKind, LoadContract, Window};
+use crate::model::{Demand, DemandKind, LoadContract, ThresholdDir, Window};
 use crate::time::{in_window, round_up_to_steps, Grid};
 
 /// Per-step permissions for one load. Masks PERMIT; the objective prices.
@@ -20,7 +20,7 @@ fn demand_window(d: &Demand) -> Option<Window> {
         DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
             Some(*window)
         }
-        DemandKind::HumidityBelow { window, .. } => *window,
+        DemandKind::Threshold { window, .. } => *window,
     }
 }
 
@@ -66,9 +66,12 @@ pub fn masks(c: &LoadContract, grid: &Grid, price: &[Option<f64>], surplus: &[f6
         None => false,
         Some(ct) => match &ct.kind {
             DemandKind::Runtime { .. } => true,
-            DemandKind::HumidityBelow { max, observed, .. } => {
-                observed.map(|o| o > *max).unwrap_or(false)
-            }
+            DemandKind::Threshold { dir, limit, observed, .. } => observed
+                .map(|o| match dir {
+                    ThresholdDir::Below => o > *limit,
+                    ThresholdDir::Above => o < *limit,
+                })
+                .unwrap_or(false),
             DemandKind::TemperatureBand { min, max, observed, .. } => {
                 observed.map(|o| o < *min || o > *max).unwrap_or(false)
             }

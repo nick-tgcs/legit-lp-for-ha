@@ -710,13 +710,18 @@ struct SolvedLoad {
 }
 
 /// Does an `immediate` load need to be on at the current step?
-/// Trigger above max+hysteresis; once running, hold the need until back at/
-/// below max (asymmetric clear kills band-edge chatter). `None` observed →
-/// no demand signal at all.
+/// Trigger past limit+hysteresis (on the demanded side); once running, hold the
+/// need until back at the limit (asymmetric clear kills band-edge chatter).
+/// `None` observed → no demand signal at all.
 fn immediate_needs_on(kind: &DemandKind, running: bool) -> Option<bool> {
     match kind {
-        DemandKind::HumidityBelow { max, observed, start_hysteresis, .. } => {
-            observed.map(|o| o > max + start_hysteresis || (running && o > *max))
+        DemandKind::Threshold { dir, limit, observed, start_hysteresis, .. } => {
+            observed.map(|o| match dir {
+                // Below: too HIGH triggers; hold until back at/below the limit.
+                ThresholdDir::Below => o > limit + start_hysteresis || (running && o > *limit),
+                // Above: too LOW triggers; hold until back at/above the limit.
+                ThresholdDir::Above => o < limit - start_hysteresis || (running && o < *limit),
+            })
         }
         DemandKind::TemperatureBand { min, max, observed, .. } => {
             observed.map(|o| o < *min || o > *max)
@@ -728,7 +733,7 @@ fn immediate_needs_on(kind: &DemandKind, running: bool) -> Option<bool> {
 fn ct_cap_minutes(d: &Demand) -> Option<u32> {
     match &d.kind {
         DemandKind::Runtime { minutes, .. } => Some(*minutes),
-        DemandKind::HumidityBelow { cap_minutes, .. }
+        DemandKind::Threshold { cap_minutes, .. }
         | DemandKind::TemperatureBand { cap_minutes, .. } => *cap_minutes,
     }
 }
@@ -738,6 +743,6 @@ fn ct_window(d: &Demand) -> Option<Window> {
         DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
             Some(*window)
         }
-        DemandKind::HumidityBelow { window, .. } => *window,
+        DemandKind::Threshold { window, .. } => *window,
     }
 }

@@ -109,7 +109,6 @@ global:
 
 loads:
   - id: hot_water
-    type: hot_water
     planning: runtime
     authority:
       enabled_entity: binary_sensor.hot_water_automated
@@ -138,7 +137,6 @@ loads:
       start_cost_aud: 0.02
 
   - id: dehumidifier
-    type: dehumidifier
     planning: immediate
     authority:
       enabled_entity: binary_sensor.dehumidifier_automated
@@ -175,7 +173,6 @@ loads:
       start_cost_aud: 0.01
 
   - id: aircon
-    type: aircon
     planning: predictive
     authority:
       enabled_entity: binary_sensor.aircon_automated

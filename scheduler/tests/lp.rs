@@ -759,3 +759,90 @@ fn b13_unavailable_device_stays_idle() {
     assert!(b.charge_kw.iter().all(|&c| c < 1e-6), "unplugged EV cannot charge");
     assert!(b.target_unmet > 30.0, "and its target is honestly unmet");
 }
+
+// ---- D3: threshold "at-or-above" (humidifier) + program (run-once block) ----
+
+/// A humidifier: keep humidity AT OR ABOVE a limit (the `above` threshold).
+fn humidifier_contract(observed: Option<f64>) -> LoadContract {
+    let mut c = immediate_contract(observed);
+    c.id = LoadId("humidifier".into());
+    c.can_take = None;
+    c.must_have = Demand {
+        kind: DemandKind::Threshold {
+            dir: ThresholdDir::Above,
+            limit: 40.0,
+            observed,
+            start_hysteresis: 2.0,
+            drop_per_hour: 0.0,
+            drift_per_hour: 0.0,
+            window: None,
+            cap_minutes: None,
+        },
+        max_price: Some(0.50), // generous cap: price never blocks here
+    };
+    c
+}
+
+#[test]
+fn p1_threshold_above_runs_when_observed_is_below_the_limit() {
+    let now = sydney(2026, 6, 10, 12, 0);
+    // observed 35 < limit 40 - hysteresis 2 -> the humidifier needs to run now.
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[humidifier_contract(Some(35.0))]);
+    assert!(out.plans[0].on[0], "humidifier turns on when humidity is below target");
+}
+
+#[test]
+fn p2_threshold_above_idles_when_observed_at_or_above_the_limit() {
+    let now = sydney(2026, 6, 10, 12, 0);
+    // observed 45 > limit 40 -> already satisfied, nothing to do.
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[humidifier_contract(Some(45.0))]);
+    assert!(!out.plans[0].on[0], "humidifier stays off when already above target");
+}
+
+/// A fixed program (washing machine): one contiguous 60-min block (min_run forced
+/// to the length, single start) inside 00:00-12:00 — the engine shape a config
+/// `kind: program` lowers to.
+fn program_contract() -> LoadContract {
+    let mut c = runtime_contract();
+    c.id = LoadId("washing_machine".into());
+    c.can_take = None;
+    c.hard.min_run = std::time::Duration::from_secs(60 * 60); // 4 steps, contiguous
+    c.hard.min_off = std::time::Duration::from_secs(0);
+    c.hard.max_starts_per_day = Some(1);
+    c.must_have = Demand {
+        kind: DemandKind::Runtime {
+            minutes: 60,
+            window: window(0, 0, 12, 0),
+            completed_minutes: 0,
+        },
+        max_price: Some(0.30),
+    };
+    c
+}
+
+#[test]
+fn p3_program_runs_as_one_contiguous_block_at_the_cheapest_start() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    // Cheap valley at steps 16..20 (02:00-03:00), inside the 00:00-12:00 window.
+    let out = planner().plan(&priced_world(now, 0.25, 0.05, 16, 20), &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert_eq!(runs.len(), 1, "a program runs exactly once (one contiguous run)");
+    let (s, e) = runs[0];
+    assert_eq!(e - s, 4, "the run is exactly the 60-min block — not fragmented");
+    assert_eq!((s, e), (16, 20), "and is placed in the cheapest contiguous slot");
+}
+
+#[test]
+fn p4_program_is_all_or_nothing_under_the_price_cap() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    // Base above the cap, with only SCATTERED single cheap steps — no 4-in-a-row
+    // fits under the cap, so the whole program waits (never runs a partial block).
+    let mut w = flat_world(now, STEPS, 0.50);
+    for &t in &[2usize, 8, 14, 20] {
+        w.import[t] = Some(0.05);
+    }
+    let out = planner().plan(&w, &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert!(runs.is_empty(), "no contiguous block fits under the cap -> program waits");
+    assert!(out.plans[0].unmet > 0.0, "the unmet runtime is reported honestly");
+}

@@ -591,3 +591,76 @@ async fn c16_unreadable_baseline_does_not_become_free_pv_headroom() {
     );
     assert!(!report.is_solver_failure(), "an unreadable baseline still yields a valid plan");
 }
+
+#[tokio::test]
+async fn c_new_kinds_resolve_through_the_cycle_threshold_above_and_program() {
+    // Cover the new config resolution arms end-to-end: a `threshold` (at-or-above)
+    // load and a `program` (run-once block) load resolve through cycle.run, are
+    // planned, and never panic. The program forces a contiguous single block.
+    use config::{DemandCfg, ThresholdDirCfg, TimeRef, ValueRef, WindowCfg};
+    let mut reg = registry();
+
+    // dehumidifier -> a humidifier-style threshold kept AT/ABOVE 45%.
+    let deh = reg.loads.iter_mut().find(|l| l.id == "dehumidifier").unwrap();
+    deh.must_have = DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Above,
+        value: ValueRef::Plain(45.0),
+        target_value: None,
+        start_hysteresis: Some(ValueRef::Plain(2.0)),
+        window: None,
+        max_minutes: None,
+        max_price: None,
+    };
+    deh.can_take = None;
+
+    // hot_water -> a 1-hour fixed program inside 00:00–06:00.
+    let hw = reg.loads.iter_mut().find(|l| l.id == "hot_water").unwrap();
+    hw.must_have = DemandCfg::Program {
+        length_hours: None,
+        length_minutes: Some(ValueRef::Plain(60.0)),
+        window: WindowCfg {
+            start: TimeRef::Literal("00:00".into()),
+            end: TimeRef::Literal("06:00".into()),
+        },
+        max_price: None,
+    };
+    hw.can_take = None;
+
+    let mut ha = canned_ha();
+    // Observed humidity 30% is below the 45% target → the "above" threshold needs ON.
+    set_state(&mut ha, "sensor.humidity_average_inside", "30");
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on");
+    set_state(&mut ha, "binary_sensor.hot_water_automated", "on");
+
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    assert!(!report.is_solver_failure(), "new kinds solve cleanly");
+    // Both new-kind loads resolved through the cycle and were planned (the arms ran).
+    assert!(report.loads.iter().any(|l| l.id == "dehumidifier"), "threshold load present");
+    let hw = report.loads.iter().find(|l| l.id == "hot_water").expect("program load present");
+    // The program forms a full contiguous 60-min block (4×15-min steps) for the
+    // current day — proving the min-run-forced contiguity. (A short tail can appear
+    // only at the 24h horizon edge, where the next day's window is clipped; it is an
+    // MPC artifact that never executes, since only step 0 is actuated.)
+    let mut best = 0;
+    let mut t = 0;
+    while t < hw.on.len() {
+        if hw.on[t] {
+            let s = t;
+            while t < hw.on.len() && hw.on[t] {
+                t += 1;
+            }
+            best = best.max(t - s);
+        } else {
+            t += 1;
+        }
+    }
+    assert!(best >= 4, "the program scheduled its full 60-min block, longest run {best} steps");
+}

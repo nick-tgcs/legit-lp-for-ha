@@ -324,6 +324,68 @@ impl HaApi for HaClient {
     }
 }
 
+/// One HA entity surfaced to the panel's entity picker (the wizard "Connect"
+/// step maps a role to one of these). Serialized straight to the `/api/entities`
+/// response.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct EntityCatalogItem {
+    pub id: String,
+    pub domain: String,
+    /// `friendly_name`, falling back to the entity id.
+    pub name: String,
+    pub state: String,
+}
+
+/// The domain part of an entity id (`switch.pool_pump` -> `switch`); "" if none.
+pub fn domain_of(entity_id: &str) -> &str {
+    entity_id.split_once('.').map(|(d, _)| d).unwrap_or("")
+}
+
+/// Parse an HA `/states` array into catalog items (pure; unit-tested). Entries
+/// without an `entity_id` are skipped; a missing `friendly_name` falls back to id.
+pub fn catalog_from_states(states: &Value) -> Vec<EntityCatalogItem> {
+    states
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let id = e.get("entity_id")?.as_str()?.to_string();
+                    let domain = domain_of(&id).to_string();
+                    let name = e
+                        .get("attributes")
+                        .and_then(|a| a.get("friendly_name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let state = e.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    Some(EntityCatalogItem { id, domain, name, state })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Keep only entities whose domain is in `domains` (empty = keep all), sorted by
+/// id for a stable picker. Pure; unit-tested.
+pub fn filter_by_domains(
+    mut items: Vec<EntityCatalogItem>,
+    domains: &[String],
+) -> Vec<EntityCatalogItem> {
+    if !domains.is_empty() {
+        items.retain(|i| domains.iter().any(|d| d == &i.domain));
+    }
+    items.sort_by(|a, b| a.id.cmp(&b.id));
+    items
+}
+
+impl HaClient {
+    /// The live HA entity catalog for the panel's entity picker. One GET of
+    /// `/states`; parsing is the pure `catalog_from_states`.
+    pub async fn list_states(&self) -> Result<Vec<EntityCatalogItem>, SchedulerError> {
+        Ok(catalog_from_states(&self.get_json("/states").await?))
+    }
+}
+
 /// Test double: canned states/history, records every service call.
 #[derive(Default)]
 pub struct RecordingHa {
@@ -439,6 +501,36 @@ mod tests {
                 let _ = s.as_f64(); // numeric or not — must simply not panic
             }
         }
+    }
+
+    #[test]
+    fn entity_catalog_parses_filters_and_sorts() {
+        // The /states endpoint is an ARRAY of {entity_id, state, attributes}.
+        let states = serde_json::json!([
+            {"entity_id": "switch.pool_pump", "state": "off",
+             "attributes": {"friendly_name": "Pool Pump"}},
+            {"entity_id": "sensor.humidity", "state": "61.0", "attributes": {}},
+            {"entity_id": "climate.living_room", "state": "cool",
+             "attributes": {"friendly_name": "Living Room AC"}},
+            {"entity_id": "light.kitchen", "state": "on", "attributes": {}},
+            {"state": "orphan-with-no-id"}
+        ]);
+        let all = catalog_from_states(&states);
+        assert_eq!(all.len(), 4, "the id-less entry is skipped");
+        // friendly_name used when present; falls back to the id otherwise.
+        let pump = all.iter().find(|e| e.id == "switch.pool_pump").unwrap();
+        assert_eq!((pump.domain.as_str(), pump.name.as_str()), ("switch", "Pool Pump"));
+        let hum = all.iter().find(|e| e.id == "sensor.humidity").unwrap();
+        assert_eq!(hum.name, "sensor.humidity", "no friendly_name -> id");
+
+        // Domain filtering keeps only the requested domains, sorted by id.
+        let picked = filter_by_domains(all.clone(), &["switch".into(), "climate".into()]);
+        let ids: Vec<&str> = picked.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["climate.living_room", "switch.pool_pump"]);
+        // Empty filter keeps everything.
+        assert_eq!(filter_by_domains(all, &[]).len(), 4);
+        assert_eq!(domain_of("sensor.x"), "sensor");
+        assert_eq!(domain_of("no_domain"), "");
     }
 
     #[test]

@@ -12,13 +12,6 @@ use chrono_tz::Tz;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LoadId(pub String);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadType {
-    HotWater,
-    Dehumidifier,
-    Aircon,
-}
-
 /// How the LP models this load (one engine; not a routing choice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Planning {
@@ -69,16 +62,28 @@ pub struct Demand {
     pub max_price: Option<f64>,
 }
 
-/// One enum covers all three load types — the planner branches on data, not brand.
+/// Which side of its `limit` a threshold load keeps the observed reading on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdDir {
+    /// Keep at/below the limit (dehumidifier, fridge-style cooling).
+    Below,
+    /// Keep at/above the limit (humidifier).
+    Above,
+}
+
+/// One enum covers every load kind — the planner branches on data, not brand.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DemandKind {
-    /// hot_water — accumulate runtime within a window.
+    /// Deferrable / fixed-program — accumulate `minutes` of runtime within a
+    /// window. A `program` (run-once contiguous block) is this with `min_run`
+    /// forced to the block length and a single allowed start.
     Runtime { minutes: u32, window: Window, completed_minutes: u32 },
-    /// dehumidifier — keep observed %RH at/below `max`.
-    /// `drop_per_hour`/`drift_per_hour` drive the trajectory for `predictive`;
-    /// `immediate` uses only `max`/`observed`/`start_hysteresis`.
-    HumidityBelow {
-        max: f64,
+    /// Keep an observed reading on one side of `limit`: `Below` (dehumidifier —
+    /// at/below) or `Above` (humidifier — at/above). `immediate` uses only
+    /// `dir`/`limit`/`observed`/`start_hysteresis`; the rates are kept for parity.
+    Threshold {
+        dir: ThresholdDir,
+        limit: f64,
         observed: Option<f64>,
         start_hysteresis: f64,
         drop_per_hour: f64,
@@ -126,7 +131,6 @@ pub struct Observation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadContract {
     pub id: LoadId,
-    pub load_type: LoadType,
     pub planning: Planning,
     /// Rated draw (kW): site balance + cost objective.
     pub power_kw: f64,
