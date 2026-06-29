@@ -1,0 +1,244 @@
+# Beckton LP scheduler registry — site configuration (NOT the bundled example).
+#
+# Source of truth, version-controlled here. Deployed to the add-on's private
+# config dir as /config/registry-storage.yaml (inside the add-on that is
+# /addon_configs/67dae2bb_legit_lp_scheduler/), which is reachable over the
+# home-assistant-ssh path — so we WRITE this file directly, not via the
+# "seed the bundled example and re-point a fresh path" hack.
+#
+# Every entity below is a REAL Beckton entity (verified live 2026-06-21). Values
+# that are user controls are entity-refs so they track the dashboard sliders.
+#
+# Cutover is still gated: dry_run + modes Scheduled keep this inert. Nothing here
+# controls a device until you set dry_run:false and the modes to Optimiser.
+
+global:
+  enabled_entity: input_boolean.grid_power_use_lp_scheduler
+  # No preview_entity: the in-panel "Preview" checkbox is the preview path. (A
+  # persistent HA boolean is optional; add the helper AND this line together if you
+  # want to drive preview from HA — never reference a helper that doesn't exist.)
+  pricing:
+    import_entity: sensor.current_grid_cost
+    feedin_entity: sensor.amber_electric_feedin
+    forecast:
+      entity: sensor.beckton_general_forecast
+      attribute: forecasts
+      fields:
+        start: start_time
+        end: end_time
+        import_per_kwh: per_kwh
+    feedin_forecast:
+      entity: sensor.beckton_feed_in_forecast
+      attribute: forecasts
+      fields:
+        start: start_time
+        end: end_time
+        import_per_kwh: per_kwh   # for a feed-in forecast THIS value is the export $/kWh
+  power:
+    consumption_entity: sensor.current_sonnen_consumption
+    pv_entity: sensor.current_sonnen_production
+    pv_forecast:
+      today_entity: sensor.energy_production_today
+      tomorrow_entity: sensor.energy_production_tomorrow
+      now_entity: sensor.power_production_now
+    # Assumed always-on house baseload (kW) the plan subtracts before placing
+    # managed loads. Entity-ref-able now — point it at a real baseload sensor to
+    # track it live; 0.8 is a fixed estimate (your choice to keep as a literal).
+    baseline_kw: 0.8
+  # Battery block — already wired to your real Sonnen entities; kept verbatim from
+  # what's deployed, with ONE addition per cabinet: a peak-ready target goal (see
+  # the `goals:` note). The two cabinets are per-direction controllable in
+  # Optimiser mode; advisory (planned + reported) while modes are Scheduled.
+  storage:
+    - id: sonnen01
+      soc_entities: [sensor.usoc_sonnen01]
+      capacity_kwh: { entity: sensor.sonnen_01_capacity_kwh }
+      max_charge_kw: 4.0
+      max_discharge_kw: 4.0
+      round_trip_efficiency: { entity: sensor.sonnen_round_trip_efficiency }
+      reserve_soc_pct: { entity: input_number.input_number_sonnen_allow_export_above }
+      max_soc_pct: 100
+      cycle_cost_aud_per_kwh: { entity: input_number.input_number_sonnen_degradation_cost_per_kwh }
+      allow_grid_charge: { entity: input_boolean.grid_power_auto_manage_allow_charge }
+      # WHY THE BATTERY NEVER HIT 100%: the example had NO goal, so the LP only
+      # self-arbitrages and never proactively fills before peak. This wires your
+      # existing "Target SOC before peak" slider (live 100%) as a real LP target,
+      # ready by the peak start. Soft goal (filled as cheaply as possible, never
+      # forced). Bites only after cutover to Optimiser.
+      # ready_by is now a LIVE entity-ref (engine resolves TimeRef each cycle): it
+      # tracks your peak-start input_datetime, so re-timing peak just moves the
+      # deadline — no add-on change, nothing hardcoded.
+      goals:
+        - kind: target
+          soc_pct: { entity: input_number.input_number_sonnen_use_grid_when_cheap_below }
+          ready_by: { entity: input_datetime.peak_power_start_time }
+      charge:
+        authority: { enabled_entity: binary_sensor.battery_charge_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen01_grid_charge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_battery_charge_price_kwh
+          # active = the price-cap slider's MAX (0.55), not a 5.0 sentinel: HA's
+          # input_number.set_value REJECTS out-of-range values (400), and
+          # input_number_grid_power_battery_charge_price_kwh has max 0.55. 0.55 means
+          # "let charge.yaml charge whenever price <= $0.55/kWh" — covers every cheap
+          # window the LP would pick. idle = -5.0 (well below any price) = "never".
+          active: { value: 0.55 }
+          idle: { value: -5.0 }
+      discharge:
+        authority: { enabled_entity: binary_sensor.battery_export_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen01_grid_discharge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_do_export_price_kwh
+          active: { value: 0.0 }
+          idle: { value: -999.0 }
+    - id: sonnen02
+      soc_entities: [sensor.usoc_sonnen02]
+      capacity_kwh: { entity: sensor.sonnen_02_capacity_kwh }
+      max_charge_kw: 4.0
+      max_discharge_kw: 4.0
+      round_trip_efficiency: { entity: sensor.sonnen_round_trip_efficiency }
+      reserve_soc_pct: { entity: input_number.input_number_sonnen_allow_export_above }
+      max_soc_pct: 100
+      cycle_cost_aud_per_kwh: { entity: input_number.input_number_sonnen_degradation_cost_per_kwh }
+      allow_grid_charge: { entity: input_boolean.grid_power_auto_manage_allow_charge }
+      goals:
+        - kind: target
+          soc_pct: { entity: input_number.input_number_sonnen_use_grid_when_cheap_below }
+          ready_by: { entity: input_datetime.peak_power_start_time }
+      charge:
+        authority: { enabled_entity: binary_sensor.battery_charge_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen02_grid_charge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_battery_charge_price_kwh
+          # active = the price-cap slider's MAX (0.55), not a 5.0 sentinel: HA's
+          # input_number.set_value REJECTS out-of-range values (400), and
+          # input_number_grid_power_battery_charge_price_kwh has max 0.55. 0.55 means
+          # "let charge.yaml charge whenever price <= $0.55/kWh" — covers every cheap
+          # window the LP would pick. idle = -5.0 (well below any price) = "never".
+          active: { value: 0.55 }
+          idle: { value: -5.0 }
+      discharge:
+        authority: { enabled_entity: binary_sensor.battery_export_automated }
+        set_rate: { service: input_number.set_value, target: input_number.input_number_sonnen02_grid_discharge_rate }
+        set_threshold:
+          service: input_number.set_value
+          target: input_number.input_number_grid_power_do_export_price_kwh
+          active: { value: 0.0 }
+          idle: { value: -999.0 }
+  planning:
+    grid_minutes: 15
+    horizon_hours: 24
+
+loads:
+  - id: hot_water
+    type: hot_water
+    planning: runtime
+    authority:
+      enabled_entity: binary_sensor.hot_water_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.hot_water }
+      stop: { service: input_boolean.turn_off, target: input_boolean.hot_water }
+    state:
+      running_entity: binary_sensor.indoor_comfort_hot_water_running
+    capability:
+      power_kw: 3.6
+    hard_rules:
+      # Heat-pump runs a solid block, not short-cycle — the LP enforces this as a
+      # hard min-up constraint. Now a LIVE SLIDER (the engine resolves min_run_minutes
+      # as an entity-ref each cycle). Set the slider to your wanted block length, e.g.
+      # 180 = 3 h; unset = 0 = no minimum (fail-safe). NO `initial:` on the helper so
+      # your setting survives restarts/reloads (see input_numbers.yaml).
+      min_run_minutes: { entity: input_number.input_number_hot_water_min_run_minutes }
+      min_off_minutes: 30
+      max_starts_per_day: 3
+    must_have:
+      kind: runtime
+      # HOW LONG it runs = your "Min run" slider — there is NO separate "runtime"
+      # control on the dashboard. The same entity drives the min-run hard rule above,
+      # so the LP runs hot water for exactly that one block at the cheapest price in
+      # the window. (A prior pass wired a stray `input_number_hot_water_runtime`=6 h
+      # into amount_hours by mistake — THAT was the bogus "12 h required"; it is gone.)
+      amount_minutes: { entity: input_number.input_number_hot_water_min_run_minutes }
+      # WHEN it may run = your dashboard "Run from" / "Run until" sliders, live.
+      window:
+        start: { entity: input_datetime.hot_water_window_start }
+        end: { entity: input_datetime.hot_water_window_end }
+      # Price ceiling = your dashboard "Max grid price" slider, live.
+      max_price: { entity: input_number.input_number_grid_power_use_import_price_kwh }
+    preferences:
+      start_cost_aud: 0.02
+
+  - id: dehumidifier
+    type: dehumidifier
+    planning: immediate
+    authority:
+      enabled_entity: binary_sensor.dehumidifier_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.dehumidifier }
+      stop: { service: input_boolean.turn_off, target: input_boolean.dehumidifier }
+    state:
+      running_entity: binary_sensor.indoor_comfort_dehumidifiers_running
+      observed_entity: sensor.humidity_average_inside
+    capability:
+      power_kw: 0.3
+    hard_rules:
+      min_run_minutes: 30
+      min_off_minutes: 15
+      windows:
+        - start: { entity: input_datetime.input_datetime_indoor_comfort_dehumidifier_window_start }
+          end: { entity: input_datetime.input_datetime_indoor_comfort_dehumidifier_window_end }
+    must_have:
+      kind: humidity_below
+      max_percent: { entity: input_number.input_number_indoor_comfort_humidity_target_percent }
+      start_hysteresis: { entity: input_number.input_number_indoor_comfort_humidity_start_hysteresis_percent }
+      max_price: { entity: input_number.input_number_indoor_comfort_dehumidifier_max_price_kwh }
+    can_take:
+      kind: humidity_below
+      target_percent: { value: 55 }
+      max_minutes: 120
+      window: { start: "09:00", end: "17:00" }
+      max_price: { value: 0.10 }
+    preferences:
+      start_cost_aud: 0.01
+
+  - id: aircon
+    type: aircon
+    planning: predictive
+    authority:
+      enabled_entity: binary_sensor.aircon_automated
+    control:
+      start: { service: input_boolean.turn_on, target: input_boolean.aircon }
+      stop: { service: input_boolean.turn_off, target: input_boolean.aircon }
+    state:
+      running_entity: climate.ac_0
+      observed_entity: sensor.temp_average_inside
+    capability:
+      power_kw: 2.5
+      change_per_hour: 1.5
+      drift_per_hour: 1.0
+      ambient_entity: sensor.temp_outside
+    hard_rules:
+      min_run_minutes: 20
+      min_off_minutes: 10
+    must_have:
+      kind: temperature_band
+      target_c: { entity: input_number.input_number_climate_aircon_target_temp }
+      # Band = your dashboard "Temp hysteresis" slider, live (was a hardcoded 3).
+      band_c: { entity: input_number.input_number_climate_aircon_temp_hysteresis_c }
+      # Window = your dashboard "Run from" / "Run until" sliders, live (was 07:00/22:00).
+      window:
+        start: { entity: input_datetime.aircon_window_start }
+        end: { entity: input_datetime.aircon_window_end }
+      max_price: { entity: input_number.input_number_climate_aircon_run_below_price_kwh }
+    can_take:
+      kind: temperature_band
+      target_c: { entity: input_number.input_number_climate_aircon_target_temp }
+      band_c: 1
+      max_minutes: 90
+      window: { start: "13:00", end: "16:00" }
+      max_price: { value: 0.05 }
+    preferences:
+      start_cost_aud: 0.05
