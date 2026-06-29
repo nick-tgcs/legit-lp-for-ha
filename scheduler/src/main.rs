@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // Arc so the solve loop and the panel's entity-catalog endpoint share one client.
     let ha = Arc::new(HaClient::new(base, token));
 
-    let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_or_seed(
+    let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_registry(
         std::path::Path::new(&loads_path),
     )?)?;
     let planner = LpPlanner {

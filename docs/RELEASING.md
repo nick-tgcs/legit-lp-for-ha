@@ -136,5 +136,7 @@ release is a deliberate one-command step (`make release`) on top.
   anonymously.)
 - Then add `https://github.com/nick-tgcs/legit-lp-for-ha` as a repository in
   HA (Settings → Add-ons → Store → ⋮ → Repositories) and install
-  **Legit LP Scheduler**. It starts in `dry_run: true` and self-seeds its
-  registry config on first boot.
+  **Legit LP Scheduler**. It starts in `dry_run: true`. The engine does NOT
+  ship or seed a placeholder registry — write this site's registry to the
+  add-on config dir (`/config/legit_lp.yaml`) before starting, or the scheduler
+  fails loud (no-hardcoding rule; see `docs/lp-no-hardcoding.md`).

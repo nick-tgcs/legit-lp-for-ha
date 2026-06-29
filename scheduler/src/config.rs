@@ -473,27 +473,20 @@ pub fn hours_to_minutes(hours: f64) -> u32 {
     (hours * 60.0).ceil().max(0.0) as u32
 }
 
-/// The bundled example registry, seeded on first boot: the add-on config dir
-/// starts empty, and crashing on a missing file would make install require a
-/// manual file drop before the panel even comes up. The example is this site's
-/// real contract surface and boots observe-only (authorities/global gate it).
-const SEED_REGISTRY: &str = include_str!("../../addon/example.yaml");
-
-/// Read the registry, writing the bundled example first if none exists yet.
-/// Never overwrites an existing file.
-pub fn load_or_seed(path: &std::path::Path) -> Result<String, SchedulerError> {
+/// Read the site registry, or FAIL LOUD if it is missing. The engine never ships
+/// or seeds a bundled example: booting on an invented config is exactly how prod
+/// once silently ran a placeholder registry. The real site config is written to the
+/// add-on's config dir directly (deploy step); if it is absent the scheduler refuses
+/// to run rather than fabricate one — consistent with the no-hardcoding rule
+/// (`docs/lp-no-hardcoding.md`).
+pub fn load_registry(path: &std::path::Path) -> Result<String, SchedulerError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(path, SEED_REGISTRY).map_err(|e| {
-                SchedulerError::Config(format!("seed registry {}: {e}", path.display()))
-            })?;
-            tracing::warn!(
-                "registry {} was missing; seeded the bundled example — edit it for this site",
-                path.display()
-            );
-            Ok(SEED_REGISTRY.to_string())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(SchedulerError::Config(format!(
+            "registry {} not found — write this site's registry before starting (the engine \
+             never seeds a placeholder; see docs/lp-no-hardcoding.md)",
+            path.display()
+        ))),
         Err(e) => Err(SchedulerError::Config(format!("read registry {}: {e}", path.display()))),
     }
 }
@@ -736,39 +729,35 @@ fn validate_demand_windows(d: &DemandCfg) -> Result<(), SchedulerError> {
 mod tests {
     use super::*;
 
-    fn example_yaml() -> String {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
-        std::fs::read_to_string(path).expect("read addon/example.yaml")
+    fn test_registry() -> String {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
+        std::fs::read_to_string(path).expect("read tests/fixtures/registry.yaml")
     }
 
     #[test]
-    fn load_or_seed_missing_file_writes_the_bundled_example() {
+    fn load_registry_missing_file_fails_loud_without_seeding() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legit_lp.yaml");
-        let yaml = load_or_seed(&path).expect("seeds on first boot");
-        assert!(path.exists(), "registry file was created");
-        parse(&yaml).expect("seeded registry parses + validates");
-        assert_eq!(yaml, std::fs::read_to_string(&path).unwrap());
+        let err = load_registry(&path).expect_err("a missing registry must fail, not seed");
+        assert!(!path.exists(), "nothing is written — the engine never fabricates a config");
+        match err {
+            SchedulerError::Config(m) => assert!(m.contains("not found"), "actionable error: {m}"),
+            other => panic!("expected a Config error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn load_or_seed_existing_file_is_returned_untouched() {
+    fn load_registry_existing_file_is_returned_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legit_lp.yaml");
         std::fs::write(&path, "user: edited").unwrap();
-        let yaml = load_or_seed(&path).expect("reads existing");
-        assert_eq!(yaml, "user: edited", "never overwrites a user registry");
+        let yaml = load_registry(&path).expect("reads existing");
+        assert_eq!(yaml, "user: edited", "never rewrites a user registry");
     }
 
     #[test]
-    fn load_or_seed_unwritable_dir_errors_without_panic() {
-        let path = std::path::Path::new("/nonexistent-dir/legit_lp.yaml");
-        assert!(load_or_seed(path).is_err());
-    }
-
-    #[test]
-    fn example_registry_round_trips_and_validates() {
-        let cfg = parse(&example_yaml()).expect("example.yaml parses + validates");
+    fn test_registry_round_trips_and_validates() {
+        let cfg = parse(&test_registry()).expect("the test registry parses + validates");
         assert_eq!(cfg.loads.len(), 3);
         let ids: Vec<&str> = cfg.loads.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["hot_water", "dehumidifier", "aircon"]);
@@ -968,7 +957,7 @@ loads: []
         // (start/stop services, can_take, preferences, per-direction battery control)
         // must survive untouched. Plain vs Literal vs Entity value forms are distinct
         // variants and must each be preserved.
-        let cfg = parse(&example_yaml()).expect("example parses");
+        let cfg = parse(&test_registry()).expect("example parses");
         let yaml = serialize_registry(&cfg).expect("serializes");
         let round = parse(&yaml).expect("re-parses");
         assert_eq!(cfg, round, "full struct survived a serialize/parse round-trip");
@@ -992,7 +981,7 @@ loads: []
     fn serialize_validates_before_emitting() {
         // A save must never persist a config the loader would reject. Mutate a parsed
         // registry to something invalid and confirm serialize refuses it.
-        let mut cfg = parse(&example_yaml()).expect("example parses");
+        let mut cfg = parse(&test_registry()).expect("example parses");
         cfg.global.planning.grid_minutes = 7; // does not divide 60
         assert!(
             matches!(serialize_registry(&cfg), Err(SchedulerError::Config(m)) if m.contains("divide 60")),
@@ -1002,7 +991,7 @@ loads: []
 
     #[test]
     fn save_registry_writes_atomically_and_reloads_equal() {
-        let cfg = parse(&example_yaml()).expect("example parses");
+        let cfg = parse(&test_registry()).expect("example parses");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legit_lp.yaml");
         save_registry(&path, &cfg).expect("saves");
@@ -1100,7 +1089,7 @@ loads:
     }
 
     fn mutate_example(from: &str, to: &str) -> Result<RegistryConfig, SchedulerError> {
-        let y = example_yaml();
+        let y = test_registry();
         assert!(y.contains(from), "fixture must contain '{from}'");
         parse(&y.replacen(from, to, 1))
     }

@@ -450,13 +450,13 @@ function loadView(l,r){
 function battView(b,r){
  const R=b.reasoning||{}, M=R.metrics||[], I=R.inputs||[];
  const ch=(b.charge_kw&&b.charge_kw[0])||0, dis=(b.discharge_kw&&b.discharge_kw[0])||0;
- // Advisory is tagged by the ACTIVE direction's authority — execute_storage drives
- // charge and discharge independently, so a charge-only cabinet's planned discharge
- // is advisory even though the device has authority on the other direction.
- const dirAuth=b.action==='charging'?!!b.charge_authority
-  :b.action==='discharging'?!!b.discharge_authority
-  :(!!b.charge_authority||!!b.discharge_authority); // idle: any executable direction
- const advisory=!dirAuth||r.dry_run;
+ // Tag by whether the SHOWN action is actually committed this cycle (develop #45/#46):
+ // the card plots the advisory (rated-power) plan, so a charge can appear with
+ // charge_authority=true yet write 0 W because its arbitrage leans on an unauthorised
+ // discharge the executor skips. `action_actuated` folds in per-direction authority AND
+ // the gated command, so it — not raw authority — decides live vs advisory.
+ const live=!!b.action_actuated;
+ const advisory=!live||r.dry_run;
  const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
  let status,tone,headline;
  if(b.action==='discharging'){status='Active';tone='out';headline=`Discharging ${dis.toFixed(1)} kW`;}
