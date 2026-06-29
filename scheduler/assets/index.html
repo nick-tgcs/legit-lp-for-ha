@@ -935,7 +935,10 @@ function wirePicker(box){
 function buildPayload(){
  const d=wz.d;
  if(!d.name) throw new Error('Give the device a name.');
- const id=(wz.mode==='edit')?wz.base.id:slug(d.name);
+ // Derive the id from the (editable) name even on edit, so a rename actually persists. doSave
+ // PUTs to the ORIGINAL id in the URL, so the backend replaces that device with this new id
+ // (its cross-namespace 409 guard rejects a collision). Unchanged name → same slug → no rename.
+ const id=slug(d.name);
  // No-hardcoding on edit: the wizard surfaces a simplified view (literal hours, a plain
  // min-run number, a HH:MM window, a yes/no grid-charge toggle), but a live registry binds
  // these to HA entities (sliders/booleans/datetimes). Overwriting them with the simplified
@@ -999,14 +1002,15 @@ function buildPayload(){
  // Window times are TimeRefs: prod binds them to input_datetime sliders. Keep an entity-backed
  // base window on edit (the wizard shows only HH:MM); use the literal HH:MM otherwise.
  const w={start:keepRef(bw.start,hhmmOut(d.winStart)),end:keepRef(bw.end,hhmmOut(d.winEnd))}, cap=vrOut(d.cap);
- // The run-length field is always shown/edited in HOURS. Keep the minutes KEY only when it's an
- // entity-ref we can't convert (hot_water's slider, bound as amount_minutes) so a slider edit
- // never reinterprets minutes as hours. A literal-minutes load is loaded as hours (÷60 in
- // draftFromLoad) and re-emitted as amount_hours, so "90 min" never shows as "90 h".
- const amtMinutes=wz.mode==='edit'&&isRef(bmh.amount_minutes);
- const lenMinutes=wz.mode==='edit'&&isRef(bmh.length_minutes);
- if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',window:w}; const amt=req(vrOut(d.hours),'run-time'); if(amtMinutes)cfg.must_have.amount_minutes=keepRef(bmh.amount_minutes,amt); else cfg.must_have.amount_hours=keepRef(bmh.amount_hours,amt); if(cap!=null)cfg.must_have.max_price=cap; }
- else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMinutes)cfg.must_have.length_minutes=keepRef(bmh.length_minutes,len); else cfg.must_have.length_hours=keepRef(bmh.length_hours,len); if(cap!=null)cfg.must_have.max_price=cap; }
+ // The run-length toggle (d.hours) expresses entity-vs-literal directly, so emit vrOut(d.hours)
+ // as-is — switching Entity→Number genuinely replaces an entity-backed length. Keep the MINUTES
+ // unit only when the value is STILL an entity AND base used minutes (hot_water's slider); a
+ // literal is entered in hours (the field's unit), and a literal-minutes load was loaded as hours
+ // (÷60 in draftFromLoad) so "90 min" never shows as "90 h".
+ const amtMin=d.hours.mode==='entity'&&isRef(bmh.amount_minutes);
+ const lenMin=d.hours.mode==='entity'&&isRef(bmh.length_minutes);
+ if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',window:w}; const amt=req(vrOut(d.hours),'run-time'); if(amtMin)cfg.must_have.amount_minutes=amt; else cfg.must_have.amount_hours=amt; if(cap!=null)cfg.must_have.max_price=cap; }
+ else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMin)cfg.must_have.length_minutes=len; else cfg.must_have.length_hours=len; if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='comfort'){ cfg.must_have={kind:'temperature_band',target_c:req(vrOut(d.target),'target'),band_c:req(vrOut(d.band),'band'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='threshold'){ cfg.must_have={kind:'threshold',direction:d.thDir,value:req(vrOut(d.thValue),'target value')}; const h=vrOut(d.hyst); if(h!=null)cfg.must_have.start_hysteresis=h; cfg.must_have.window=w; if(cap!=null)cfg.must_have.max_price=cap; }
  // can_take is a hidden optional demand of the ORIGINAL kind. Object.assign carried base.can_take
