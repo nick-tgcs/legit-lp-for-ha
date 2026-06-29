@@ -757,6 +757,7 @@ function freshDraft(){ return {name:'',control:'',running:'',authority:'',observ
  capacity:{mode:'literal',lit:'10',ent:''},maxCharge:{mode:'literal',lit:'4',ent:''},maxDischarge:{mode:'literal',lit:'4',ent:''},eff:{mode:'literal',lit:'0.9',ent:''},reserve:{mode:'literal',lit:'10',ent:''},maxSoc:{mode:'literal',lit:'100',ent:''},gridCharge:true,cycleCost:{mode:'literal',lit:'0.001',ent:''} }; }
 function draftFromLoad(l){ const d=freshDraft(); const mh=l.must_have||{}; d.name=l.id; d.control=(l.control&&l.control.start&&l.control.start.target)||''; d.running=(l.state&&l.state.running_entity)||''; d.authority=(l.authority&&l.authority.enabled_entity)||''; d.observed=(l.state&&l.state.observed_entity)||''; d.power=vrFrom(l.capability&&l.capability.power_kw);
  if(mh.amount_hours!=null||mh.length_hours!=null)d.hours=vrFrom(mh.amount_hours!=null?mh.amount_hours:mh.length_hours);
+ else if(mh.amount_minutes!=null||mh.length_minutes!=null)d.hours=vrFrom(mh.amount_minutes!=null?mh.amount_minutes:mh.length_minutes);
  if(mh.window){d.winStart=tref(mh.window.start);d.winEnd=tref(mh.window.end);}
  d.cap=vrFrom(mh.max_price); d.target=vrFrom(mh.target_c); d.band=vrFrom(mh.band_c);
  if(mh.kind==='threshold'){d.thDir=mh.direction||'below';d.thValue=vrFrom(mh.value);d.hyst=vrFrom(mh.start_hysteresis);}
@@ -929,6 +930,14 @@ function buildPayload(){
  const d=wz.d;
  if(!d.name) throw new Error('Give the device a name.');
  const id=(wz.mode==='edit')?wz.base.id:slug(d.name);
+ // No-hardcoding on edit: the wizard surfaces a simplified view (literal hours, a plain
+ // min-run number, a HH:MM window, a yes/no grid-charge toggle), but a live registry binds
+ // these to HA entities (sliders/booleans/datetimes). Overwriting them with the simplified
+ // value would silently freeze the live binding. So when EDITING, keep base's value for any
+ // field that is an entity-ref (or otherwise an object the wizard can't represent), and only
+ // write the simplified literal when base was itself a literal (or we're ADDING a device).
+ const isRef=v=>v!=null&&typeof v==='object';
+ const keepRef=(b,lit)=>(wz.mode==='edit'&&isRef(b))?b:lit;
  if(wz.kind==='battery'){
   const soc=d.soc.split(',').map(s=>s.trim()).filter(Boolean);
   if(!soc.length) throw new Error('A battery needs at least one state-of-charge sensor.');
@@ -936,7 +945,9 @@ function buildPayload(){
    capacity_kwh:req(vrOut(d.capacity),'usable capacity'), max_charge_kw:req(vrOut(d.maxCharge),'max charge'),
    max_discharge_kw:numOr(vrOut(d.maxDischarge),0), round_trip_efficiency:req(vrOut(d.eff),'efficiency'),
    reserve_soc_pct:req(vrOut(d.reserve),'reserve'), max_soc_pct:req(vrOut(d.maxSoc),'usable ceiling'),
-   allow_grid_charge:d.gridCharge, cycle_cost_aud_per_kwh:req(vrOut(d.cycleCost),'wear cost') });
+   // allow_grid_charge is a BoolRef: prod binds it to an input_boolean. The toggle can't
+   // express an entity, so on edit keep the base ref — never clobber it with a literal true.
+   allow_grid_charge:keepRef(wz.base&&wz.base.allow_grid_charge,d.gridCharge), cycle_cost_aud_per_kwh:req(vrOut(d.cycleCost),'wear cost') });
   return {type:'storage',config:cfg};
  }
  if(!d.control) throw new Error('Choose the switch to control.');
@@ -944,20 +955,32 @@ function buildPayload(){
  if((wz.kind==='comfort'||wz.kind==='threshold')&&!d.observed) throw new Error('Choose the sensor to watch.');
  const dom=d.control.split('.')[0]||'switch';
  const start=dom==='climate'?'climate.turn_on':dom+'.turn_on', stop=dom==='climate'?'climate.turn_off':dom+'.turn_off';
- const base=wz.base||{};
+ const base=wz.base||{}, bhr=base.hard_rules||{}, bmh=base.must_have||{}, bw=bmh.window||{};
+ const setpoint=(wz.kind==='comfort'||wz.kind==='threshold');
+ // The wizard has no planning-mode selector. On edit, keep the load's existing planning so a
+ // plain edit can't silently disable aircon pre-conditioning (predictive); a setpoint kind
+ // keeps immediate/predictive, a runtime/program kind is always runtime. Adding: derive from kind.
+ let planning=setpoint?'immediate':'runtime';
+ if(wz.mode==='edit'&&setpoint&&(base.planning==='predictive'||base.planning==='immediate'))planning=base.planning;
  const cfg=Object.assign({}, base, {
-  id, planning:(wz.kind==='comfort'||wz.kind==='threshold')?'immediate':'runtime',
+  id, planning,
   authority:{enabled_entity:d.authority},
   control:{start:{service:start,target:d.control},stop:{service:stop,target:d.control}},
   state:Object.assign({}, base.state, {running_entity:d.running||d.control}),
   capability:Object.assign({}, base.capability, {power_kw:req(vrOut(d.power),'power')}),
-  hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:numOr(Number(d.minRun),0),min_off_minutes:numOr(Number(d.minOff),0)}),
+  hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:keepRef(bhr.min_run_minutes,numOr(Number(d.minRun),0)),min_off_minutes:keepRef(bhr.min_off_minutes,numOr(Number(d.minOff),0))}),
   preferences:{start_cost_aud:numOr(Number(d.startCost),0)},
  });
  if(wz.kind==='comfort'||wz.kind==='threshold')cfg.state.observed_entity=d.observed; else delete cfg.state.observed_entity;
- const w={start:hhmmOut(d.winStart),end:hhmmOut(d.winEnd)}, cap=vrOut(d.cap);
- if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',amount_hours:req(vrOut(d.hours),'run-time'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
- else if(wz.kind==='program'){ cfg.must_have={kind:'program',length_hours:req(vrOut(d.hours),'program length'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
+ // Window times are TimeRefs: prod binds them to input_datetime sliders. Keep an entity-backed
+ // base window on edit (the wizard shows only HH:MM); use the literal HH:MM otherwise.
+ const w={start:keepRef(bw.start,hhmmOut(d.winStart)),end:keepRef(bw.end,hhmmOut(d.winEnd))}, cap=vrOut(d.cap);
+ // Emit the run length in the SAME unit base used (hot_water's amount is minutes, bound to a
+ // slider) so an edit never reinterprets a minutes entity as hours; default hours on add.
+ const amtMinutes=wz.mode==='edit'&&bmh.amount_minutes!=null&&bmh.amount_hours==null;
+ const lenMinutes=wz.mode==='edit'&&bmh.length_minutes!=null&&bmh.length_hours==null;
+ if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',window:w}; const amt=req(vrOut(d.hours),'run-time'); if(amtMinutes)cfg.must_have.amount_minutes=keepRef(bmh.amount_minutes,amt); else cfg.must_have.amount_hours=keepRef(bmh.amount_hours,amt); if(cap!=null)cfg.must_have.max_price=cap; }
+ else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMinutes)cfg.must_have.length_minutes=keepRef(bmh.length_minutes,len); else cfg.must_have.length_hours=keepRef(bmh.length_hours,len); if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='comfort'){ cfg.must_have={kind:'temperature_band',target_c:req(vrOut(d.target),'target'),band_c:req(vrOut(d.band),'band'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='threshold'){ cfg.must_have={kind:'threshold',direction:d.thDir,value:req(vrOut(d.thValue),'target value')}; const h=vrOut(d.hyst); if(h!=null)cfg.must_have.start_hysteresis=h; cfg.must_have.window=w; if(cap!=null)cfg.must_have.max_price=cap; }
  // editing a kind whose can_take exists: keep it; adding: none.

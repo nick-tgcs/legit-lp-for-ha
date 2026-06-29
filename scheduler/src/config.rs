@@ -101,6 +101,12 @@ impl WindowCfg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegistryConfig {
     pub global: GlobalConfig,
+    /// Managed loads. `#[serde(default)]` so a storage-only registry (or one whose
+    /// last load was deleted from the panel) round-trips: `serialize_registry`
+    /// prunes an empty `loads: []` away, and a missing `loads:` key must then parse
+    /// back as empty — not fail the next boot with a "missing field" error. Validation
+    /// already accepts zero loads. Mirrors `global.storage`, which defaults the same way.
+    #[serde(default)]
     pub loads: Vec<LoadConfig>,
 }
 
@@ -999,6 +1005,22 @@ loads: []
         let reloaded = parse(&std::fs::read_to_string(&path).unwrap()).expect("reloads");
         assert_eq!(cfg, reloaded);
         assert!(!path.with_file_name("legit_lp.yaml.tmp").exists(), "temp file cleaned up");
+    }
+
+    #[test]
+    fn storage_only_registry_survives_a_save_round_trip() {
+        // Codex P1: deleting the last load (or a storage-only site) leaves `loads == []`,
+        // which validation accepts. `prune_empty` drops the empty `loads:` key, so the
+        // persisted file must still parse — `loads` defaults to empty rather than failing
+        // the next boot with "missing field `loads`". Guards the serialize/parse symmetry.
+        let mut cfg = parse(&test_registry()).expect("parses");
+        cfg.loads.clear();
+        assert!(!cfg.global.storage.is_empty(), "fixture has storage to keep it a real config");
+        let yaml = serialize_registry(&cfg).expect("a storage-only registry serializes");
+        assert!(!yaml.contains("loads:"), "the empty loads list is pruned from the file");
+        let reloaded = parse(&yaml).expect("the pruned file still parses on the next boot");
+        assert!(reloaded.loads.is_empty(), "absent loads -> empty, not a parse error");
+        assert_eq!(cfg, reloaded, "storage-only registry round-trips struct-lossless");
     }
 
     // ---- D3: new device kinds parse, validate, and round-trip ----
