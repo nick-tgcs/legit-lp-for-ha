@@ -405,11 +405,16 @@ impl LpPlanner {
                         constraints.push(constraint!(credit.clone() + completed + u >= required));
                         // A `program` is held to EXACTLY its length: bound credited runtime ABOVE
                         // too, else stage 2 keeps it on past its length when extra runtime is cheap
-                        // (negative/very-low import prices). Rounded UP to a whole grid step so the
-                        // cap never fights min_run (which forces ceil(length/step) contiguous steps).
+                        // (negative/very-low import prices). Cap the FUTURE credit on the REMAINING
+                        // runtime (required − already-completed), rounded UP to a whole grid step —
+                        // NOT on the total. Capping the total would, for an in-progress program whose
+                        // `completed` isn't grid-aligned (e.g. 83 of 90 min), leave < one step of
+                        // headroom while the min-run lock still forces a full step, making the MILP
+                        // infeasible (solver-error → hold-all) instead of just finishing the program.
                         if *exact {
-                            let cap = (required / step_min).ceil() * step_min;
-                            constraints.push(constraint!(credit + completed <= cap));
+                            let remaining = (required - completed).max(0.0);
+                            let cap = (remaining / step_min).ceil() * step_min;
+                            constraints.push(constraint!(credit <= cap));
                         }
                     }
                 }

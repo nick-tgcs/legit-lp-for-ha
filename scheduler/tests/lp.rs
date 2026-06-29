@@ -857,6 +857,39 @@ fn p5_program_is_capped_at_its_length_even_when_extra_runtime_is_profitable() {
 }
 
 #[test]
+fn p6_in_progress_program_with_nonaligned_completed_stays_feasible() {
+    // Codex round-10: a program already part-run with a NON-grid-aligned `completed` (50 of a
+    // 60-min block) and the min-run lock armed (current stretch < block) must stay FEASIBLE.
+    // Capping the FUTURE credit on the REMAINING runtime leaves room for the forced 15-min step;
+    // capping the TOTAL would have allowed only 10 min vs a forced 15-min step -> infeasible ->
+    // solver-error/hold-all. Now it simply finishes the locked step and stops near the block.
+    let now = sydney(2026, 6, 10, 1, 0); // inside the 00:00-12:00 program window
+    let mut c = program_contract();
+    c.obs.running = Some(true);
+    c.obs.current_stretch = std::time::Duration::from_secs(50 * 60); // < 60-min block -> lock armed
+    if let DemandKind::Runtime { completed_minutes, .. } = &mut c.must_have.kind {
+        *completed_minutes = 50;
+    }
+    let out = planner().plan(&flat_world(now, STEPS, 0.05), &[c]);
+    assert!(
+        !out.plans.is_empty(),
+        "must stay feasible, not solver-error/hold-all: {}",
+        out.decisions[0].reason
+    );
+    assert!(
+        !out.decisions[0].reason.contains("solver error"),
+        "no solver error: {}",
+        out.decisions[0].reason
+    );
+    // Finishes ~the remaining step(s) and stops — not the whole window.
+    let total: usize = on_runs(&out.plans[0].on).iter().map(|(s, e)| e - s).sum();
+    assert!(
+        (1..=2).contains(&total),
+        "finishes the remaining step(s), not the window (total {total})"
+    );
+}
+
+#[test]
 fn p4_program_is_all_or_nothing_under_the_price_cap() {
     let now = sydney(2026, 6, 10, 0, 0);
     // Base above the cap, with only SCATTERED single cheap steps — no 4-in-a-row
