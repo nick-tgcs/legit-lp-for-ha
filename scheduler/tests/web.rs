@@ -502,6 +502,24 @@ async fn w19_edit_device_replaces_by_id() {
 }
 
 #[tokio::test]
+async fn w27_edit_can_rename_a_device() {
+    // The edit wizard's Name field is editable; a PUT to the OLD id with a body carrying a NEW id
+    // must rename (the device leaves under the new id, and the old id is gone) — not duplicate.
+    let (s, _dir, reg) = crud_state();
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = "hot_water_tank".into();
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp = router(s).oneshot(json_req("PUT", "/api/devices/hot_water", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "a non-colliding rename succeeds");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "hot_water_tank"), "device now under the new id");
+    assert!(
+        !r.loads.iter().any(|l| l.id == "hot_water"),
+        "old id is gone (renamed, not duplicated)"
+    );
+}
+
+#[tokio::test]
 async fn w20_edit_missing_device_is_404() {
     let (s, _dir, _reg) = crud_state();
     let resp =
