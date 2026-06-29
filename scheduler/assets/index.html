@@ -1006,10 +1006,14 @@ function buildPayload(){
  else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMinutes)cfg.must_have.length_minutes=keepRef(bmh.length_minutes,len); else cfg.must_have.length_hours=keepRef(bmh.length_hours,len); if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='comfort'){ cfg.must_have={kind:'temperature_band',target_c:req(vrOut(d.target),'target'),band_c:req(vrOut(d.band),'band'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='threshold'){ cfg.must_have={kind:'threshold',direction:d.thDir,value:req(vrOut(d.thValue),'target value')}; const h=vrOut(d.hyst); if(h!=null)cfg.must_have.start_hysteresis=h; cfg.must_have.window=w; if(cap!=null)cfg.must_have.max_price=cap; }
- // can_take is a hidden optional demand of the ORIGINAL kind. Keep it only when the kind is
- // unchanged; changing the kind on edit must drop it (Object.assign carried base.can_take, which
- // would otherwise leave the LP an invisible optional demand of the previous device kind).
- if(kindOfLoad(base)!==wz.kind) delete cfg.can_take;
+ // can_take is a hidden optional demand of the ORIGINAL kind. Object.assign carried base.can_take
+ // through, so drop it whenever it no longer matches the new must_have: a different wizard kind,
+ // OR — within threshold — a flipped direction (a `below` can_take left on an `above` load would
+ // actuate the device for the opposite condition).
+ if(cfg.can_take){
+  const ctDir=cfg.can_take.direction||(cfg.can_take.kind==='humidity_below'?'below':null);
+  if(kindOfLoad(base)!==wz.kind || (wz.kind==='threshold'&&ctDir&&ctDir!==d.thDir)) delete cfg.can_take;
+ }
  return {type:'load',config:cfg};
 }
 function req(v,what){ if(v==null||v==='') throw new Error('Enter a value for '+what+'.'); return v; }
