@@ -858,7 +858,13 @@ function stepReview(){
  const K=KIND_OF(wz.kind);
  const rows=summaryRows();
  const sumHtml=rows.map(r=>`<div class="srow"><span class="sk">${esc(r[0])}</span><span class="sv">${esc(r[1])}</span></div>`).join('');
- return `<div class="wz-h">Review</div><div class="wz-sub">Check the mapping, then ${wz.mode==='edit'?'save your changes':'add the device'}. Control is governed by the authority entity you mapped${wz.kind==='battery'?' (batteries are always actuated)':''}; use the global Preview toggle on the dashboard to observe-only.</div>`+
+ // Batteries added via the wizard carry no charge/discharge control block, so the engine treats
+ // them as advisory (planned + reported) until those direction controls are configured — don't
+ // imply they actuate. Loads are governed by the authority entity mapped here.
+ const govern=wz.kind==='battery'
+  ?' A battery added here is advisory — the scheduler plans and reports it, but does not charge/discharge it until its control is configured separately.'
+  :' Control is governed by the authority entity you mapped; use the global Preview toggle on the dashboard to observe-only.';
+ return `<div class="wz-h">Review</div><div class="wz-sub">Check the mapping, then ${wz.mode==='edit'?'save your changes':'add the device'}.${govern}</div>`+
   `<div class="summary">${sumHtml}</div>${err}`+
   `<div class="wz-nav"><button class="btn ghost" id="wzBack">‹ Back</button><button class="btn" id="wzSave" ${err?'disabled':''}>${wz.mode==='edit'?'Save changes':'Add device'}</button></div>`;
 }
@@ -994,14 +1000,21 @@ function buildPayload(){
   control,
   state:Object.assign({}, base.state, {running_entity:d.running||d.control}),
   capability:Object.assign({}, base.capability, {power_kw:req(vrOut(d.power),'power')}),
-  hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:keepRef(bhr.min_run_minutes,numOr(Number(d.minRun),0)),min_off_minutes:keepRef(bhr.min_off_minutes,numOr(Number(d.minOff),0))}),
+  // nnum rejects a malformed entry (e.g. "3O") instead of coercing it to 0 — a silent 0 would
+  // quietly drop the min-run/min-off short-cycle protection. Blank = 0 ("no minimum", fail-safe).
+  hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:keepRef(bhr.min_run_minutes,nnum(d.minRun,'Min run')),min_off_minutes:keepRef(bhr.min_off_minutes,nnum(d.minOff,'Min off'))}),
   // start_cost_aud can be an entity-ref; keep it on edit rather than freezing it to a literal.
-  preferences:Object.assign({}, base.preferences, {start_cost_aud:keepRef(base.preferences&&base.preferences.start_cost_aud,numOr(Number(d.startCost),0))}),
+  preferences:Object.assign({}, base.preferences, {start_cost_aud:keepRef(base.preferences&&base.preferences.start_cost_aud,nnum(d.startCost,'Startup penalty'))}),
  });
  if(wz.kind==='comfort'||wz.kind==='threshold')cfg.state.observed_entity=d.observed; else delete cfg.state.observed_entity;
  // Window times are TimeRefs: prod binds them to input_datetime sliders. Keep an entity-backed
  // base window on edit (the wizard shows only HH:MM); use the literal HH:MM otherwise.
- const w={start:keepRef(bw.start,hhmmOut(d.winStart)),end:keepRef(bw.end,hhmmOut(d.winEnd))}, cap=vrOut(d.cap);
+ // hhmmReq rejects a malformed time rather than coercing it (old hhmmOut turned "7pm"→"07:00"
+ // and junk→"00:00", silently persisting the wrong run window). Skip it when the base window is
+ // an entity ref we're preserving (its literal field is empty by design).
+ const wstart=(wz.mode==='edit'&&isRef(bw.start))?bw.start:hhmmReq(d.winStart,'Run from');
+ const wend=(wz.mode==='edit'&&isRef(bw.end))?bw.end:hhmmReq(d.winEnd,'Run until');
+ const w={start:wstart,end:wend}, cap=vrOut(d.cap);
  // The run-length toggle (d.hours) expresses entity-vs-literal directly, so emit vrOut(d.hours)
  // as-is — switching Entity→Number genuinely replaces an entity-backed length. Keep the MINUTES
  // unit only when the value is STILL an entity AND base used minutes (hot_water's slider); a
@@ -1026,7 +1039,12 @@ function buildPayload(){
 function req(v,what){ if(v==null||v==='') throw new Error('Enter a value for '+what+'.'); return v; }
 function numOr(v,dflt){ return (v==null||Number.isNaN(v))?dflt:(typeof v==='object'?v:Number(v)); }
 function slug(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'device'; }
-function hhmmOut(s){ const m=String(s).match(/^(\d{1,2})(?::(\d{2}))?/); if(!m)return '00:00'; if(+m[1]>=24)return '23:59'; return String(+m[1]).padStart(2,'0')+':'+(m[2]||'00'); }
+// A non-negative number, or 0 when blank ("no minimum"). Throws on a malformed entry so a typo
+// can't silently become 0 and drop short-cycle/startup protection.
+function nnum(s,what){ s=String(s==null?'':s).trim(); if(s==='')return 0; const n=Number(s); if(!Number.isFinite(n)||n<0) throw new Error(`${what} must be a number (0 or more), got “${s}”.`); return n; }
+// Strict HH:MM (00:00–24:00; 24:00 clamps to 23:59). Throws on malformed input rather than
+// coercing it, so a mistyped run window can never silently persist as the wrong time.
+function hhmmReq(s,what){ s=String(s==null?'':s).trim(); const m=s.match(/^(\d{1,2}):([0-5]\d)$/); if(!m) throw new Error(`${what} must be HH:MM (e.g. 21:30), got “${s}”.`); const h=+m[1]; if(h>24||(h===24&&m[2]!=='00')) throw new Error(`${what} must be between 00:00 and 24:00, got “${s}”.`); return h>=24?'23:59':`${String(h).padStart(2,'0')}:${m[2]}`; }
 
 async function doSave(){
  collect(); let payload; try{ payload=buildPayload(); }catch(e){ renderWizard(); return; }
