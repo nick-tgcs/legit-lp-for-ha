@@ -692,9 +692,11 @@ impl Cycle {
                 Some(e) => f64_of(ha, e, &mut diags).await,
                 None => None,
             };
-            let mh = self.demand(ha, &l.must_have, observed, &fold, now, &mut diags).await;
+            let mh = self.demand(ha, &l.must_have, observed, false, &mut diags).await;
             let ct = match &l.can_take {
-                Some(d) => Some(self.demand(ha, d, observed, &fold, now, &mut diags).await),
+                // can_take prefers the tighter target (target_value/target_percent) over the
+                // must-have limit, so an optional precondition is held to the stricter setpoint.
+                Some(d) => Some(self.demand(ha, d, observed, true, &mut diags).await),
                 None => None,
             };
             let ambient = match &l.capability.ambient_entity {
@@ -1147,8 +1149,8 @@ impl Cycle {
         ha: &A,
         d: &DemandCfg,
         observed: Option<f64>,
-        _fold: &Option<crate::ha_client::Fold>,
-        _now: DateTime<Tz>,
+        // can_take demands prefer the tighter target setpoint over the must-have limit.
+        prefer_target: bool,
         diags: &mut Vec<String>,
     ) -> Demand {
         match d {
@@ -1186,9 +1188,15 @@ impl Cycle {
                 max_minutes,
                 max_price,
             } => {
-                let target = match resolve_opt(ha, max_percent, diags).await {
+                // must-have uses max_percent; can-take prefers the tighter target_percent.
+                let (first, second) = if prefer_target {
+                    (target_percent, max_percent)
+                } else {
+                    (max_percent, target_percent)
+                };
+                let target = match resolve_opt(ha, first, diags).await {
                     Some(v) => Some(v),
-                    None => resolve_opt(ha, target_percent, diags).await,
+                    None => resolve_opt(ha, second, diags).await,
                 };
                 if target.is_none() {
                     diags.push("humidity target unresolved; demand disabled".into());
@@ -1222,10 +1230,16 @@ impl Cycle {
                 max_minutes,
                 max_price,
             } => {
-                // must-have uses `value`; the (tighter) can-take uses `target_value`.
-                let limit = match resolve_opt(ha, &Some(value.clone()), diags).await {
+                // must-have uses `value`; the (tighter) can-take prefers `target_value`.
+                let value_opt = Some(value.clone());
+                let (first, second) = if prefer_target {
+                    (target_value, &value_opt)
+                } else {
+                    (&value_opt, target_value)
+                };
+                let limit = match resolve_opt(ha, first, diags).await {
                     Some(v) => Some(v),
-                    None => resolve_opt(ha, target_value, diags).await,
+                    None => resolve_opt(ha, second, diags).await,
                 };
                 if limit.is_none() {
                     diags.push("threshold limit unresolved; demand disabled".into());

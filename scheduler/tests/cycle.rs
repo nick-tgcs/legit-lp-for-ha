@@ -665,6 +665,62 @@ async fn c_new_kinds_resolve_through_the_cycle_threshold_above_and_program() {
     assert!(best >= 4, "the program scheduled its full 60-min block, longest run {best} steps");
 }
 
+#[tokio::test]
+async fn c_can_take_threshold_uses_the_tighter_target_not_the_must_have_limit() {
+    // Codex P2: a `threshold` can_take with both `value` and `target_value` must be held to the
+    // tighter target_value. must_have keeps humidity ≤60 (satisfied at 57, so no forced run);
+    // can_take optionally preconditions to ≤55. At observed 57 the can-take is only "wanted" if
+    // the tighter 55 drives it — if the loose 60 were used, 57 ≤ 60 would read as satisfied and
+    // the can-take lane would stay empty.
+    use config::{DemandCfg, ThresholdDirCfg, ValueRef, WindowCfg};
+    let mut reg = registry();
+    let deh = reg.loads.iter_mut().find(|l| l.id == "dehumidifier").unwrap();
+    deh.must_have = DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Below,
+        value: ValueRef::Plain(60.0),
+        target_value: None,
+        start_hysteresis: Some(ValueRef::Plain(0.0)),
+        window: None,
+        max_minutes: None,
+        max_price: Some(ValueRef::Plain(10.0)),
+    };
+    deh.can_take = Some(DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Below,
+        value: ValueRef::Plain(60.0),
+        target_value: Some(ValueRef::Plain(55.0)),
+        start_hysteresis: Some(ValueRef::Plain(0.0)),
+        window: Some(WindowCfg {
+            start: config::TimeRef::Literal("00:00".into()),
+            end: config::TimeRef::Literal("23:59".into()),
+        }),
+        max_minutes: Some(ValueRef::Plain(120.0)),
+        max_price: Some(ValueRef::Plain(10.0)),
+    });
+
+    let mut ha = canned_ha();
+    set_state(&mut ha, "sensor.humidity_average_inside", "57"); // between target 55 and limit 60
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on");
+    set_state(&mut ha, "sensor.current_grid_cost", "0.02"); // cheap, so taking the option is worth it
+
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert!(!report.is_solver_failure(), "solves cleanly");
+    let deh = report.loads.iter().find(|l| l.id == "dehumidifier").expect("dehumidifier present");
+    assert!(
+        deh.ct.iter().any(|&x| x),
+        "can-take lane is active — proving the tighter target_value (55) drove it, not the \
+         must-have limit (60); ct={:?}",
+        deh.ct
+    );
+}
+
 /// Cheap-now / dear-later forecast (mirrors c12): one cheap hour at the injected `now`
 /// (10:00 Sydney == 00:00 UTC), dear for the rest of the horizon — a clean arbitrage.
 fn cheap_now_dear_later(ha: &mut RecordingHa) {
