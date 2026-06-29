@@ -155,25 +155,30 @@ async fn edit_device(
         return (StatusCode::CONFLICT, format!("a device with id '{new_id}' already exists"))
             .into_response();
     }
-    // Replace the device at the path id (the body may carry a new id = rename).
-    let replaced = match dev {
-        DeviceUpsert::Load(l) => match next.loads.iter_mut().find(|x| x.id == id) {
-            Some(slot) => {
-                *slot = *l;
-                true
-            }
-            None => false,
-        },
-        DeviceUpsert::Storage(d) => match next.global.storage.iter_mut().find(|x| x.id == id) {
-            Some(slot) => {
-                *slot = *d;
-                true
-            }
-            None => false,
-        },
-    };
-    if !replaced {
+    // The device at the path id may live in EITHER collection. Replace it by id, supporting a
+    // TYPE change (the wizard's Type step can turn a load into a battery or back): a same-type
+    // edit replaces in place (preserving order); a cross-type edit removes the device from the
+    // collection that currently owns the id and appends it to the one matching the new body type.
+    let load_pos = next.loads.iter().position(|x| x.id == id);
+    let storage_pos = next.global.storage.iter().position(|x| x.id == id);
+    if load_pos.is_none() && storage_pos.is_none() {
         return (StatusCode::NOT_FOUND, format!("no device with id '{id}'")).into_response();
+    }
+    match dev {
+        DeviceUpsert::Load(l) => match load_pos {
+            Some(i) => next.loads[i] = *l,
+            None => {
+                next.global.storage.retain(|d| d.id != id);
+                next.loads.push(*l);
+            }
+        },
+        DeviceUpsert::Storage(d) => match storage_pos {
+            Some(i) => next.global.storage[i] = *d,
+            None => {
+                next.loads.retain(|l| l.id != id);
+                next.global.storage.push(*d);
+            }
+        },
     }
     commit_or_error(&s, next)
 }

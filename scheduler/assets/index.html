@@ -791,10 +791,17 @@ function nav(backLabel,nextLabel,nextId){ return `<div class="wz-nav"><button cl
 
 // Step 1 — Type
 function stepType(){
- const cards=KINDS.map(k=>`<button class="kind-card ${wz.kind===k.key?'sel':''}" data-kind="${k.key}">`+
+ // On edit, keep the device CLASS fixed: a load can switch among the load-kinds but can't become
+ // a battery (and a battery stays a battery). The two share no config fields, so a class change is
+ // really a remove + add — converting in place would carry the old class's fields across. (The
+ // backend still supports a cross-type PUT for completeness; the wizard just doesn't offer it.)
+ const baseIsBattery=wz.mode==='edit'&&wz.base&&(wz.base.soc_entities!==undefined||wz.base.capacity_kwh!==undefined);
+ const shown=wz.mode!=='edit'?KINDS:KINDS.filter(k=>(k.key==='battery')===!!baseIsBattery);
+ const cards=shown.map(k=>`<button class="kind-card ${wz.kind===k.key?'sel':''}" data-kind="${k.key}">`+
   `<div class="kh"><span class="kg" style="background:${tintBg(k.tint)};color:${k.tint}">${k.glyph}</span>${k.label}</div>`+
   `<div class="kd">${k.desc}</div><div class="keg">e.g. ${k.eg}</div></button>`).join('');
- return `<div class="wz-h">What kind of device is it?</div><div class="wz-sub">Pick the closest match. This decides what the scheduler optimises and which Home Assistant entities you'll connect next.</div>`+
+ const sub=wz.mode==='edit'?'Change how this device is optimised. To switch between a load and a battery, remove it and add it again.':'Pick the closest match. This decides what the scheduler optimises and which Home Assistant entities you’ll connect next.';
+ return `<div class="wz-h">What kind of device is it?</div><div class="wz-sub">${sub}</div>`+
   `<div class="kind-grid">${cards}</div>`+nav('‹ Cancel','Continue →');
 }
 // Step 2 — Connect

@@ -890,6 +890,32 @@ fn p6_in_progress_program_with_nonaligned_completed_stays_feasible() {
 }
 
 #[test]
+fn p7_program_already_complete_but_locked_on_finishes_safely() {
+    // Codex round-11: recorder history with multiple on-spans can leave a program with its full
+    // runtime already accrued (completed >= block) WHILE current_stretch < min_run, so the initial
+    // lock still forces steps. remaining==0 must not cap credit to 0 (the forced step would then be
+    // infeasible -> hold-all); the cap floors at the forced-lock minutes, so it honors the lock and
+    // stops — even under a negative price that would otherwise extend it across the whole window.
+    let now = sydney(2026, 6, 10, 1, 0);
+    let mut c = program_contract(); // 60-min block, min_run 60
+    c.obs.running = Some(true);
+    c.obs.current_stretch = std::time::Duration::from_secs(15 * 60); // < 60 -> lock forces ~3 steps
+    if let DemandKind::Runtime { completed_minutes, .. } = &mut c.must_have.kind {
+        *completed_minutes = 60; // full block already accrued across earlier spans
+    }
+    let out = planner().plan(&flat_world(now, STEPS, -0.10), &[c]); // negative: uncapped would over-run
+    assert!(!out.plans.is_empty(), "feasible, not hold-all: {}", out.decisions[0].reason);
+    assert!(
+        !out.decisions[0].reason.contains("solver error"),
+        "no solver error: {}",
+        out.decisions[0].reason
+    );
+    // Honors the forced lock then STOPS — does not run the whole window under the negative price.
+    let total: usize = on_runs(&out.plans[0].on).iter().map(|(s, e)| e - s).sum();
+    assert!(total <= 4, "honors the lock then stops, not the whole window (total {total})");
+}
+
+#[test]
 fn p4_program_is_all_or_nothing_under_the_price_cap() {
     let now = sydney(2026, 6, 10, 0, 0);
     // Base above the cap, with only SCATTERED single cheap steps — no 4-in-a-row

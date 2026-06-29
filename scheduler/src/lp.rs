@@ -413,7 +413,16 @@ impl LpPlanner {
                         // infeasible (solver-error → hold-all) instead of just finishing the program.
                         if *exact {
                             let remaining = (required - completed).max(0.0);
-                            let cap = (remaining / step_min).ceil() * step_min;
+                            let mut cap = (remaining / step_min).ceil() * step_min;
+                            // Never cap below what the initial min-run lock forces ON this solve.
+                            // History with multiple on-spans can leave `remaining == 0` (the block's
+                            // runtime already accrued) while `current_stretch < min_run` still forces
+                            // `on_lock` steps — without this the cap would be 0 and the forced step
+                            // would make the MILP infeasible (solver-error → hold-all). The lock only
+                            // applies to the current occurrence (inst starting at step 0).
+                            if inst.steps.start == 0 {
+                                cap = cap.max(on_lock as f64 * step_min);
+                            }
                             constraints.push(constraint!(credit <= cap));
                         }
                     }

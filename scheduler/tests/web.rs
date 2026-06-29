@@ -528,6 +528,37 @@ async fn w20_edit_missing_device_is_404() {
 }
 
 #[tokio::test]
+async fn w28_edit_can_change_a_device_type_by_id() {
+    // Codex P2: PUT replaces a device by id even across collections. Editing the load 'aircon'
+    // with a STORAGE body must move it out of loads and into storage (not 404 on the storage-only
+    // lookup). The reverse (storage→load) too.
+    let (s, _dir, reg) = crud_state();
+    let mut sto = serde_json::to_value(&example_registry().global.storage[0]).unwrap();
+    sto["id"] = "aircon".into(); // keep the path id; just change the type
+    let body = serde_json::json!({ "type": "storage", "config": sto });
+    let resp =
+        router(s.clone()).oneshot(json_req("PUT", "/api/devices/aircon", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "load→storage type change by id succeeds");
+    {
+        let r = reg.borrow();
+        assert!(!r.loads.iter().any(|l| l.id == "aircon"), "aircon left the loads collection");
+        assert!(
+            r.global.storage.iter().any(|d| d.id == "aircon"),
+            "aircon is now a storage device"
+        );
+    }
+    // And back: storage 'aircon' → a load.
+    let mut ld = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    ld["id"] = "aircon".into();
+    let body = serde_json::json!({ "type": "load", "config": ld });
+    let resp = router(s).oneshot(json_req("PUT", "/api/devices/aircon", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "storage→load type change by id succeeds");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "aircon"), "aircon is a load again");
+    assert!(!r.global.storage.iter().any(|d| d.id == "aircon"), "and no longer a storage device");
+}
+
+#[tokio::test]
 async fn w26_edit_renaming_a_load_onto_a_storage_id_is_rejected() {
     // Codex P2: ids are a single namespace. PUT-renaming hot_water to an existing battery id
     // (sonnen01) must be a 409 — not silently create a load + storage sharing 'sonnen01', which
