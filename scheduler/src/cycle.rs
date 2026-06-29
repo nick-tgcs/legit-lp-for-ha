@@ -512,13 +512,14 @@ async fn build_storage<A: HaApi>(
 }
 
 /// Derive the ACTUATION storage models from the RATED (advisory) ones by zeroing the
-/// power of any configured-but-unauthorised direction. The panel plans at rated power,
-/// but the command we actually commit is read from a solve over THESE models: removing
-/// a leg the executor will skip means a slot-0 charge can never be justified by a
-/// future discharge that won't happen (the Manual/Scheduled "charge now, never
-/// discharge" trap). A fully-authorised device — or one whose unauthorised directions
-/// are UNCONFIGURED (no executor surface to skip) — is returned unchanged, so the
-/// gated set equals the rated set and no second solve is needed.
+/// power of any direction that is NOT both configured AND authorised. The panel plans at
+/// rated power, but the command we actually commit is read from a solve over THESE models:
+/// removing a leg the executor will skip means a slot-0 charge can never be justified by a
+/// future discharge that won't happen (the Manual/Scheduled "charge now, never discharge"
+/// trap), and an UNCONFIGURED (advisory) battery can't tilt the committed load/grid plan
+/// with moves it will never make. A device whose every direction is configured AND
+/// authorised is returned unchanged, so the gated set equals the rated set and no second
+/// solve is needed.
 fn gate_storage_for_actuation(
     rated: &[StorageInput],
     controls: &[StorageControl],
@@ -527,11 +528,15 @@ fn gate_storage_for_actuation(
         .iter()
         .map(|s| {
             let ctrl = controls.iter().find(|c| c.id == s.id);
-            // A direction is blocked only when it is CONFIGURED (has a control surface)
-            // AND unauthorised — that is the leg `Executor::drive` would refuse.
-            let charge_blocked = ctrl.and_then(|c| c.charge.as_ref()).is_some_and(|d| !d.authority);
+            // A direction is ACTUATABLE only when it is CONFIGURED (has a control surface) AND
+            // authorised; otherwise the executor will never drive it, so it must be zeroed for the
+            // committed solve. This blocks BOTH an unauthorised configured direction AND an
+            // UNCONFIGURED one (e.g. a wizard-added advisory battery with no charge/discharge
+            // block) — else its rated power would still shift the committed load/grid plan, making
+            // the scheduler start loads around battery moves that can never happen.
+            let charge_blocked = !ctrl.and_then(|c| c.charge.as_ref()).is_some_and(|d| d.authority);
             let discharge_blocked =
-                ctrl.and_then(|c| c.discharge.as_ref()).is_some_and(|d| !d.authority);
+                !ctrl.and_then(|c| c.discharge.as_ref()).is_some_and(|d| d.authority);
             let mut g = s.clone();
             if charge_blocked {
                 g.max_charge_kw = 0.0;
@@ -1176,6 +1181,7 @@ impl Cycle {
                         minutes: mins,
                         window,
                         completed_minutes: 0, // patched after the fold
+                        exact: false,         // deferrable runtime: run AT LEAST `minutes`
                     },
                     max_price: resolve_opt(ha, max_price, diags).await,
                 }
@@ -1292,7 +1298,13 @@ impl Cycle {
                     }
                 };
                 Demand {
-                    kind: DemandKind::Runtime { minutes: mins, window, completed_minutes: 0 },
+                    // exact: a program is held to EXACTLY this block length (upper-bounded in the LP).
+                    kind: DemandKind::Runtime {
+                        minutes: mins,
+                        window,
+                        completed_minutes: 0,
+                        exact: true,
+                    },
                     max_price: resolve_opt(ha, max_price, diags).await,
                 }
             }
@@ -1381,11 +1393,80 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_alerts, diag_is_actionable, diag_scope, reads_as_climate, storage_action_actuated,
+        derive_alerts, diag_is_actionable, diag_scope, gate_storage_for_actuation,
+        reads_as_climate, storage_action_actuated,
     };
     use crate::lp::LoadPlan;
-    use crate::model::LoadId;
+    use crate::model::{LoadId, ServiceCall, StorageControl, StorageDirection, StorageInput};
     use crate::status::Severity;
+
+    fn storage_input() -> StorageInput {
+        StorageInput {
+            id: "b".into(),
+            capacity_kwh: 10.0,
+            soc_now_kwh: 5.0,
+            min_soc_kwh: 1.0,
+            max_soc_kwh: 10.0,
+            max_charge_kw: 4.0,
+            max_discharge_kw: 4.0,
+            round_trip_efficiency: 0.9,
+            allow_grid_charge: true,
+            available: true,
+            cycle_cost_aud_per_kwh: 0.001,
+            goals: vec![],
+        }
+    }
+    fn dir(authority: bool) -> StorageDirection {
+        StorageDirection {
+            authority,
+            set_rate: ServiceCall {
+                domain: "input_number".into(),
+                service: "set_value".into(),
+                target_entity: "x".into(),
+                data: serde_json::Value::Null,
+            },
+            set_threshold: None,
+        }
+    }
+
+    #[test]
+    fn gate_storage_zeroes_unconfigured_and_unauthorised_directions() {
+        // Codex P2: a direction is actuatable ONLY when configured AND authorised. An advisory
+        // battery (no control block) must be zeroed for the committed solve, else its rated power
+        // shifts the load/grid plan around moves the executor will never make.
+        let g = |ctrls: Vec<StorageControl>| {
+            let out = gate_storage_for_actuation(&[storage_input()], &ctrls);
+            (out[0].max_charge_kw, out[0].max_discharge_kw)
+        };
+        // no control entry at all → both directions zeroed
+        assert_eq!(g(vec![]), (0.0, 0.0), "an unconfigured (advisory) battery is zeroed");
+        // a control with no charge/discharge blocks → zeroed
+        assert_eq!(
+            g(vec![StorageControl { id: "b".into(), charge: None, discharge: None }]),
+            (0.0, 0.0),
+            "no charge/discharge block → zeroed"
+        );
+        // configured + authorised both → rated power preserved
+        assert_eq!(
+            g(vec![StorageControl {
+                id: "b".into(),
+                charge: Some(dir(true)),
+                discharge: Some(dir(true)),
+            }]),
+            (4.0, 4.0),
+            "fully authorised → unchanged"
+        );
+        // charge authorised, discharge configured-but-unauthorised → only discharge zeroed
+        assert_eq!(
+            g(vec![StorageControl {
+                id: "b".into(),
+                charge: Some(dir(true)),
+                discharge: Some(dir(false)),
+            }]),
+            (4.0, 0.0),
+            "unauthorised discharge zeroed; authorised charge kept (prod Scheduled behaviour)"
+        );
+    }
 
     fn plan(id: &str, unmet: f64) -> LoadPlan {
         LoadPlan { id: LoadId(id.into()), on: vec![], ct: vec![], unmet }

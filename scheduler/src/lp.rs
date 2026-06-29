@@ -387,7 +387,10 @@ impl LpPlanner {
             // ---- demands ----------------------------------------------------
             let mut unmet_vars: Vec<Variable> = Vec::new();
             match (&c.planning, &c.must_have.kind) {
-                (Planning::Runtime, DemandKind::Runtime { minutes, window, completed_minutes }) => {
+                (
+                    Planning::Runtime,
+                    DemandKind::Runtime { minutes, window, completed_minutes, exact },
+                ) => {
                     for inst in window_instances(window, grid) {
                         let completed =
                             if inst.steps.start == 0 { f64::from(*completed_minutes) } else { 0.0 };
@@ -399,7 +402,15 @@ impl LpPlanner {
                         unmet_vars.push(u);
                         let credit: Expression =
                             inst.steps.clone().map(|t| (x[t] - ct[t]) * step_min).sum();
-                        constraints.push(constraint!(credit + completed + u >= required));
+                        constraints.push(constraint!(credit.clone() + completed + u >= required));
+                        // A `program` is held to EXACTLY its length: bound credited runtime ABOVE
+                        // too, else stage 2 keeps it on past its length when extra runtime is cheap
+                        // (negative/very-low import prices). Rounded UP to a whole grid step so the
+                        // cap never fights min_run (which forces ceil(length/step) contiguous steps).
+                        if *exact {
+                            let cap = (required / step_min).ceil() * step_min;
+                            constraints.push(constraint!(credit + completed <= cap));
+                        }
                     }
                 }
                 (Planning::Immediate, kind) => {

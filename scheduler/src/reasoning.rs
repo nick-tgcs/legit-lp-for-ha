@@ -222,7 +222,7 @@ pub fn for_load(
     let mut binding = None;
     let mut fix_hint = None;
 
-    if let DemandKind::Runtime { minutes, completed_minutes, window } = &c.must_have.kind {
+    if let DemandKind::Runtime { minutes, completed_minutes, window, .. } = &c.must_have.kind {
         // `minutes` is required PER window instance via the shared
         // `WindowInstance::required_minutes` (the same amount the LP enforces in lp.rs):
         // the CURRENT occurrence demands its full runtime (`completed`, below, covers the

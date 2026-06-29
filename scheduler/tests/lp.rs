@@ -814,6 +814,7 @@ fn program_contract() -> LoadContract {
             minutes: 60,
             window: window(0, 0, 12, 0),
             completed_minutes: 0,
+            exact: true, // a program is held to EXACTLY its block length
         },
         max_price: Some(0.30),
     };
@@ -830,6 +831,29 @@ fn p3_program_runs_as_one_contiguous_block_at_the_cheapest_start() {
     let (s, e) = runs[0];
     assert_eq!(e - s, 4, "the run is exactly the 60-min block — not fragmented");
     assert_eq!((s, e), (16, 20), "and is placed in the cheapest contiguous slot");
+}
+
+#[test]
+fn p5_program_is_capped_at_its_length_even_when_extra_runtime_is_profitable() {
+    // Codex P2: a program must run EXACTLY its declared block, not just "at least". Under a flat
+    // NEGATIVE import price, every extra on-step lowers cost, so a lower-bound-only model would
+    // keep a 60-min program on for the whole 00:00–12:00 window. The `exact` upper bound holds it
+    // to its 4-step (60-min) block. (A deferrable runtime load, exact:false, is intentionally free
+    // to soak up the cheap window — the difference is the whole point of the flag.)
+    let now = sydney(2026, 6, 10, 0, 0);
+    let w = flat_world(now, STEPS, -0.10); // negative: running is profitable everywhere
+    let out = planner().plan(&w, &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert_eq!(runs.len(), 1, "still one contiguous run");
+    let (s, e) = runs[0];
+    assert_eq!(
+        e - s,
+        4,
+        "capped at the 60-min block, not extended by cheap power (run {}..{})",
+        s,
+        e
+    );
+    assert!(out.plans[0].unmet <= 0.0001, "the block is fully met, not unmet");
 }
 
 #[test]

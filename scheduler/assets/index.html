@@ -682,7 +682,11 @@ function kindOfLoad(l){ const mh=l.must_have||{}; if(mh.kind==='program')return 
 
 // ── a literal⇄entity value: {mode, lit, ent}. Serialises to a number or {entity}. ──
 function vrFrom(v){ if(v==null)return {mode:'literal',lit:'',ent:''}; if(typeof v==='object'&&v.entity!=null)return {mode:'entity',lit:'',ent:v.entity}; if(typeof v==='object'&&v.value!=null)return {mode:'literal',lit:String(v.value),ent:''}; return {mode:'literal',lit:String(v),ent:''}; }
-function vrOut(vr){ if(!vr)return undefined; if(vr.mode==='entity')return vr.ent?{entity:vr.ent}:undefined; return vr.lit===''?undefined:Number(vr.lit); }
+// Emit a ValueRef field: {entity} for entity mode, a number for a literal, undefined when blank
+// (an absent optional). A malformed literal (e.g. "0.3O") is REJECTED, not passed through as NaN
+// — NaN serializes to null, which would silently drop an optional field (price cap, hysteresis) or
+// turn a bad battery discharge limit into charge-only. Callers surface the thrown message.
+function vrOut(vr){ if(!vr)return undefined; if(vr.mode==='entity')return vr.ent?{entity:vr.ent}:undefined; if(vr.lit==='')return undefined; const n=Number(vr.lit); if(!Number.isFinite(n)) throw new Error(`“${vr.lit}” is not a valid number.`); return n; }
 
 // ── DEVICES LIST ──
 let _devices={loads:[],storage:[]};

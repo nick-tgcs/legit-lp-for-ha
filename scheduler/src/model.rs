@@ -76,8 +76,11 @@ pub enum ThresholdDir {
 pub enum DemandKind {
     /// Deferrable / fixed-program — accumulate `minutes` of runtime within a
     /// window. A `program` (run-once contiguous block) is this with `min_run`
-    /// forced to the block length and a single allowed start.
-    Runtime { minutes: u32, window: Window, completed_minutes: u32 },
+    /// forced to the block length, a single allowed start, and `exact: true` so
+    /// credited runtime is bounded ABOVE too: a deferrable load only has a lower
+    /// bound (run AT LEAST `minutes`); a program is held to EXACTLY `minutes`
+    /// (± one grid step) so cheap/negative prices can't extend it past its length.
+    Runtime { minutes: u32, window: Window, completed_minutes: u32, exact: bool },
     /// Keep an observed reading on one side of `limit`: `Below` (dehumidifier —
     /// at/below) or `Above` (humidifier — at/above). `immediate` uses only
     /// `dir`/`limit`/`observed`/`start_hysteresis`; the rates are kept for parity.
