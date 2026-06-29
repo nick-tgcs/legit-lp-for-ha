@@ -804,9 +804,12 @@ function stepConnect(){
    field('State-of-charge sensor(s)','The battery %; comma-separate two packs.', `<input class="form-input" id="f_soc" value="${esc(d.soc)}" placeholder="sensor.battery_soc">`)+
    nav('‹ Back','Continue →');
  }
- const ctrlDom='switch,input_boolean,climate,select', sensDom='sensor';
+ // Control is driven by turn_on/turn_off, so only offer domains that support those services.
+ // (select/script/scene need select_option/data the wizard can't express — edit such a device
+ // by hand, or keep its existing custom control which an unchanged edit preserves.)
+ const ctrlDom='switch,input_boolean,light,fan,climate,humidifier', sensDom='sensor';
  let roles=field('Display name','', `<input class="form-input" id="f_name" value="${esc(d.name)}" placeholder="e.g. Pool pump">`)
-  +field('Switch to control','The switch/select/climate the scheduler turns on and off.', picker('control',d.control,ctrlDom,'switch.pool_pump'))
+  +field('Switch to control','The switch/climate the scheduler turns on and off.', picker('control',d.control,ctrlDom,'switch.pool_pump'))
   +field('Authority entity','A boolean that says the scheduler is allowed to control it.', picker('authority',d.authority,'binary_sensor,input_boolean','binary_sensor.pool_pump_automated'));
  if(wz.kind==='comfort'||wz.kind==='threshold')
   roles+=field(wz.kind==='comfort'?'Temperature sensor':'Sensor to keep in check','The reading the scheduler watches.', picker('observed',d.observed,sensDom,'sensor.room_temp'));
@@ -970,6 +973,11 @@ function buildPayload(){
  // …) that the domain-derived turn_on/turn_off would silently drop. Synthesize only when the
  // target actually changed (or we're adding).
  const ctlSame=wz.mode==='edit'&&base.control&&base.control.start&&base.control.start.target===d.control;
+ // Synthesized control uses turn_on/turn_off; reject a domain that doesn't support them (a
+ // select/script needs select_option/data we can't generate) so we never save a config that
+ // validates but can't actuate. An unchanged edit keeps the device's existing custom control.
+ const ONOFF=['switch','input_boolean','light','fan','climate','humidifier'];
+ if(!ctlSame&&!ONOFF.includes(dom)) throw new Error(`Can't control a '${dom}' entity with on/off. Choose a switch/light/climate entity, or configure '${dom}' by editing the registry directly.`);
  const control=ctlSame?base.control:{start:{service:start,target:d.control},stop:{service:stop,target:d.control}};
  const cfg=Object.assign({}, base, {
   id, planning,

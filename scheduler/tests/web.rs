@@ -510,6 +510,27 @@ async fn w20_edit_missing_device_is_404() {
 }
 
 #[tokio::test]
+async fn w26_edit_renaming_a_load_onto_a_storage_id_is_rejected() {
+    // Codex P2: ids are a single namespace. PUT-renaming hot_water to an existing battery id
+    // (sonnen01) must be a 409 — not silently create a load + storage sharing 'sonnen01', which
+    // would make list/edit/delete ambiguous. The live registry must stay untouched.
+    let (s, _dir, reg) = crud_state();
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = "sonnen01".into();
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp =
+        router(s.clone()).oneshot(json_req("PUT", "/api/devices/hot_water", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "a load can't take a battery's id");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "hot_water"), "hot_water still present, unrenamed");
+    assert_eq!(
+        r.global.storage.iter().filter(|d| d.id == "sonnen01").count(),
+        1,
+        "no duplicate id"
+    );
+}
+
+#[tokio::test]
 async fn w21_delete_device_removes_it() {
     let (s, _dir, reg) = crud_state();
     let resp = router(s.clone())

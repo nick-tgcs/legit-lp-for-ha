@@ -574,18 +574,21 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
     if !(1..=48).contains(&h) {
         return err(format!("planning.horizon_hours must be 1..=48, got {h}"));
     }
-    let mut storage_ids = std::collections::HashSet::new();
+    // Device ids are a SINGLE namespace across loads + storage: the panel API addresses
+    // every device by a bare id (`/api/devices/{id}`), so a load and a battery sharing an
+    // id would make list/edit/delete ambiguous (a delete would hit both). Check both in one
+    // set so a cross-type collision is rejected, not just same-type duplicates.
+    let mut seen = std::collections::HashSet::new();
     for s in &cfg.global.storage {
-        if !storage_ids.insert(&s.id) {
-            return err(format!("duplicate storage id '{}'", s.id));
+        if !seen.insert(&s.id) {
+            return err(format!("duplicate device id '{}'", s.id));
         }
         validate_storage(s)?;
     }
 
-    let mut seen = std::collections::HashSet::new();
     for l in &cfg.loads {
         if !seen.insert(&l.id) {
-            return err(format!("duplicate load id '{}'", l.id));
+            return err(format!("duplicate device id '{}'", l.id));
         }
         l.control.start.split()?;
         l.control.stop.split()?;
@@ -950,7 +953,35 @@ global:
 loads: []
 ";
         assert!(
-            matches!(parse(dup), Err(SchedulerError::Config(m)) if m.contains("duplicate storage"))
+            matches!(parse(dup), Err(SchedulerError::Config(m)) if m.contains("duplicate device"))
+        );
+    }
+
+    #[test]
+    fn rejects_a_load_and_storage_sharing_an_id() {
+        // Codex P2: device ids are ONE namespace across loads + storage (the panel addresses
+        // every device by a bare id). A load colliding with a battery id must be rejected, not
+        // accepted because loads/storage were de-duplicated separately.
+        let clash = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - { id: shared, soc_entities: [sensor.s], capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 0, round_trip_efficiency: 0.9, reserve_soc_pct: 0, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
+loads:
+  - id: shared
+    planning: runtime
+    authority: { enabled_entity: binary_sensor.a }
+    control: { start: { service: switch.turn_on, target: switch.s }, stop: { service: switch.turn_off, target: switch.s } }
+    state: { running_entity: switch.s }
+    capability: { power_kw: 1 }
+    hard_rules: { min_run_minutes: 0, min_off_minutes: 0 }
+    must_have: { kind: runtime, amount_hours: 1, window: { start: \"00:00\", end: \"06:00\" } }
+    preferences: { start_cost_aud: 0 }
+";
+        assert!(
+            matches!(parse(clash), Err(SchedulerError::Config(m)) if m.contains("duplicate device id 'shared'")),
+            "a load sharing a battery's id is a duplicate device"
         );
     }
 

@@ -144,8 +144,18 @@ async fn edit_device(
     Json(dev): Json<DeviceUpsert>,
 ) -> Response {
     let mut next = (*s.current_registry()).clone();
-    // Replace the device at the path id (the body may carry a new id = rename;
-    // commit's validation rejects a rename that collides with another device).
+    // A rename must not collide with ANY other device — ids are a single namespace across
+    // loads + storage (validation enforces this too, but a 409 here is the clearer error and
+    // catches a cross-type collision before the commit). Exclude the device being replaced.
+    let new_id = dev.id().to_string();
+    if new_id != id
+        && (next.loads.iter().any(|l| l.id == new_id)
+            || next.global.storage.iter().any(|d| d.id == new_id))
+    {
+        return (StatusCode::CONFLICT, format!("a device with id '{new_id}' already exists"))
+            .into_response();
+    }
+    // Replace the device at the path id (the body may carry a new id = rename).
     let replaced = match dev {
         DeviceUpsert::Load(l) => match next.loads.iter_mut().find(|x| x.id == id) {
             Some(slot) => {
