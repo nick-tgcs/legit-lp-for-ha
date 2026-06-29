@@ -942,7 +942,10 @@ function buildPayload(){
  // value would silently freeze the live binding. So when EDITING, keep base's value for any
  // field that is an entity-ref (or otherwise an object the wizard can't represent), and only
  // write the simplified literal when base was itself a literal (or we're ADDING a device).
- const isRef=v=>v!=null&&typeof v==='object';
+ // A ValueRef object is EITHER an entity ref `{entity}` (preserve — the wizard can't express it)
+ // OR an explicit literal `{value:n}` (NOT a ref — the user can still edit the number). Only the
+ // entity form is kept; a `{value:30}` falls through to the edited literal so edits aren't ignored.
+ const isRef=v=>v!=null&&typeof v==='object'&&v.entity!=null;
  const keepRef=(b,lit)=>(wz.mode==='edit'&&isRef(b))?b:lit;
  if(wz.kind==='battery'){
   const soc=d.soc.split(',').map(s=>s.trim()).filter(Boolean);
