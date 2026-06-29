@@ -48,7 +48,6 @@ pub fn idle_observation() -> Observation {
 pub fn runtime_contract() -> LoadContract {
     LoadContract {
         id: LoadId("hot_water".into()),
-        load_type: LoadType::HotWater,
         planning: Planning::Runtime,
         power_kw: 3.6,
         authority: true,
@@ -63,6 +62,7 @@ pub fn runtime_contract() -> LoadContract {
                 minutes: 90,
                 window: window(0, 0, 6, 30),
                 completed_minutes: 0,
+                exact: false,
             },
             max_price: None,
         },
@@ -71,6 +71,7 @@ pub fn runtime_contract() -> LoadContract {
                 minutes: 60,
                 window: window(10, 0, 16, 0),
                 completed_minutes: 0,
+                exact: false,
             },
             max_price: Some(0.10),
         }),
@@ -87,7 +88,6 @@ pub fn runtime_contract() -> LoadContract {
 pub fn immediate_contract(observed: Option<f64>) -> LoadContract {
     LoadContract {
         id: LoadId("dehumidifier".into()),
-        load_type: LoadType::Dehumidifier,
         planning: Planning::Immediate,
         power_kw: 0.3,
         authority: true,
@@ -98,8 +98,9 @@ pub fn immediate_contract(observed: Option<f64>) -> LoadContract {
             windows: vec![],
         },
         must_have: Demand {
-            kind: DemandKind::HumidityBelow {
-                max: 65.0,
+            kind: DemandKind::Threshold {
+                dir: crate::model::ThresholdDir::Below,
+                limit: 65.0,
                 observed,
                 start_hysteresis: 2.0,
                 drop_per_hour: 0.0,
@@ -110,8 +111,9 @@ pub fn immediate_contract(observed: Option<f64>) -> LoadContract {
             max_price: Some(0.15),
         },
         can_take: Some(Demand {
-            kind: DemandKind::HumidityBelow {
-                max: 55.0,
+            kind: DemandKind::Threshold {
+                dir: crate::model::ThresholdDir::Below,
+                limit: 55.0,
                 observed,
                 start_hysteresis: 0.0,
                 drop_per_hour: 0.0,
@@ -134,7 +136,6 @@ pub fn immediate_contract(observed: Option<f64>) -> LoadContract {
 pub fn predictive_contract(observed: Option<f64>, ambient: Option<f64>) -> LoadContract {
     LoadContract {
         id: LoadId("aircon".into()),
-        load_type: LoadType::Aircon,
         planning: Planning::Predictive,
         power_kw: 2.5,
         authority: true,

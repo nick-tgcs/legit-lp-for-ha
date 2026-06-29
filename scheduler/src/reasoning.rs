@@ -12,7 +12,7 @@ use crate::config::{
     DemandCfg, LoadConfig, StorageConfig, StorageGoalCfg, TimeRef, ValueRef, WindowCfg,
 };
 use crate::lp::{LoadPlan, StoragePlan};
-use crate::model::{DemandKind, LoadContract, Window};
+use crate::model::{DemandKind, LoadContract, ThresholdDir, Window};
 use crate::rules;
 use crate::status::{PlanBlock, ReasonFact, Reasoning, StepBucket};
 use crate::time::{in_window, window_instances, Grid};
@@ -50,17 +50,19 @@ fn mh_window(c: &LoadContract) -> Option<Window> {
         DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
             Some(*window)
         }
-        DemandKind::HumidityBelow { window, .. } => *window,
+        DemandKind::Threshold { window, .. } => *window,
     }
 }
 
 /// The registry window cfg (carries the TimeRef sources) for a demand.
 fn cfg_window(d: &DemandCfg) -> Option<&WindowCfg> {
     match d {
-        DemandCfg::Runtime { window, .. } | DemandCfg::TemperatureBand { window, .. } => {
-            Some(window)
+        DemandCfg::Runtime { window, .. }
+        | DemandCfg::TemperatureBand { window, .. }
+        | DemandCfg::Program { window, .. } => Some(window),
+        DemandCfg::HumidityBelow { window, .. } | DemandCfg::Threshold { window, .. } => {
+            window.as_ref()
         }
-        DemandCfg::HumidityBelow { window, .. } => window.as_ref(),
     }
 }
 
@@ -68,7 +70,9 @@ fn cfg_max_price(d: &DemandCfg) -> Option<&ValueRef> {
     match d {
         DemandCfg::Runtime { max_price, .. }
         | DemandCfg::HumidityBelow { max_price, .. }
-        | DemandCfg::TemperatureBand { max_price, .. } => max_price.as_ref(),
+        | DemandCfg::Threshold { max_price, .. }
+        | DemandCfg::TemperatureBand { max_price, .. }
+        | DemandCfg::Program { max_price, .. } => max_price.as_ref(),
     }
 }
 
@@ -218,7 +222,7 @@ pub fn for_load(
     let mut binding = None;
     let mut fix_hint = None;
 
-    if let DemandKind::Runtime { minutes, completed_minutes, window } = &c.must_have.kind {
+    if let DemandKind::Runtime { minutes, completed_minutes, window, .. } = &c.must_have.kind {
         // `minutes` is required PER window instance via the shared
         // `WindowInstance::required_minutes` (the same amount the LP enforces in lp.rs):
         // the CURRENT occurrence demands its full runtime (`completed`, below, covers the
@@ -269,17 +273,26 @@ pub fn for_load(
         }
     } else {
         // Setpoint loads (aircon/dehumidifier): band + observed + unmet.
+        // `lo`/`hi` carry whichever bound(s) the load is held within: a band has
+        // both; a threshold has only the side it keeps to (below → hi, above → lo).
         let (lo, hi, obs) = match &c.must_have.kind {
             DemandKind::TemperatureBand { min, max, observed, .. } => {
                 (Some(*min), Some(*max), *observed)
             }
-            DemandKind::HumidityBelow { max, observed, .. } => (None, Some(*max), *observed),
+            DemandKind::Threshold { dir: ThresholdDir::Below, limit, observed, .. } => {
+                (None, Some(*limit), *observed)
+            }
+            DemandKind::Threshold { dir: ThresholdDir::Above, limit, observed, .. } => {
+                (Some(*limit), None, *observed)
+            }
             _ => (None, None, None),
         };
         if let (Some(lo), Some(hi)) = (lo, hi) {
             metrics.push(ReasonFact::new("Band", format!("{lo:.1}–{hi:.1}"), None));
         } else if let Some(hi) = hi {
             metrics.push(ReasonFact::new("Keep at/below", format!("{hi:.1}"), None));
+        } else if let Some(lo) = lo {
+            metrics.push(ReasonFact::new("Keep at/above", format!("{lo:.1}"), None));
         }
         if let Some(o) = obs {
             metrics.push(ReasonFact::new("Observed", format!("{o:.1}"), None));

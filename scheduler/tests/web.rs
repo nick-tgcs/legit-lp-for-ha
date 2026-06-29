@@ -90,11 +90,36 @@ fn full_report() -> SolveReport {
     }
 }
 
+fn example_registry() -> legit_lp_scheduler::config::RegistryConfig {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
+    legit_lp_scheduler::config::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// An HA client pointed at nothing — fine for every test except the entity-catalog
+/// one, which is the only handler that actually dials HA.
+fn dummy_ha() -> Arc<legit_lp_scheduler::ha_client::HaClient> {
+    Arc::new(legit_lp_scheduler::ha_client::HaClient::new("http://127.0.0.1:1", "x"))
+}
+
 fn state_with(r: SolveReport) -> (WebState, watch::Sender<SolveReport>, Arc<Notify>) {
     let (tx, rx) = watch::channel(r);
     let notify = Arc::new(Notify::new());
     let preview = Arc::new(AtomicBool::new(false));
-    (WebState { report: rx, solve_now: notify.clone(), preview }, tx, notify)
+    let registry = Arc::new(watch::channel(Arc::new(example_registry())).0);
+    let registry_path = std::env::temp_dir().join("lp_web_test_unused_registry.yaml");
+    (
+        WebState {
+            report: rx,
+            solve_now: notify.clone(),
+            preview,
+            registry,
+            registry_path,
+            ha: dummy_ha(),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        },
+        tx,
+        notify,
+    )
 }
 
 fn state() -> (WebState, watch::Sender<SolveReport>, Arc<Notify>) {
@@ -188,7 +213,7 @@ async fn w5_index_uses_relative_urls_only() {
     let (s, _tx, _n) = state();
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
-    for needle in ["./api/status", "./api/events", "./api/solve", "./horizon.svg"] {
+    for needle in ["./api/status", "./api/events", "./api/solve", "./api/preview"] {
         assert!(html.contains(needle), "missing {needle}");
     }
     assert!(
@@ -198,42 +223,39 @@ async fn w5_index_uses_relative_urls_only() {
 }
 
 #[tokio::test]
-async fn w7_index_inlines_the_svg_so_hover_tooltips_work() {
-    // An <img>-loaded SVG is a flat image: no hover, no <title> tooltips. The page
-    // must inline the SVG (fetch its text and inject it) so the per-step hover
-    // readouts render and the user can see the value under the cursor.
+async fn w7_index_is_client_rendered_from_the_report_no_server_svg() {
+    // The Friendly panel replaces the server-rendered multi-lane SVG with a
+    // client-rendered schedule + price sparkline built from the streamed report,
+    // injected live over SSE — no <img>, no /horizon.svg fetch in the page.
     let (s, _tx, _n) = state();
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
-    assert!(!html.contains("<img"), "no <img>: an img-loaded SVG cannot show tooltips");
-    assert!(html.contains("./horizon.svg"), "still loads the chart");
-    assert!(html.contains("innerHTML"), "injects the SVG inline for interactivity");
+    assert!(!html.contains("<img"), "no raster/img chart");
+    assert!(html.contains("./api/events"), "the panel is driven live over SSE");
+    assert!(html.contains("innerHTML"), "renders the view client-side from the report");
+    assert!(html.contains(r#"id="schedcard""#), "the client-rendered schedule timeline is present");
 }
 
 #[tokio::test]
-async fn w11_index_has_per_device_why_panels_for_loads_and_storage() {
-    // Every load AND storage device gets an Overview/Why two-tab card driven by the
-    // serialised `reasoning` object — so the user can see why the LP did what it did.
+async fn w11_index_has_per_device_overview_why_plan_cards() {
+    // Every load AND storage device gets an Overview/Why/Plan card driven by the
+    // serialised `reasoning` object — plain-language first (Overview/Why), with the
+    // raw internal values in the Plan tab's monospace `tech` line for power users.
     let (s, _tx, _n) = state();
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
     assert!(html.contains("setTab"), "tab switching is wired");
     assert!(
-        html.contains(">Overview<") && html.contains(">Why<") && html.contains(">Plan<"),
+        html.contains("'Overview'") && html.contains("'Why'") && html.contains("'Plan'"),
         "all three tabs are present (Overview / Why / Plan)"
     );
     assert!(html.contains(r#"id="storage""#), "storage devices get their own cards");
     assert!(html.contains("reasoning"), "cards render the reasoning view-model");
-    assert!(html.contains("Resolved inputs"), "the Why tab lists resolved live inputs");
-    // The Plan tab renders each device's full-horizon schedule from the streamed
-    // arrays (no API change): a sparkline + an exact per-block table.
+    // The Plan tab keeps the raw internal values in a monospace "tech" line — the
+    // plain-language-first, raw-values-in-Plan pattern that is the redesign's core.
     assert!(
-        html.contains("planView") && html.contains("planBattery") && html.contains("planLoad"),
-        "the Plan tab builds per-device full-horizon views"
-    );
-    assert!(
-        html.contains("class=\"plan-tbl\"") || html.contains("plan-tbl"),
-        "the Plan tab renders the exact per-block table"
+        html.contains("class=\"tech\"") || html.contains("tech"),
+        "Plan tab has the raw tech line"
     );
 }
 
@@ -246,10 +268,20 @@ async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
     let _tx = tx; // keep the channel's last value readable
     let notify = Arc::new(Notify::new());
     let preview = Arc::new(AtomicBool::new(false));
+    let registry = Arc::new(watch::channel(Arc::new(example_registry())).0);
+    let registry_path = std::env::temp_dir().join("lp_web_test_unused_registry.yaml");
 
     let waiter = notify.clone();
     let waiting = tokio::spawn(async move { waiter.notified().await });
-    let on = WebState { report: rx.clone(), solve_now: notify.clone(), preview: preview.clone() };
+    let on = WebState {
+        report: rx.clone(),
+        solve_now: notify.clone(),
+        preview: preview.clone(),
+        registry: registry.clone(),
+        registry_path: registry_path.clone(),
+        ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
     let resp = router(on)
         .oneshot(Request::post("/api/preview?on=true").body(Body::empty()).unwrap())
         .await
@@ -262,7 +294,15 @@ async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
         .unwrap();
 
     // ...and the same endpoint turns it back off (deterministic set, not a blind toggle).
-    let off = WebState { report: rx, solve_now: notify.clone(), preview: preview.clone() };
+    let off = WebState {
+        report: rx,
+        solve_now: notify.clone(),
+        preview: preview.clone(),
+        registry,
+        registry_path,
+        ha: Arc::new(legit_lp_scheduler::ha_client::HaClient::new("http://127.0.0.1:1", "x")),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
     let resp = router(off)
         .oneshot(Request::post("/api/preview?on=false").body(Body::empty()).unwrap())
         .await
@@ -272,34 +312,433 @@ async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
 }
 
 #[tokio::test]
-async fn w9_index_has_a_preview_checkbox_wired_to_the_api() {
-    // The user asked to toggle preview from the panel itself. The page must carry
-    // a checkbox that POSTs to ./api/preview (relative, for the ingress prefix)
-    // and reflects the server's reported preview state.
-    let (s, _tx, _n) = state();
-    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
-    let html = body_of(resp).await;
-    assert!(html.contains(r#"type="checkbox""#), "a checkbox control is present");
-    assert!(html.contains(r#"id="preview""#), "it is the preview checkbox");
-    assert!(html.contains("./api/preview"), "it POSTs to the relative preview endpoint");
-    assert!(html.contains("r.preview"), "its checked state binds to the reported preview flag");
-}
-
-#[tokio::test]
-async fn w10_index_has_an_instant_crosshair_tooltip() {
-    // Beyond the native <title> fallback, the page shows an instant, styled
-    // tooltip + crosshair driven by the SAME per-step readouts: it maps the
-    // cursor to the hovered hit-band and reuses that band's <title> text — no new
-    // data plumbing, just immediate styled presentation of the server's readout.
+async fn w9_index_has_a_preview_toggle_wired_to_the_api() {
+    // The Friendly panel's Preview control is a switch (toggle), not a checkbox. It
+    // POSTs to the relative ./api/preview endpoint and reflects the reported state.
     let (s, _tx, _n) = state();
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
     assert!(
-        html.contains(r#"id="tip""#) && html.contains(r#"id="xhair""#),
-        "tooltip + crosshair elements present"
+        html.contains(r#"id="pvbtn""#) && html.contains(r#"id="pvtrack""#),
+        "a switch toggle is present"
     );
-    assert!(html.contains("elementFromPoint"), "maps the cursor to the hovered step band");
-    assert!(html.contains("closest('.hit')"), "reuses the hovered hit-band's readout");
+    assert!(html.contains("./api/preview"), "it POSTs to the relative preview endpoint");
+    assert!(html.contains("r.preview"), "its on-state binds to the reported preview flag");
+}
+
+#[tokio::test]
+async fn w10_index_has_the_friendly_hero_banner_and_now_tiles() {
+    // The Friendly redesign leads with glanceable summary: an eyebrow + hero
+    // headline, a mode banner (Preview/Live/Dry-run), and the four "now" stat tiles.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    assert!(html.contains(r#"id="banner""#), "the mode banner is present");
+    assert!(html.contains(r#"id="tiles""#), "the four 'now' stat tiles are present");
+    assert!(
+        html.contains(r#"id="heroH""#) && html.contains("eyebrow"),
+        "the hero headline is present"
+    );
+}
+
+#[tokio::test]
+async fn w14_commit_registry_persists_publishes_and_nudges_a_resolve() {
+    // The hot-swap seam the CRUD API builds on: committing an edited registry must
+    // (1) atomically persist it to the registry path, (2) publish it on the watch
+    // channel so the solve loop hot-swaps it, and (3) fire solve-now for an instant
+    // re-plan — all WITHOUT an add-on restart.
+    let (tx, rx) = watch::channel(report());
+    let _tx = tx;
+    let notify = Arc::new(Notify::new());
+    let waiter = notify.clone();
+    let waiting = tokio::spawn(async move { waiter.notified().await });
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legit_lp.yaml");
+    let registry = Arc::new(watch::channel(Arc::new(example_registry())).0);
+    let mut reg_rx = registry.subscribe();
+    let s = WebState {
+        report: rx,
+        solve_now: notify.clone(),
+        preview: Arc::new(AtomicBool::new(false)),
+        registry: registry.clone(),
+        registry_path: path.clone(),
+        ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    // Edit: drop the last load, then commit.
+    let mut next = (*s.current_registry()).clone();
+    let removed = next.loads.pop().unwrap().id;
+    s.commit_registry(next).expect("commit succeeds");
+
+    // (1) persisted + reloads without the removed device.
+    let on_disk = legit_lp_scheduler::config::parse(&std::fs::read_to_string(&path).unwrap())
+        .expect("persisted registry re-parses");
+    assert!(!on_disk.loads.iter().any(|l| l.id == removed), "edit hit the file");
+    // (2) published to the watch channel for the loop to hot-swap.
+    assert!(reg_rx.has_changed().unwrap());
+    assert!(!reg_rx.borrow_and_update().loads.iter().any(|l| l.id == removed), "published");
+    // (3) nudged a re-solve.
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("commit fired solve-now")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn w15_commit_registry_rejects_invalid_without_persisting() {
+    // A bad edit must be refused by validation BEFORE it touches the file or the
+    // running plan — fail loud + safe.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legit_lp.yaml");
+    std::fs::write(&path, "sentinel: untouched").unwrap();
+    let registry = Arc::new(watch::channel(Arc::new(example_registry())).0);
+    let s = WebState {
+        report: watch::channel(report()).1,
+        solve_now: Arc::new(Notify::new()),
+        preview: Arc::new(AtomicBool::new(false)),
+        registry: registry.clone(),
+        registry_path: path.clone(),
+        ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let mut bad = (*s.current_registry()).clone();
+    bad.global.planning.grid_minutes = 7; // does not divide 60
+    assert!(s.commit_registry(bad).is_err(), "invalid edit rejected");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "sentinel: untouched", "file untouched");
+    assert!(!registry.borrow().loads.is_empty(), "live registry unchanged");
+}
+
+// ---- CRUD API over HTTP (the wizard's backend) ----
+
+/// A WebState backed by a real temp registry file + an example registry. Returns
+/// the dir (keep it alive) and the registry channel (to assert the live swap).
+fn crud_state() -> (
+    WebState,
+    tempfile::TempDir,
+    Arc<watch::Sender<Arc<legit_lp_scheduler::config::RegistryConfig>>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(watch::channel(Arc::new(example_registry())).0);
+    let s = WebState {
+        report: watch::channel(report()).1,
+        solve_now: Arc::new(Notify::new()),
+        preview: Arc::new(AtomicBool::new(false)),
+        registry: registry.clone(),
+        registry_path: dir.path().join("legit_lp.yaml"),
+        ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    (s, dir, registry)
+}
+
+fn json_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Build a `{"type":"load","config":{…}}` upsert body from the example's first
+/// load, renamed to `id`.
+fn load_upsert(id: &str) -> serde_json::Value {
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = id.into();
+    serde_json::json!({ "type": "load", "config": cfg })
+}
+
+#[tokio::test]
+async fn w16_get_devices_lists_loads_and_storage() {
+    let (s, _dir, _reg) = crud_state();
+    let resp =
+        router(s).oneshot(Request::get("/api/devices").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
+    let loads: Vec<&str> =
+        v["loads"].as_array().unwrap().iter().map(|l| l["id"].as_str().unwrap()).collect();
+    assert_eq!(loads, ["hot_water", "dehumidifier", "aircon"]);
+    assert_eq!(v["storage"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn w17_add_device_persists_and_hot_swaps() {
+    let (s, _dir, reg) = crud_state();
+    let path = s.registry_path.clone();
+    let resp = router(s)
+        .oneshot(json_req("POST", "/api/devices", load_upsert("pool_pump")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Persisted to disk, hot-swapped into the live registry, and returned.
+    let on_disk =
+        legit_lp_scheduler::config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(on_disk.loads.iter().any(|l| l.id == "pool_pump"), "written to the file");
+    assert!(
+        reg.borrow().loads.iter().any(|l| l.id == "pool_pump"),
+        "swapped into the live registry"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
+    assert_eq!(v["loads"].as_array().unwrap().len(), 4, "returns the updated list");
+}
+
+#[tokio::test]
+async fn w18_add_duplicate_id_is_rejected() {
+    let (s, _dir, _reg) = crud_state();
+    let resp = router(s)
+        .oneshot(json_req("POST", "/api/devices", load_upsert("hot_water")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "an existing id can't be re-added");
+}
+
+#[tokio::test]
+async fn w19_edit_device_replaces_by_id() {
+    let (s, _dir, reg) = crud_state();
+    // Edit hot_water: bump its power. Send the full (modified) config.
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["capability"]["power_kw"] = serde_json::json!(9.9);
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp = router(s).oneshot(json_req("PUT", "/api/devices/hot_water", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hw = reg.borrow().loads.iter().find(|l| l.id == "hot_water").unwrap().clone();
+    assert_eq!(hw.capability.power_kw.as_literal(), Some(9.9), "the edit applied live");
+}
+
+#[tokio::test]
+async fn w27_edit_can_rename_a_device() {
+    // The edit wizard's Name field is editable; a PUT to the OLD id with a body carrying a NEW id
+    // must rename (the device leaves under the new id, and the old id is gone) — not duplicate.
+    let (s, _dir, reg) = crud_state();
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = "hot_water_tank".into();
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp = router(s).oneshot(json_req("PUT", "/api/devices/hot_water", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "a non-colliding rename succeeds");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "hot_water_tank"), "device now under the new id");
+    assert!(
+        !r.loads.iter().any(|l| l.id == "hot_water"),
+        "old id is gone (renamed, not duplicated)"
+    );
+}
+
+#[tokio::test]
+async fn w20_edit_missing_device_is_404() {
+    let (s, _dir, _reg) = crud_state();
+    let resp =
+        router(s).oneshot(json_req("PUT", "/api/devices/nope", load_upsert("nope"))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn w29_concurrent_writes_do_not_lose_updates() {
+    // Codex P2: each device write is a read-modify-write of the WHOLE registry. Under true
+    // parallelism, two handlers cloning the same base and both committing would let the last
+    // writer drop the other's edit. The write_lock serializes them, so every concurrent add must
+    // survive (passes deterministically with the lock; without it, adds can vanish).
+    let (s, _dir, reg) = crud_state();
+    let mut handles = vec![];
+    for i in 0..16 {
+        let s2 = s.clone();
+        handles.push(tokio::spawn(async move {
+            router(s2)
+                .oneshot(json_req("POST", "/api/devices", load_upsert(&format!("concurrent_{i}"))))
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    for h in handles {
+        assert_eq!(h.await.unwrap(), StatusCode::OK, "every concurrent add commits");
+    }
+    let r = reg.borrow();
+    for i in 0..16 {
+        assert!(
+            r.loads.iter().any(|l| l.id == format!("concurrent_{i}")),
+            "concurrent_{i} survived (no lost update)"
+        );
+    }
+}
+
+#[tokio::test]
+async fn w28_edit_can_change_a_device_type_by_id() {
+    // Codex P2: PUT replaces a device by id even across collections. Editing the load 'aircon'
+    // with a STORAGE body must move it out of loads and into storage (not 404 on the storage-only
+    // lookup). The reverse (storage→load) too.
+    let (s, _dir, reg) = crud_state();
+    let mut sto = serde_json::to_value(&example_registry().global.storage[0]).unwrap();
+    sto["id"] = "aircon".into(); // keep the path id; just change the type
+    let body = serde_json::json!({ "type": "storage", "config": sto });
+    let resp =
+        router(s.clone()).oneshot(json_req("PUT", "/api/devices/aircon", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "load→storage type change by id succeeds");
+    {
+        let r = reg.borrow();
+        assert!(!r.loads.iter().any(|l| l.id == "aircon"), "aircon left the loads collection");
+        assert!(
+            r.global.storage.iter().any(|d| d.id == "aircon"),
+            "aircon is now a storage device"
+        );
+    }
+    // And back: storage 'aircon' → a load.
+    let mut ld = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    ld["id"] = "aircon".into();
+    let body = serde_json::json!({ "type": "load", "config": ld });
+    let resp = router(s).oneshot(json_req("PUT", "/api/devices/aircon", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "storage→load type change by id succeeds");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "aircon"), "aircon is a load again");
+    assert!(!r.global.storage.iter().any(|d| d.id == "aircon"), "and no longer a storage device");
+}
+
+#[tokio::test]
+async fn w26_edit_renaming_a_load_onto_a_storage_id_is_rejected() {
+    // Codex P2: ids are a single namespace. PUT-renaming hot_water to an existing battery id
+    // (sonnen01) must be a 409 — not silently create a load + storage sharing 'sonnen01', which
+    // would make list/edit/delete ambiguous. The live registry must stay untouched.
+    let (s, _dir, reg) = crud_state();
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = "sonnen01".into();
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp =
+        router(s.clone()).oneshot(json_req("PUT", "/api/devices/hot_water", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "a load can't take a battery's id");
+    let r = reg.borrow();
+    assert!(r.loads.iter().any(|l| l.id == "hot_water"), "hot_water still present, unrenamed");
+    assert_eq!(
+        r.global.storage.iter().filter(|d| d.id == "sonnen01").count(),
+        1,
+        "no duplicate id"
+    );
+}
+
+#[tokio::test]
+async fn w21_delete_device_removes_it() {
+    let (s, _dir, reg) = crud_state();
+    let resp = router(s.clone())
+        .oneshot(Request::delete("/api/devices/aircon").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!reg.borrow().loads.iter().any(|l| l.id == "aircon"), "removed from the live registry");
+    // Deleting something that isn't there is a 404.
+    let resp = router(s)
+        .oneshot(Request::delete("/api/devices/aircon").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn w22_add_invalid_device_is_rejected_without_persisting() {
+    let (s, _dir, reg) = crud_state();
+    let path = s.registry_path.clone();
+    // A load with planning=runtime but no runtime/program amount fails validation.
+    let mut cfg = serde_json::to_value(&example_registry().loads[0]).unwrap();
+    cfg["id"] = "broken".into();
+    cfg["must_have"] =
+        serde_json::json!({ "kind": "runtime", "window": { "start": "00:00", "end": "06:00" } });
+    let body = serde_json::json!({ "type": "load", "config": cfg });
+    let resp = router(s).oneshot(json_req("POST", "/api/devices", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "validation rejects it");
+    assert!(!reg.borrow().loads.iter().any(|l| l.id == "broken"), "live registry untouched");
+    assert!(!path.exists(), "nothing was written");
+}
+
+#[tokio::test]
+async fn w25_storage_device_crud_round_trip() {
+    // Add → edit → remove a STORAGE device over the API (the battery wizard path).
+    let (s, _dir, reg) = crud_state();
+    let mut cfg = serde_json::to_value(&example_registry().global.storage[0]).unwrap();
+    cfg["id"] = "ev".into();
+    let add = serde_json::json!({ "type": "storage", "config": cfg });
+    let resp = router(s.clone()).oneshot(json_req("POST", "/api/devices", add)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "battery added");
+    assert!(reg.borrow().global.storage.iter().any(|d| d.id == "ev"), "added to the live registry");
+
+    // Edit it: change the discharge limit.
+    let mut cfg2 =
+        serde_json::to_value(reg.borrow().global.storage.iter().find(|d| d.id == "ev").unwrap())
+            .unwrap();
+    cfg2["max_discharge_kw"] = serde_json::json!(0.0); // charge-only
+    let edit = serde_json::json!({ "type": "storage", "config": cfg2 });
+    let resp = router(s.clone()).oneshot(json_req("PUT", "/api/devices/ev", edit)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "battery edited");
+    assert_eq!(
+        reg.borrow()
+            .global
+            .storage
+            .iter()
+            .find(|d| d.id == "ev")
+            .unwrap()
+            .max_discharge_kw
+            .as_literal(),
+        Some(0.0),
+        "edit applied live"
+    );
+
+    // Remove it.
+    let resp = router(s)
+        .oneshot(Request::delete("/api/devices/ev").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "battery removed");
+    assert!(!reg.borrow().global.storage.iter().any(|d| d.id == "ev"), "gone from the registry");
+}
+
+#[tokio::test]
+async fn w24_panel_has_device_management_and_the_add_edit_wizard() {
+    // The v2 capability: a devices-management view + a 4-step add/edit wizard with an
+    // entity picker and the literal-or-entity affordance, all wired to the CRUD API.
+    let (s, _tx, _n) = state();
+    let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let html = body_of(resp).await;
+    // The three views + entry points.
+    assert!(
+        html.contains(r#"id="view-devices""#) && html.contains(r#"id="view-wizard""#),
+        "devices + wizard views present"
+    );
+    assert!(
+        html.contains(r#"id="manageBtn""#) && html.contains(r#"id="addBtn""#),
+        "Manage devices + Add device entry points"
+    );
+    assert!(html.contains("edit-link"), "dashboard cards carry an Edit affordance");
+    // The 4 wizard steps + the 5 device kinds.
+    for step in ["Type", "Connect", "Rules", "Review"] {
+        assert!(html.contains(&format!("'{step}'")), "wizard step {step}");
+    }
+    for kind in ["Scheduled run", "Comfort range", "Keep under a limit", "Fixed program", "Battery"]
+    {
+        assert!(html.contains(kind), "kind card '{kind}'");
+    }
+    // Entity picker hits the catalog; CRUD hits the devices API.
+    assert!(html.contains("./api/entities"), "entity picker queries the live catalog");
+    assert!(html.contains("./api/devices"), "wizard saves via the devices CRUD API");
+    // The literal-or-entity affordance (preserves no-hardcoding entity-refs on edit).
+    assert!(
+        html.contains("vr-toggle") && html.contains("vrOut"),
+        "literal-or-entity affordance present"
+    );
+    // Remove uses an inline confirm.
+    assert!(
+        html.contains("data-askremove") && html.contains("data-remove"),
+        "inline remove confirm"
+    );
+}
+
+#[tokio::test]
+async fn w23_entities_endpoint_is_wired_and_fails_gracefully() {
+    // The catalog handler dials HA; with HA unreachable it must 502, never panic or
+    // fake data. (Catalog parsing/filtering is unit-tested in ha_client.)
+    let (s, _tx, _n) = state();
+    let resp = router(s)
+        .oneshot(Request::get("/api/entities?domains=switch,sensor").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]
@@ -340,26 +779,21 @@ async fn w12_panel_applies_the_pr35_review_fixes() {
 }
 
 #[tokio::test]
-async fn w13_panel_applies_the_pr36_review_fixes() {
-    // Two PR #36 Codex review fixes are wired into the served panel asset:
+async fn w13_preview_banner_does_not_overclaim_safety() {
+    // The preview banner must not overclaim safety: in live preview (no dry-run) it
+    // warns that Optimiser-mode devices (the batteries) are STILL actuated, rather
+    // than the misleading "nothing is controlled".
     let (s, _tx, _n) = state();
     let resp = router(s).oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
     let html = body_of(resp).await;
-    // (1) Plan-tab block end times use the END-EXCLUSIVE boundary (hmEnd), not the
-    //     off-by-one `Math.min(s.b,n-1)` that rendered every block one step short.
-    assert!(html.contains("hmEnd("), "plan rows render end times via hmEnd");
-    assert!(
-        !html.contains("Math.min(s.b,n-1)"),
-        "the off-by-one end-index clamp is gone from the time labels"
-    );
-    // (2) The preview banner no longer overclaims safety: in live preview (no
-    //     dry-run) it warns that Optimiser-mode devices are still actuated.
     assert!(
         !html.contains("No devices are being controlled"),
         "the misleading 'nothing controlled' preview text is gone"
     );
     assert!(
-        html.contains("still being controlled live"),
+        html.contains("still controlled live"),
         "live preview warns that Optimiser devices still actuate"
     );
+    // Durations/labels derive from the report's grid step length, not a hard-coded 15.
+    assert!(html.contains("r.grid_minutes"), "time math uses grid_minutes");
 }
