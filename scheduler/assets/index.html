@@ -952,10 +952,11 @@ function wirePicker(box){
 function buildPayload(){
  const d=wz.d;
  if(!d.name) throw new Error('Give the device a name.');
- // Derive the id from the (editable) name even on edit, so a rename actually persists. doSave
- // PUTs to the ORIGINAL id in the URL, so the backend replaces that device with this new id
- // (its cross-namespace 409 guard rejects a collision). Unchanged name → same slug → no rename.
- const id=slug(d.name);
+ // Derive the id from the (editable) name so a rename persists (doSave PUTs to the ORIGINAL id in
+ // the URL; the backend replaces it, its 409 guard rejecting a collision). But if the name field
+ // is UNCHANGED from the existing id, keep it verbatim — slugging would silently rewrite a valid
+ // hand-authored id (e.g. `ev-charger` → `ev_charger`) on an edit that didn't touch the name.
+ const id=(wz.mode==='edit'&&d.name===wz.base.id)?wz.base.id:slug(d.name);
  // No-hardcoding on edit: the wizard surfaces a simplified view (literal hours, a plain
  // min-run number, a HH:MM window, a yes/no grid-charge toggle), but a live registry binds
  // these to HA entities (sliders/booleans/datetimes). Overwriting them with the simplified

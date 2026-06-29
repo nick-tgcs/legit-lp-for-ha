@@ -40,6 +40,11 @@ pub struct WebState {
     /// Live HA client, used only to serve the entity catalog (`/api/entities`) to
     /// the wizard's entity picker. The solve loop has its own borrow of the client.
     pub ha: Arc<HaClient>,
+    /// Serializes registry mutations (add/edit/delete). Each is a read-modify-write of
+    /// the WHOLE file, so two overlapping writes would otherwise both clone the same
+    /// current registry and the last to commit would silently drop the other's edit.
+    /// Held across the clone→mutate→commit so concurrent writes apply one-at-a-time.
+    pub write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl WebState {
@@ -125,6 +130,7 @@ fn commit_or_error(s: &WebState, next: RegistryConfig) -> Response {
 }
 
 async fn add_device(State(s): State<WebState>, Json(dev): Json<DeviceUpsert>) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
     let mut next = (*s.current_registry()).clone();
     let id = dev.id().to_string();
     if next.loads.iter().any(|l| l.id == id) || next.global.storage.iter().any(|d| d.id == id) {
@@ -143,6 +149,7 @@ async fn edit_device(
     Path(id): Path<String>,
     Json(dev): Json<DeviceUpsert>,
 ) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
     let mut next = (*s.current_registry()).clone();
     // A rename must not collide with ANY other device — ids are a single namespace across
     // loads + storage (validation enforces this too, but a 409 here is the clearer error and
@@ -184,6 +191,7 @@ async fn edit_device(
 }
 
 async fn delete_device(State(s): State<WebState>, Path(id): Path<String>) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
     let mut next = (*s.current_registry()).clone();
     let before = next.loads.len() + next.global.storage.len();
     next.loads.retain(|l| l.id != id);

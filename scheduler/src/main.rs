@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         registry: registry_tx.clone(),
         registry_path: std::path::PathBuf::from(&loads_path),
         ha: ha.clone(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tokio::spawn(async move {

@@ -115,6 +115,7 @@ fn state_with(r: SolveReport) -> (WebState, watch::Sender<SolveReport>, Arc<Noti
             registry,
             registry_path,
             ha: dummy_ha(),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
         },
         tx,
         notify,
@@ -279,6 +280,7 @@ async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
         registry: registry.clone(),
         registry_path: registry_path.clone(),
         ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let resp = router(on)
         .oneshot(Request::post("/api/preview?on=true").body(Body::empty()).unwrap())
@@ -299,6 +301,7 @@ async fn w8_preview_toggle_sets_the_shared_flag_and_nudges_a_resolve() {
         registry,
         registry_path,
         ha: Arc::new(legit_lp_scheduler::ha_client::HaClient::new("http://127.0.0.1:1", "x")),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let resp = router(off)
         .oneshot(Request::post("/api/preview?on=false").body(Body::empty()).unwrap())
@@ -361,6 +364,7 @@ async fn w14_commit_registry_persists_publishes_and_nudges_a_resolve() {
         registry: registry.clone(),
         registry_path: path.clone(),
         ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // Edit: drop the last load, then commit.
@@ -397,6 +401,7 @@ async fn w15_commit_registry_rejects_invalid_without_persisting() {
         registry: registry.clone(),
         registry_path: path.clone(),
         ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let mut bad = (*s.current_registry()).clone();
     bad.global.planning.grid_minutes = 7; // does not divide 60
@@ -423,6 +428,7 @@ fn crud_state() -> (
         registry: registry.clone(),
         registry_path: dir.path().join("legit_lp.yaml"),
         ha: dummy_ha(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     (s, dir, registry)
 }
@@ -525,6 +531,36 @@ async fn w20_edit_missing_device_is_404() {
     let resp =
         router(s).oneshot(json_req("PUT", "/api/devices/nope", load_upsert("nope"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn w29_concurrent_writes_do_not_lose_updates() {
+    // Codex P2: each device write is a read-modify-write of the WHOLE registry. Under true
+    // parallelism, two handlers cloning the same base and both committing would let the last
+    // writer drop the other's edit. The write_lock serializes them, so every concurrent add must
+    // survive (passes deterministically with the lock; without it, adds can vanish).
+    let (s, _dir, reg) = crud_state();
+    let mut handles = vec![];
+    for i in 0..16 {
+        let s2 = s.clone();
+        handles.push(tokio::spawn(async move {
+            router(s2)
+                .oneshot(json_req("POST", "/api/devices", load_upsert(&format!("concurrent_{i}"))))
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    for h in handles {
+        assert_eq!(h.await.unwrap(), StatusCode::OK, "every concurrent add commits");
+    }
+    let r = reg.borrow();
+    for i in 0..16 {
+        assert!(
+            r.loads.iter().any(|l| l.id == format!("concurrent_{i}")),
+            "concurrent_{i} survived (no lost update)"
+        );
+    }
 }
 
 #[tokio::test]
