@@ -757,7 +757,10 @@ function freshDraft(){ return {name:'',control:'',running:'',authority:'',observ
  capacity:{mode:'literal',lit:'10',ent:''},maxCharge:{mode:'literal',lit:'4',ent:''},maxDischarge:{mode:'literal',lit:'4',ent:''},eff:{mode:'literal',lit:'0.9',ent:''},reserve:{mode:'literal',lit:'10',ent:''},maxSoc:{mode:'literal',lit:'100',ent:''},gridCharge:true,cycleCost:{mode:'literal',lit:'0.001',ent:''} }; }
 function draftFromLoad(l){ const d=freshDraft(); const mh=l.must_have||{}; d.name=l.id; d.control=(l.control&&l.control.start&&l.control.start.target)||''; d.running=(l.state&&l.state.running_entity)||''; d.authority=(l.authority&&l.authority.enabled_entity)||''; d.observed=(l.state&&l.state.observed_entity)||''; d.power=vrFrom(l.capability&&l.capability.power_kw);
  if(mh.amount_hours!=null||mh.length_hours!=null)d.hours=vrFrom(mh.amount_hours!=null?mh.amount_hours:mh.length_hours);
- else if(mh.amount_minutes!=null||mh.length_minutes!=null)d.hours=vrFrom(mh.amount_minutes!=null?mh.amount_minutes:mh.length_minutes);
+ else if(mh.amount_minutes!=null||mh.length_minutes!=null){ const mv=mh.amount_minutes!=null?mh.amount_minutes:mh.length_minutes;
+  // The field is in hours: an entity-ref minutes value is shown as the entity (preserved as
+  // minutes on save); a literal minutes value is converted to hours so it isn't mislabelled.
+  d.hours=(mv!=null&&typeof mv==='object'&&mv.entity!=null)?vrFrom(mv):vrFrom((typeof mv==='object'?mv.value:mv)/60); }
  if(mh.window){d.winStart=tref(mh.window.start);d.winEnd=tref(mh.window.end);}
  d.cap=vrFrom(mh.max_price); d.target=vrFrom(mh.target_c); d.band=vrFrom(mh.band_c);
  if(mh.kind==='threshold'){d.thDir=mh.direction||'below';d.thValue=vrFrom(mh.value);d.hyst=vrFrom(mh.start_hysteresis);}
@@ -962,23 +965,32 @@ function buildPayload(){
  // keeps immediate/predictive, a runtime/program kind is always runtime. Adding: derive from kind.
  let planning=setpoint?'immediate':'runtime';
  if(wz.mode==='edit'&&setpoint&&(base.planning==='predictive'||base.planning==='immediate'))planning=base.planning;
+ // Control: if the user didn't change the controlled entity on edit, keep base.control
+ // verbatim — it may use a custom service or `data` payload (a script, select.select_option,
+ // …) that the domain-derived turn_on/turn_off would silently drop. Synthesize only when the
+ // target actually changed (or we're adding).
+ const ctlSame=wz.mode==='edit'&&base.control&&base.control.start&&base.control.start.target===d.control;
+ const control=ctlSame?base.control:{start:{service:start,target:d.control},stop:{service:stop,target:d.control}};
  const cfg=Object.assign({}, base, {
   id, planning,
   authority:{enabled_entity:d.authority},
-  control:{start:{service:start,target:d.control},stop:{service:stop,target:d.control}},
+  control,
   state:Object.assign({}, base.state, {running_entity:d.running||d.control}),
   capability:Object.assign({}, base.capability, {power_kw:req(vrOut(d.power),'power')}),
   hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:keepRef(bhr.min_run_minutes,numOr(Number(d.minRun),0)),min_off_minutes:keepRef(bhr.min_off_minutes,numOr(Number(d.minOff),0))}),
-  preferences:{start_cost_aud:numOr(Number(d.startCost),0)},
+  // start_cost_aud can be an entity-ref; keep it on edit rather than freezing it to a literal.
+  preferences:Object.assign({}, base.preferences, {start_cost_aud:keepRef(base.preferences&&base.preferences.start_cost_aud,numOr(Number(d.startCost),0))}),
  });
  if(wz.kind==='comfort'||wz.kind==='threshold')cfg.state.observed_entity=d.observed; else delete cfg.state.observed_entity;
  // Window times are TimeRefs: prod binds them to input_datetime sliders. Keep an entity-backed
  // base window on edit (the wizard shows only HH:MM); use the literal HH:MM otherwise.
  const w={start:keepRef(bw.start,hhmmOut(d.winStart)),end:keepRef(bw.end,hhmmOut(d.winEnd))}, cap=vrOut(d.cap);
- // Emit the run length in the SAME unit base used (hot_water's amount is minutes, bound to a
- // slider) so an edit never reinterprets a minutes entity as hours; default hours on add.
- const amtMinutes=wz.mode==='edit'&&bmh.amount_minutes!=null&&bmh.amount_hours==null;
- const lenMinutes=wz.mode==='edit'&&bmh.length_minutes!=null&&bmh.length_hours==null;
+ // The run-length field is always shown/edited in HOURS. Keep the minutes KEY only when it's an
+ // entity-ref we can't convert (hot_water's slider, bound as amount_minutes) so a slider edit
+ // never reinterprets minutes as hours. A literal-minutes load is loaded as hours (÷60 in
+ // draftFromLoad) and re-emitted as amount_hours, so "90 min" never shows as "90 h".
+ const amtMinutes=wz.mode==='edit'&&isRef(bmh.amount_minutes);
+ const lenMinutes=wz.mode==='edit'&&isRef(bmh.length_minutes);
  if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',window:w}; const amt=req(vrOut(d.hours),'run-time'); if(amtMinutes)cfg.must_have.amount_minutes=keepRef(bmh.amount_minutes,amt); else cfg.must_have.amount_hours=keepRef(bmh.amount_hours,amt); if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMinutes)cfg.must_have.length_minutes=keepRef(bmh.length_minutes,len); else cfg.must_have.length_hours=keepRef(bmh.length_hours,len); if(cap!=null)cfg.must_have.max_price=cap; }
  else if(wz.kind==='comfort'){ cfg.must_have={kind:'temperature_band',target_c:req(vrOut(d.target),'target'),band_c:req(vrOut(d.band),'band'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
