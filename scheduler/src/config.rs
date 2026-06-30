@@ -605,6 +605,18 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
                 ));
             }
         }
+        // A `program` must_have lowers to a run-once runtime block and is only
+        // honoured under planning=runtime (the cycle emits it, but the LP enforces
+        // it solely in the Runtime path). Under immediate/predictive it would be
+        // persisted and then silently never scheduled — reject it loudly instead.
+        if matches!(l.must_have, DemandCfg::Program { .. })
+            && !matches!(l.planning, PlanningMode::Runtime)
+        {
+            return err(format!(
+                "load '{}': a program must_have requires planning=runtime (got {:?})",
+                l.id, l.planning
+            ));
+        }
         match l.planning {
             PlanningMode::Runtime => {
                 let runtime_ok = matches!(
@@ -1122,6 +1134,23 @@ loads:
         let y = new_kinds_yaml().replace("length_minutes: 90", "length_minutes_typo: 90");
         assert!(
             matches!(parse(&y), Err(SchedulerError::Config(m)) if m.contains("planning=runtime"))
+        );
+    }
+
+    #[test]
+    fn rejects_a_program_under_non_runtime_planning() {
+        // A program must_have only schedules under planning=runtime; under
+        // immediate/predictive it would be persisted and silently never run.
+        // Validation must reject the combination loudly.
+        let y = new_kinds_yaml().replace(
+            "  - id: washer\n    planning: runtime",
+            "  - id: washer\n    planning: immediate",
+        );
+        let r = parse(&y);
+        assert!(
+            matches!(&r, Err(SchedulerError::Config(m))
+                if m.contains("program must_have requires planning=runtime")),
+            "expected program/planning rejection, got {r:?}"
         );
     }
 
