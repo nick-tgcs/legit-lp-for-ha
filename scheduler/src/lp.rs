@@ -387,7 +387,10 @@ impl LpPlanner {
             // ---- demands ----------------------------------------------------
             let mut unmet_vars: Vec<Variable> = Vec::new();
             match (&c.planning, &c.must_have.kind) {
-                (Planning::Runtime, DemandKind::Runtime { minutes, window, completed_minutes }) => {
+                (
+                    Planning::Runtime,
+                    DemandKind::Runtime { minutes, window, completed_minutes, exact },
+                ) => {
                     for inst in window_instances(window, grid) {
                         let completed =
                             if inst.steps.start == 0 { f64::from(*completed_minutes) } else { 0.0 };
@@ -399,7 +402,29 @@ impl LpPlanner {
                         unmet_vars.push(u);
                         let credit: Expression =
                             inst.steps.clone().map(|t| (x[t] - ct[t]) * step_min).sum();
-                        constraints.push(constraint!(credit + completed + u >= required));
+                        constraints.push(constraint!(credit.clone() + completed + u >= required));
+                        // A `program` is held to EXACTLY its length: bound credited runtime ABOVE
+                        // too, else stage 2 keeps it on past its length when extra runtime is cheap
+                        // (negative/very-low import prices). Cap the FUTURE credit on the REMAINING
+                        // runtime (required − already-completed), rounded UP to a whole grid step —
+                        // NOT on the total. Capping the total would, for an in-progress program whose
+                        // `completed` isn't grid-aligned (e.g. 83 of 90 min), leave < one step of
+                        // headroom while the min-run lock still forces a full step, making the MILP
+                        // infeasible (solver-error → hold-all) instead of just finishing the program.
+                        if *exact {
+                            let remaining = (required - completed).max(0.0);
+                            let mut cap = (remaining / step_min).ceil() * step_min;
+                            // Never cap below what the initial min-run lock forces ON this solve.
+                            // History with multiple on-spans can leave `remaining == 0` (the block's
+                            // runtime already accrued) while `current_stretch < min_run` still forces
+                            // `on_lock` steps — without this the cap would be 0 and the forced step
+                            // would make the MILP infeasible (solver-error → hold-all). The lock only
+                            // applies to the current occurrence (inst starting at step 0).
+                            if inst.steps.start == 0 {
+                                cap = cap.max(on_lock as f64 * step_min);
+                            }
+                            constraints.push(constraint!(credit <= cap));
+                        }
                     }
                 }
                 (Planning::Immediate, kind) => {
@@ -710,13 +735,18 @@ struct SolvedLoad {
 }
 
 /// Does an `immediate` load need to be on at the current step?
-/// Trigger above max+hysteresis; once running, hold the need until back at/
-/// below max (asymmetric clear kills band-edge chatter). `None` observed →
-/// no demand signal at all.
+/// Trigger past limit+hysteresis (on the demanded side); once running, hold the
+/// need until back at the limit (asymmetric clear kills band-edge chatter).
+/// `None` observed → no demand signal at all.
 fn immediate_needs_on(kind: &DemandKind, running: bool) -> Option<bool> {
     match kind {
-        DemandKind::HumidityBelow { max, observed, start_hysteresis, .. } => {
-            observed.map(|o| o > max + start_hysteresis || (running && o > *max))
+        DemandKind::Threshold { dir, limit, observed, start_hysteresis, .. } => {
+            observed.map(|o| match dir {
+                // Below: too HIGH triggers; hold until back at/below the limit.
+                ThresholdDir::Below => o > limit + start_hysteresis || (running && o > *limit),
+                // Above: too LOW triggers; hold until back at/above the limit.
+                ThresholdDir::Above => o < limit - start_hysteresis || (running && o < *limit),
+            })
         }
         DemandKind::TemperatureBand { min, max, observed, .. } => {
             observed.map(|o| o < *min || o > *max)
@@ -728,7 +758,7 @@ fn immediate_needs_on(kind: &DemandKind, running: bool) -> Option<bool> {
 fn ct_cap_minutes(d: &Demand) -> Option<u32> {
     match &d.kind {
         DemandKind::Runtime { minutes, .. } => Some(*minutes),
-        DemandKind::HumidityBelow { cap_minutes, .. }
+        DemandKind::Threshold { cap_minutes, .. }
         | DemandKind::TemperatureBand { cap_minutes, .. } => *cap_minutes,
     }
 }
@@ -738,6 +768,6 @@ fn ct_window(d: &Demand) -> Option<Window> {
         DemandKind::Runtime { window, .. } | DemandKind::TemperatureBand { window, .. } => {
             Some(*window)
         }
-        DemandKind::HumidityBelow { window, .. } => *window,
+        DemandKind::Threshold { window, .. } => *window,
     }
 }

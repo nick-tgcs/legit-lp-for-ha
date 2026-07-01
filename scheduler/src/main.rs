@@ -37,9 +37,10 @@ async fn main() -> anyhow::Result<()> {
     let (base, token) =
         resolve_endpoint(env("SCHED_HASS_URL"), env("SCHED_TOKEN"), env("SUPERVISOR_TOKEN"));
     tracing::info!(base = %base, "HA API endpoint resolved");
-    let ha = HaClient::new(base, token);
+    // Arc so the solve loop and the panel's entity-catalog endpoint share one client.
+    let ha = Arc::new(HaClient::new(base, token));
 
-    let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_or_seed(
+    let registry = legit_lp_scheduler::config::parse(&legit_lp_scheduler::config::load_registry(
         std::path::Path::new(&loads_path),
     )?)?;
     let planner = LpPlanner {
@@ -53,7 +54,12 @@ async fn main() -> anyhow::Result<()> {
     // and the solve loop. Starts off; not persisted across restarts (the optional
     // HA `preview_entity` boolean is the persistent path).
     let preview = Arc::new(AtomicBool::new(false));
-    let cycle = Cycle {
+    // Registry hot-swap channel: the panel publishes device add/edit/remove edits
+    // here (validated + atomically persisted first), and this loop applies them to
+    // the running `Cycle` before the next solve — no add-on restart required.
+    let (registry_tx, mut registry_rx) = watch::channel(Arc::new(registry.clone()));
+    let registry_tx = Arc::new(registry_tx);
+    let mut cycle = Cycle {
         registry,
         planner,
         dry_run,
@@ -63,7 +69,15 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = watch::channel(SolveReport::default());
     let solve_now = Arc::new(Notify::new());
-    let web = WebState { report: rx, solve_now: solve_now.clone(), preview: preview.clone() };
+    let web = WebState {
+        report: rx,
+        solve_now: solve_now.clone(),
+        preview: preview.clone(),
+        registry: registry_tx.clone(),
+        registry_path: std::path::PathBuf::from(&loads_path),
+        ha: ha.clone(),
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tokio::spawn(async move {
         axum::serve(listener, router(web)).await.ok();
@@ -84,8 +98,19 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         }
+        // Apply any registry edit published by the panel before solving. Rebuild the
+        // planner too, so a change to planning grid/horizon takes effect as well.
+        if registry_rx.has_changed().unwrap_or(false) {
+            let next = registry_rx.borrow_and_update().clone();
+            cycle.planner = LpPlanner {
+                grid_minutes: next.global.planning.grid_minutes,
+                horizon_hours: next.global.planning.horizon_hours,
+            };
+            cycle.registry = (*next).clone();
+            tracing::info!("registry reloaded from a panel edit; applied to this solve");
+        }
         let now = chrono::Utc::now().with_timezone(&tz);
-        let report = cycle.run(&ha, &mut profiles, now).await;
+        let report = cycle.run(ha.as_ref(), &mut profiles, now).await;
         for line in report.log_lines() {
             tracing::info!("{line}");
         }

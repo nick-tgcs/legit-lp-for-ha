@@ -759,3 +759,173 @@ fn b13_unavailable_device_stays_idle() {
     assert!(b.charge_kw.iter().all(|&c| c < 1e-6), "unplugged EV cannot charge");
     assert!(b.target_unmet > 30.0, "and its target is honestly unmet");
 }
+
+// ---- D3: threshold "at-or-above" (humidifier) + program (run-once block) ----
+
+/// A humidifier: keep humidity AT OR ABOVE a limit (the `above` threshold).
+fn humidifier_contract(observed: Option<f64>) -> LoadContract {
+    let mut c = immediate_contract(observed);
+    c.id = LoadId("humidifier".into());
+    c.can_take = None;
+    c.must_have = Demand {
+        kind: DemandKind::Threshold {
+            dir: ThresholdDir::Above,
+            limit: 40.0,
+            observed,
+            start_hysteresis: 2.0,
+            drop_per_hour: 0.0,
+            drift_per_hour: 0.0,
+            window: None,
+            cap_minutes: None,
+        },
+        max_price: Some(0.50), // generous cap: price never blocks here
+    };
+    c
+}
+
+#[test]
+fn p1_threshold_above_runs_when_observed_is_below_the_limit() {
+    let now = sydney(2026, 6, 10, 12, 0);
+    // observed 35 < limit 40 - hysteresis 2 -> the humidifier needs to run now.
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[humidifier_contract(Some(35.0))]);
+    assert!(out.plans[0].on[0], "humidifier turns on when humidity is below target");
+}
+
+#[test]
+fn p2_threshold_above_idles_when_observed_at_or_above_the_limit() {
+    let now = sydney(2026, 6, 10, 12, 0);
+    // observed 45 > limit 40 -> already satisfied, nothing to do.
+    let out = planner().plan(&flat_world(now, STEPS, 0.20), &[humidifier_contract(Some(45.0))]);
+    assert!(!out.plans[0].on[0], "humidifier stays off when already above target");
+}
+
+/// A fixed program (washing machine): one contiguous 60-min block (min_run forced
+/// to the length, single start) inside 00:00-12:00 — the engine shape a config
+/// `kind: program` lowers to.
+fn program_contract() -> LoadContract {
+    let mut c = runtime_contract();
+    c.id = LoadId("washing_machine".into());
+    c.can_take = None;
+    c.hard.min_run = std::time::Duration::from_secs(60 * 60); // 4 steps, contiguous
+    c.hard.min_off = std::time::Duration::from_secs(0);
+    c.hard.max_starts_per_day = Some(1);
+    c.must_have = Demand {
+        kind: DemandKind::Runtime {
+            minutes: 60,
+            window: window(0, 0, 12, 0),
+            completed_minutes: 0,
+            exact: true, // a program is held to EXACTLY its block length
+        },
+        max_price: Some(0.30),
+    };
+    c
+}
+
+#[test]
+fn p3_program_runs_as_one_contiguous_block_at_the_cheapest_start() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    // Cheap valley at steps 16..20 (02:00-03:00), inside the 00:00-12:00 window.
+    let out = planner().plan(&priced_world(now, 0.25, 0.05, 16, 20), &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert_eq!(runs.len(), 1, "a program runs exactly once (one contiguous run)");
+    let (s, e) = runs[0];
+    assert_eq!(e - s, 4, "the run is exactly the 60-min block — not fragmented");
+    assert_eq!((s, e), (16, 20), "and is placed in the cheapest contiguous slot");
+}
+
+#[test]
+fn p5_program_is_capped_at_its_length_even_when_extra_runtime_is_profitable() {
+    // Codex P2: a program must run EXACTLY its declared block, not just "at least". Under a flat
+    // NEGATIVE import price, every extra on-step lowers cost, so a lower-bound-only model would
+    // keep a 60-min program on for the whole 00:00–12:00 window. The `exact` upper bound holds it
+    // to its 4-step (60-min) block. (A deferrable runtime load, exact:false, is intentionally free
+    // to soak up the cheap window — the difference is the whole point of the flag.)
+    let now = sydney(2026, 6, 10, 0, 0);
+    let w = flat_world(now, STEPS, -0.10); // negative: running is profitable everywhere
+    let out = planner().plan(&w, &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert_eq!(runs.len(), 1, "still one contiguous run");
+    let (s, e) = runs[0];
+    assert_eq!(
+        e - s,
+        4,
+        "capped at the 60-min block, not extended by cheap power (run {}..{})",
+        s,
+        e
+    );
+    assert!(out.plans[0].unmet <= 0.0001, "the block is fully met, not unmet");
+}
+
+#[test]
+fn p6_in_progress_program_with_nonaligned_completed_stays_feasible() {
+    // Codex round-10: a program already part-run with a NON-grid-aligned `completed` (50 of a
+    // 60-min block) and the min-run lock armed (current stretch < block) must stay FEASIBLE.
+    // Capping the FUTURE credit on the REMAINING runtime leaves room for the forced 15-min step;
+    // capping the TOTAL would have allowed only 10 min vs a forced 15-min step -> infeasible ->
+    // solver-error/hold-all. Now it simply finishes the locked step and stops near the block.
+    let now = sydney(2026, 6, 10, 1, 0); // inside the 00:00-12:00 program window
+    let mut c = program_contract();
+    c.obs.running = Some(true);
+    c.obs.current_stretch = std::time::Duration::from_secs(50 * 60); // < 60-min block -> lock armed
+    if let DemandKind::Runtime { completed_minutes, .. } = &mut c.must_have.kind {
+        *completed_minutes = 50;
+    }
+    let out = planner().plan(&flat_world(now, STEPS, 0.05), &[c]);
+    assert!(
+        !out.plans.is_empty(),
+        "must stay feasible, not solver-error/hold-all: {}",
+        out.decisions[0].reason
+    );
+    assert!(
+        !out.decisions[0].reason.contains("solver error"),
+        "no solver error: {}",
+        out.decisions[0].reason
+    );
+    // Finishes ~the remaining step(s) and stops — not the whole window.
+    let total: usize = on_runs(&out.plans[0].on).iter().map(|(s, e)| e - s).sum();
+    assert!(
+        (1..=2).contains(&total),
+        "finishes the remaining step(s), not the window (total {total})"
+    );
+}
+
+#[test]
+fn p7_program_already_complete_but_locked_on_finishes_safely() {
+    // Codex round-11: recorder history with multiple on-spans can leave a program with its full
+    // runtime already accrued (completed >= block) WHILE current_stretch < min_run, so the initial
+    // lock still forces steps. remaining==0 must not cap credit to 0 (the forced step would then be
+    // infeasible -> hold-all); the cap floors at the forced-lock minutes, so it honors the lock and
+    // stops — even under a negative price that would otherwise extend it across the whole window.
+    let now = sydney(2026, 6, 10, 1, 0);
+    let mut c = program_contract(); // 60-min block, min_run 60
+    c.obs.running = Some(true);
+    c.obs.current_stretch = std::time::Duration::from_secs(15 * 60); // < 60 -> lock forces ~3 steps
+    if let DemandKind::Runtime { completed_minutes, .. } = &mut c.must_have.kind {
+        *completed_minutes = 60; // full block already accrued across earlier spans
+    }
+    let out = planner().plan(&flat_world(now, STEPS, -0.10), &[c]); // negative: uncapped would over-run
+    assert!(!out.plans.is_empty(), "feasible, not hold-all: {}", out.decisions[0].reason);
+    assert!(
+        !out.decisions[0].reason.contains("solver error"),
+        "no solver error: {}",
+        out.decisions[0].reason
+    );
+    // Honors the forced lock then STOPS — does not run the whole window under the negative price.
+    let total: usize = on_runs(&out.plans[0].on).iter().map(|(s, e)| e - s).sum();
+    assert!(total <= 4, "honors the lock then stops, not the whole window (total {total})");
+}
+
+#[test]
+fn p4_program_is_all_or_nothing_under_the_price_cap() {
+    let now = sydney(2026, 6, 10, 0, 0);
+    // Base above the cap, with only SCATTERED single cheap steps — no 4-in-a-row
+    // fits under the cap, so the whole program waits (never runs a partial block).
+    let mut w = flat_world(now, STEPS, 0.50);
+    for &t in &[2usize, 8, 14, 20] {
+        w.import[t] = Some(0.05);
+    }
+    let out = planner().plan(&w, &[program_contract()]);
+    let runs = on_runs(&out.plans[0].on);
+    assert!(runs.is_empty(), "no contiguous block fits under the cap -> program waits");
+    assert!(out.plans[0].unmet > 0.0, "the unmet runtime is reported honestly");
+}

@@ -3,17 +3,22 @@
 //! handlers read the latest SolveReport from a watch channel.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
-use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post, put};
 use axum::Json;
 use futures_core::Stream;
 use tokio::sync::{watch, Notify};
 
+use crate::config::{self, LoadConfig, RegistryConfig, StorageConfig};
+use crate::error::SchedulerError;
+use crate::ha_client::{filter_by_domains, HaClient};
 use crate::status::SolveReport;
 
 #[derive(Clone)]
@@ -24,6 +29,41 @@ pub struct WebState {
     /// POSTs /api/preview to flip it; the loop reads it each tick. Preview solves
     /// observe-only loads for the panel but never controls them.
     pub preview: Arc<AtomicBool>,
+    /// The live registry the solve loop runs on. The panel reads the current value
+    /// (`borrow`) to render/edit devices and publishes a new one on save; the main
+    /// loop watches the receiving end and hot-swaps `Cycle.registry` — so a device
+    /// add/edit/remove takes effect on the next solve WITHOUT an add-on restart.
+    /// `Arc` so `WebState` stays `Clone` (a `watch::Sender` is not).
+    pub registry: Arc<watch::Sender<Arc<RegistryConfig>>>,
+    /// Where the registry is persisted (the loader's path). Saves are atomic.
+    pub registry_path: PathBuf,
+    /// Live HA client, used only to serve the entity catalog (`/api/entities`) to
+    /// the wizard's entity picker. The solve loop has its own borrow of the client.
+    pub ha: Arc<HaClient>,
+    /// Serializes registry mutations (add/edit/delete). Each is a read-modify-write of
+    /// the WHOLE file, so two overlapping writes would otherwise both clone the same
+    /// current registry and the last to commit would silently drop the other's edit.
+    /// Held across the clone→mutate→commit so concurrent writes apply one-at-a-time.
+    pub write_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl WebState {
+    /// The registry the solve loop is currently running on.
+    pub fn current_registry(&self) -> Arc<RegistryConfig> {
+        self.registry.borrow().clone()
+    }
+
+    /// Commit an edited registry: **validate + atomically persist**, publish it for
+    /// the solve loop to hot-swap, and nudge an immediate re-solve. Validation +
+    /// the atomic temp-file write live in `config::save_registry`, so a rejected
+    /// or interrupted save never corrupts the live file or the in-memory plan. The
+    /// new registry only becomes visible to the loop after the write succeeds.
+    pub fn commit_registry(&self, next: RegistryConfig) -> Result<(), SchedulerError> {
+        config::save_registry(&self.registry_path, &next)?;
+        self.registry.send_replace(Arc::new(next));
+        self.solve_now.notify_one();
+        Ok(())
+    }
 }
 
 pub fn router(state: WebState) -> axum::Router {
@@ -34,8 +74,158 @@ pub fn router(state: WebState) -> axum::Router {
         .route("/api/events", get(events))
         .route("/api/solve", post(solve_now))
         .route("/api/preview", post(set_preview))
+        // Device CRUD (the wizard) — every write hot-swaps the running registry.
+        .route("/api/devices", get(list_devices).post(add_device))
+        .route("/api/devices/{id}", put(edit_device).delete(delete_device))
+        // Live HA entity catalog for the wizard's entity picker.
+        .route("/api/entities", get(list_entities))
         .route("/horizon.svg", get(horizon))
         .with_state(state)
+}
+
+/// The device lists the panel renders + the wizard edits — the registry's loads
+/// and storage, exactly as persisted (config is the contract; the UI owns it).
+#[derive(serde::Serialize)]
+struct DevicesView {
+    loads: Vec<LoadConfig>,
+    storage: Vec<StorageConfig>,
+}
+
+impl DevicesView {
+    fn of(r: &RegistryConfig) -> Self {
+        DevicesView { loads: r.loads.clone(), storage: r.global.storage.clone() }
+    }
+}
+
+async fn list_devices(State(s): State<WebState>) -> Json<DevicesView> {
+    Json(DevicesView::of(&s.current_registry()))
+}
+
+/// A device to add or replace. Adjacently tagged so the wizard sends
+/// `{"type":"load"|"storage","config":{…}}` — the config IS the engine contract
+/// (D2: the wizard provides the full explicit mapping), validated on commit.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", content = "config", rename_all = "snake_case")]
+enum DeviceUpsert {
+    Load(Box<LoadConfig>),
+    Storage(Box<StorageConfig>),
+}
+
+impl DeviceUpsert {
+    fn id(&self) -> &str {
+        match self {
+            DeviceUpsert::Load(l) => &l.id,
+            DeviceUpsert::Storage(d) => &d.id,
+        }
+    }
+}
+
+/// Persist an edited registry and return the new device list, or a 400 with the
+/// validation message (the commit validated + rolled back without touching the file).
+fn commit_or_error(s: &WebState, next: RegistryConfig) -> Response {
+    match s.commit_registry(next) {
+        Ok(()) => (StatusCode::OK, Json(DevicesView::of(&s.current_registry()))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn add_device(State(s): State<WebState>, Json(dev): Json<DeviceUpsert>) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
+    let mut next = (*s.current_registry()).clone();
+    let id = dev.id().to_string();
+    if next.loads.iter().any(|l| l.id == id) || next.global.storage.iter().any(|d| d.id == id) {
+        return (StatusCode::CONFLICT, format!("a device with id '{id}' already exists"))
+            .into_response();
+    }
+    match dev {
+        DeviceUpsert::Load(l) => next.loads.push(*l),
+        DeviceUpsert::Storage(d) => next.global.storage.push(*d),
+    }
+    commit_or_error(&s, next)
+}
+
+async fn edit_device(
+    State(s): State<WebState>,
+    Path(id): Path<String>,
+    Json(dev): Json<DeviceUpsert>,
+) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
+    let mut next = (*s.current_registry()).clone();
+    // A rename must not collide with ANY other device — ids are a single namespace across
+    // loads + storage (validation enforces this too, but a 409 here is the clearer error and
+    // catches a cross-type collision before the commit). Exclude the device being replaced.
+    let new_id = dev.id().to_string();
+    if new_id != id
+        && (next.loads.iter().any(|l| l.id == new_id)
+            || next.global.storage.iter().any(|d| d.id == new_id))
+    {
+        return (StatusCode::CONFLICT, format!("a device with id '{new_id}' already exists"))
+            .into_response();
+    }
+    // The device at the path id may live in EITHER collection. Replace it by id, supporting a
+    // TYPE change (the wizard's Type step can turn a load into a battery or back): a same-type
+    // edit replaces in place (preserving order); a cross-type edit removes the device from the
+    // collection that currently owns the id and appends it to the one matching the new body type.
+    let load_pos = next.loads.iter().position(|x| x.id == id);
+    let storage_pos = next.global.storage.iter().position(|x| x.id == id);
+    if load_pos.is_none() && storage_pos.is_none() {
+        return (StatusCode::NOT_FOUND, format!("no device with id '{id}'")).into_response();
+    }
+    match dev {
+        DeviceUpsert::Load(l) => match load_pos {
+            Some(i) => next.loads[i] = *l,
+            None => {
+                next.global.storage.retain(|d| d.id != id);
+                next.loads.push(*l);
+            }
+        },
+        DeviceUpsert::Storage(d) => match storage_pos {
+            Some(i) => next.global.storage[i] = *d,
+            None => {
+                next.loads.retain(|l| l.id != id);
+                next.global.storage.push(*d);
+            }
+        },
+    }
+    commit_or_error(&s, next)
+}
+
+async fn delete_device(State(s): State<WebState>, Path(id): Path<String>) -> Response {
+    let _w = s.write_lock.lock().await; // serialize the read-modify-write (no lost update)
+    let mut next = (*s.current_registry()).clone();
+    let before = next.loads.len() + next.global.storage.len();
+    next.loads.retain(|l| l.id != id);
+    next.global.storage.retain(|d| d.id != id);
+    if next.loads.len() + next.global.storage.len() == before {
+        return (StatusCode::NOT_FOUND, format!("no device with id '{id}'")).into_response();
+    }
+    commit_or_error(&s, next)
+}
+
+#[derive(serde::Deserialize)]
+struct EntitiesQuery {
+    /// Comma-separated HA domains to keep (e.g. `switch,sensor,climate,select`).
+    /// Empty/absent = all domains.
+    domains: Option<String>,
+}
+
+/// The live HA entity catalog for the wizard's entity picker, filtered to the
+/// requested domains. A read failure is a 502 (HA unreachable), never fake data.
+async fn list_entities(State(s): State<WebState>, Query(q): Query<EntitiesQuery>) -> Response {
+    let domains: Vec<String> = q
+        .domains
+        .unwrap_or_default()
+        .split(',')
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .map(String::from)
+        .collect();
+    match s.ha.list_states().await {
+        Ok(items) => (StatusCode::OK, Json(filter_by_domains(items, &domains))).into_response(),
+        Err(e) => {
+            (StatusCode::BAD_GATEWAY, format!("could not read HA entities: {e}")).into_response()
+        }
+    }
 }
 
 async fn index() -> Html<&'static str> {

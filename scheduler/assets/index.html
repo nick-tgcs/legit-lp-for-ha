@@ -1,322 +1,1074 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LP Scheduler</title><style>
-:root{--bg:#fafafa;--card:#fff;--text:#212121;--muted:#727272;--accent:#03a9f4;--border:#e0e0e0;--warn:#ff9800}
-@media(prefers-color-scheme:dark){:root{--bg:#111113;--card:#1c1c1e;--text:#e1e1e1;--muted:#9b9b9b;--border:#333}}
-body{font-family:Roboto,system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:16px;max-width:1100px;margin-inline:auto}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
-h1{font-size:1.2rem;margin:0 0 4px}h2{font-size:.95rem;color:var(--muted);margin:0 0 12px;text-transform:uppercase;letter-spacing:.05em}
-.chips span{display:inline-block;border:1px solid var(--border);border-radius:16px;padding:2px 10px;margin-right:8px;font-size:.85rem}
-.chips .on{border-color:var(--accent);color:var(--accent)}.chips .warn{border-color:var(--warn);color:var(--warn)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
-button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-size:.9rem;cursor:pointer}
-pre{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0}
-.legend{font-size:.72rem;color:var(--muted);margin:8px 0 0;line-height:1.8}
-#horizon{position:relative}
-#horizon svg{width:100%;height:auto;display:block}
-#horizon .hit:hover{fill:rgba(127,127,127,.08)}
-#xhair{position:absolute;top:0;width:1px;background:var(--warn);opacity:0;pointer-events:none;z-index:4}
-#tip{position:absolute;pointer-events:none;z-index:5;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:.76rem;line-height:1.5;white-space:pre;box-shadow:0 2px 10px rgba(0,0,0,.22);opacity:0;transition:opacity .07s;transform:translate(-50%,-115%)}
-/* per-device Why panel (Overview + Why tabs) */
-.tabs{display:flex;gap:4px;justify-content:flex-end;margin:-2px 0 10px}
-.tab{font-size:.75rem;padding:3px 12px;border-radius:13px;color:var(--muted);cursor:pointer;border:1px solid transparent;user-select:none}
-.tab.act{background:var(--accent);color:#fff;font-weight:600}
-.tab:not(.act){border-color:var(--border)}
-.why .narr{font-size:.85rem;line-height:1.45;margin:6px 0 10px}
-.why .split{font-size:.78rem;color:var(--muted);margin:6px 0}
-.why .split b{color:var(--text)}
-.why .bar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid var(--border);margin:6px 0 8px}
-.why .bar i{display:block}
-.why .bar .av{background:var(--accent)}.why .bar .pr{background:#ffcc80}.why .bar .ot{background:var(--border)}
-.why .ledger{font-size:.74rem;color:var(--muted);margin:2px 0 8px}
-.why .plan{font-size:.78rem;color:var(--accent)}
-.why .bind{background:rgba(255,152,0,.13);border-left:3px solid var(--warn);padding:8px 10px;border-radius:6px;font-size:.8rem;line-height:1.45;margin:4px 0 10px}
-.why .bind .fix{color:var(--accent);display:block;margin-top:4px}
-.why .sec{font-size:.66rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:13px 0 6px}
-.why table.facts{width:100%;border-collapse:collapse;font-size:.78rem}
-.why table.facts td{padding:2px 0;vertical-align:top}
-.why table.facts td.k{color:var(--muted);width:96px;white-space:nowrap}
-.why table.facts td.s{color:var(--accent);text-align:right;font-size:.7rem;white-space:nowrap}
-.why table.facts td.n{text-align:right;font-variant-numeric:tabular-nums}
-/* ---- preview-as-dry-run + alerts (see docs/preview-as-dryrun-and-alerts-design.md) ---- */
-:root{--crit:#e53935;--ok:#43a047}
-.chips .alert{cursor:pointer;font-weight:600}
-.chips .alert.crit{border-color:var(--crit);color:var(--crit)}
-.banner{border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:.9rem;line-height:1.5;display:flex;gap:12px;align-items:flex-start}
-.banner .ico{font-size:1.3rem;line-height:1.2}
-.banner .sub{color:var(--muted);font-size:.82rem;display:block;margin-top:3px}
-.banner .grep{font-family:ui-monospace,Menlo,monospace;font-size:.78rem;background:rgba(127,127,127,.12);padding:1px 6px;border-radius:5px}
-.banner.info{background:rgba(3,169,244,.10);border:1px solid var(--accent)}
-.banner.crit{background:rgba(229,57,53,.10);border:1px solid var(--crit)}.banner.crit b{color:var(--crit)}
-.act{display:flex;align-items:center;gap:10px;margin:2px 0 5px;flex-wrap:wrap}
-.pill{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;padding:5px 12px;border-radius:9px}
-.pill.start{background:rgba(67,160,71,.14);color:var(--ok)}
-.pill.stop{background:rgba(3,169,244,.14);color:#0277bd}
-.pill.hold{background:rgba(127,127,127,.12);color:var(--muted)}
-.pill.adv{background:rgba(255,152,0,.16);color:#ef6c00}
-.adv-tag{font-size:.7rem;color:var(--warn);border:1px solid var(--warn);border-radius:12px;padding:1px 8px}
-.act-why{font-size:.8rem;color:var(--muted);margin:0 0 9px;line-height:1.4}
-.stale{background:rgba(255,152,0,.10);border:1px solid var(--warn);color:#ef6c00;border-radius:8px;padding:5px 10px;font-size:.78rem;margin:0 0 10px}
+<title>LP Scheduler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ── Friendly redesign (see docs handoff). Light-only by design; the palette is
+   token-based so a dark variant is a later swap of these custom properties. ── */
+:root{
+ --bg:#f6f3ee; --page:#efe9df; --card:#ffffff; --fg:#2b2620; --muted:#988f81;
+ --line:#ece6dc; --line2:#f1ece4; --accent:#e8743b;
+ --c-run:#3b82c4; --c-out:#e8743b; --c-chg:#3fae6b; --c-idle:#dcd5c9;
+ --c-good:#3fae6b; --c-warn:#dba017; --c-crit:#d2533a;
+ --c-price:#cf7a4a; --c-price-fill:rgba(207,122,74,.13);
+ --live-bg:#f7e3d6; --live-fg:#c4561f; --prev-bg:#efe9df; --prev-fg:#8c8378;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--page)}
+body{font-family:'Hanken Grotesk',system-ui,sans-serif;color:var(--fg);background:var(--bg);min-height:100vh;padding:0 0 56px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:0 28px}
+.mono{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace}
+
+/* utility bar */
+.ubar{display:flex;justify-content:space-between;align-items:center;padding:22px 2px 18px;gap:16px;flex-wrap:wrap}
+.ubar-l{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px}
+.pill .dot{width:7px;height:7px;border-radius:50%}
+.pill.good{background:rgba(63,174,107,.13);color:var(--c-good)}
+.pill.good .dot{background:var(--c-good)}
+.pill.off{background:rgba(152,143,129,.15);color:var(--muted)}
+.pill.off .dot{background:var(--muted)}
+.pill.alert{cursor:pointer;background:rgba(210,83,58,.12);color:var(--c-crit)}
+.pill.alert .dot{background:var(--c-crit)}
+.pill.alert.warn{background:rgba(219,160,23,.14);color:var(--c-warn)}
+.pill.alert.warn .dot{background:var(--c-warn)}
+.ubar-r{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.pvtoggle{display:flex;align-items:center;gap:10px;background:transparent;border:none;cursor:pointer;padding:0;font-family:inherit}
+.pvtoggle span.lbl{font-size:13px;font-weight:600;color:var(--fg)}
+.track{position:relative;width:42px;height:24px;border-radius:999px;background:var(--line);transition:background .18s}
+.track.on{background:var(--accent)}
+.knob{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .18s}
+.track.on .knob{transform:translateX(18px)}
+.stamp{font-size:11px;color:var(--muted)}
+.btn{font-size:13px;font-weight:700;color:#fff;background:var(--accent);border:none;border-radius:11px;padding:9px 16px;cursor:pointer;font-family:inherit}
+.btn:active{transform:translateY(1px)}
+
+/* hero */
+.hero{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;padding:6px 2px 18px}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+.h1{font-size:32px;font-weight:800;letter-spacing:-.025em;line-height:1.1;max-width:20ch}
+.hsub{font-size:15.5px;color:var(--muted);margin-top:12px;max-width:52ch;line-height:1.55}
+.health{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:700;padding:9px 16px;border-radius:999px;flex-shrink:0}
+.health .dot{width:9px;height:9px;border-radius:50%}
+.health.good{background:rgba(63,174,107,.13);color:var(--c-good)} .health.good .dot{background:var(--c-good)}
+.health.warn{background:rgba(219,160,23,.14);color:var(--c-warn)} .health.warn .dot{background:var(--c-warn)}
+.health.crit{background:rgba(210,83,58,.12);color:var(--c-crit)} .health.crit .dot{background:var(--c-crit)}
+
+/* mode banner */
+.banner{display:flex;gap:14px;align-items:flex-start;border-radius:16px;padding:16px 18px;margin-top:8px}
+.banner .ico{width:26px;height:26px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800}
+.banner .bt{font-size:14.5px;font-weight:700}
+.banner .bx{font-size:13.5px;color:var(--muted);line-height:1.5;margin-top:3px}
+.banner .bx code{font-family:'IBM Plex Mono',monospace;font-size:.92em;background:rgba(0,0,0,.05);padding:1px 6px;border-radius:5px}
+.banner.preview{background:#fbf0e7;border:1px solid #f2dcc9}
+.banner.preview .ico{background:var(--live-bg);color:var(--live-fg)}
+.banner.live{background:#e9f4ee;border:1px solid #cfe7d9}
+.banner.live .ico{background:rgba(63,174,107,.16);color:var(--c-good)}
+.banner.dry{background:#eef1f6;border:1px solid #d6deea}
+.banner.dry .ico{background:rgba(59,130,196,.16);color:var(--c-run)}
+.banner.crit{background:#fbeae6;border:1px solid #f1cabd}
+.banner.crit .ico{background:rgba(210,83,58,.16);color:var(--c-crit)}
+.banner.crit .bt{color:var(--c-crit)}
+
+/* now tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+.tile{background:var(--card);border-radius:16px;padding:16px 18px}
+.tile .tl{font-size:12.5px;color:var(--muted)}
+.tile .tv{display:flex;align-items:baseline;gap:4px;margin-top:8px}
+.tile .tv b{font-size:24px;font-weight:800;letter-spacing:-.02em}
+.tile .tv u{font-size:12px;color:var(--muted);text-decoration:none}
+.tile .ts{font-size:12px;color:var(--muted);margin-top:5px}
+
+/* section heads */
+.sec{margin-top:28px}
+.sechead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding:0 2px;gap:14px;flex-wrap:wrap}
+.sectitle{font-size:19px;font-weight:800;letter-spacing:-.01em}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:11px;height:9px;border-radius:3px;display:inline-block}
+
+/* schedule */
+.schedcard{background:var(--card);border-radius:20px;padding:22px}
+.sched{position:relative;display:grid;grid-template-columns:104px 1fr;column-gap:14px;row-gap:11px;align-items:center}
+.nowline{position:absolute;left:118px;top:0;bottom:0;width:2px;background:var(--accent);opacity:.5;z-index:3}
+.rlabel{font-size:12px;color:var(--muted);text-align:right}
+.rlabel.dev{font-size:13px;font-weight:500;color:var(--fg);white-space:nowrap}
+.pricebox{position:relative;height:46px}
+.pricebox svg{width:100%;height:100%;display:block}
+.lane{position:relative;height:18px;background:var(--line);border-radius:999px}
+.lane .seg{position:absolute;top:0;height:18px;border-radius:999px}
+.lane .note{position:absolute;inset:0;display:flex;align-items:center;padding-left:12px;font-size:11px;color:var(--muted)}
+.axis{position:relative;height:14px;margin-left:118px;margin-top:10px}
+.axis span{position:absolute;transform:translateX(-50%);font-size:11px;color:var(--muted);white-space:nowrap}
+
+/* device + battery cards */
+.cards3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;align-items:start}
+.cards2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;align-items:start;margin-top:16px}
+.dcard{background:var(--card);border-radius:20px;padding:20px;display:flex;flex-direction:column}
+.dcard.batt{padding:22px}
+.dhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.dname{font-weight:700;font-size:16px}
+.dsys{font-size:11px;color:var(--muted)}
+.badge{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;white-space:nowrap}
+.badge.live{background:var(--live-bg);color:var(--live-fg)}
+.badge.prev{background:var(--prev-bg);color:var(--prev-fg)}
+.statuschip{display:inline-flex;align-self:flex-start;align-items:center;gap:7px;margin-top:13px;padding:6px 12px;border-radius:999px;background:var(--line)}
+.statuschip .dot{width:9px;height:9px;border-radius:50%}
+.statuschip .st{font-size:13px;font-weight:600}
+.tabs{display:flex;gap:3px;background:var(--line);border-radius:999px;padding:3px;margin-top:16px}
+.tabs.batt{max-width:320px}
+.tab{flex:1;font-size:12px;font-weight:600;padding:7px 0;border-radius:999px;border:none;cursor:pointer;transition:background .15s;background:transparent;color:var(--muted);font-family:inherit}
+.tab.act{background:#fff;color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.10)}
+.panel{margin-top:16px;flex:1}
+.ov-h{font-size:15.5px;font-weight:700;letter-spacing:-.01em;line-height:1.25}
+.ov-d{font-size:13.5px;color:var(--muted);line-height:1.55;margin-top:8px}
+.prog{margin-top:16px}
+.prog .bar{height:8px;border-radius:999px;background:var(--line);overflow:hidden}
+.prog .bar i{display:block;height:100%;border-radius:999px}
+.prog .pl{font-size:12px;color:var(--muted);margin-top:7px}
+.why-p{font-size:13.5px;color:var(--fg);line-height:1.6}
+.plan-item{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line2)}
+.plan-item .pd{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.plan-item .pl{font-size:13.5px;font-weight:600}
+.plan-item .ps{font-size:12px;color:var(--muted);margin-top:1px}
+.tech{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--muted);margin-top:10px;line-height:1.6;word-break:break-word}
+
+/* battery overview metric + soc */
+.metric{display:flex;align-items:baseline;gap:10px}
+.metric b{font-size:34px;font-weight:800;letter-spacing:-.02em}
+.metric u{font-size:13px;color:var(--muted);text-decoration:none}
+.soc{height:9px;border-radius:999px;background:var(--line);overflow:hidden;margin-top:14px}
+.soc i{display:block;height:100%;border-radius:999px;background:var(--c-good)}
+.bh{font-size:15.5px;font-weight:700;margin-top:18px}
+.bd{font-size:13.5px;color:var(--muted);line-height:1.55;margin-top:7px}
+.chiphead{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:6px}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.wchip{font-size:12px;font-weight:500;padding:5px 11px;border-radius:999px;background:rgba(232,116,59,.12);color:var(--live-fg)}
+
+/* alerts + diagnostics (preserved — not in the redesign, restyled to the palette) */
+.diagcard{background:var(--card);border-radius:20px;padding:20px 22px;margin-top:16px}
+.diagcard h3{font-size:13px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
+.allgood{color:var(--c-good);font-size:13.5px}
 .alerts{display:flex;flex-direction:column;gap:8px}
-.alert-row{display:grid;grid-template-columns:96px 104px 1fr;gap:10px;align-items:baseline;font-size:.82rem;padding:7px 10px;border-radius:8px;border:1px solid var(--border)}
-.alert-row .sev{font-weight:700;font-size:.72rem;letter-spacing:.03em}
-.alert-row .scope{color:var(--muted)}
-.alert-row.crit{background:rgba(229,57,53,.07);border-color:rgba(229,57,53,.4)}.alert-row.crit .sev{color:var(--crit)}
-.alert-row.warn{background:rgba(255,152,0,.06);border-color:rgba(255,152,0,.35)}.alert-row.warn .sev{color:#ef6c00}
-.alert-row.info .sev{color:var(--accent)}
-.allgood{color:var(--ok);font-size:.88rem}
-/* ---- per-device Plan tab: full-horizon sparkline + exact block table (§3.7) ---- */
-.planv{margin-top:4px}
-.spark{width:100%;height:auto;display:block;margin-bottom:2px}
-.spark .nowm{stroke:var(--crit);stroke-width:1.4}
-.plan-axis{position:relative;height:14px;font-size:.66rem;color:var(--muted);margin:0 0 9px}
-.plan-axis span{position:absolute;transform:translateX(-50%);white-space:nowrap}
-.plan-tbl{width:100%;border-collapse:collapse;font-size:.74rem}
-.plan-tbl th{text-align:left;color:var(--muted);font-weight:600;font-size:.64rem;text-transform:uppercase;letter-spacing:.03em;padding:2px 8px 4px 0;border-bottom:1px solid var(--border)}
-.plan-tbl td{padding:4px 8px 4px 0;border-bottom:1px solid var(--border);vertical-align:top}
-.plan-tbl td.n,.plan-tbl th.n{text-align:right;font-variant-numeric:tabular-nums}
-.plan-tbl td.muted{color:var(--muted);text-align:center;padding:9px}
-.plan-tbl .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
-.plan-tbl .dot.g{background:#66bb6a}.plan-tbl .dot.o{background:#ffa726}.plan-tbl .dot.b{background:#03a9f4}.plan-tbl .dot.k{background:#4caf50}
-.plan-tbl .pc{color:var(--ok)}.plan-tbl .pp{color:var(--crit)}.plan-tbl .pf{color:#1e88e5}
-.plan-foot{font-size:.72rem;color:var(--muted);margin-top:8px}.plan-foot b{color:var(--text)}</style></head><body>
-<div class="card"><h1>LP Scheduler</h1><div class="chips" id="chips"></div>
-<p style="margin:8px 0 0"><button onclick="fetch('./api/solve',{method:'POST'})">Solve now</button>
-<label style="margin-left:14px;font-size:.9rem;color:var(--muted)" title="Solve observe-only loads to preview their plan — never controls a device"><input type="checkbox" id="preview" onchange="fetch('./api/preview?on='+this.checked,{method:'POST'})"> Preview — show what it would do</label></p></div>
-<div id="banners"></div>
-<div class="card"><h2>The plan · next horizon</h2><div id="horizon" role="img" aria-label="plan timeline"><div id="plot"></div><div id="xhair"></div><div id="tip"></div></div>
-<p class="legend"><b style="color:#5c6bc0">━ import price</b> · <b style="color:#26a69a">┄ feed-in</b> · <b style="color:#ffb300">▰ solar</b> · <b style="color:#ef9a9a">▮ grid import</b> · <b style="color:#a5d6a7">▮ grid export</b> · <b style="color:#1e88e5">━ battery SoC</b> · <b style="color:#66bb6a">▮ charging</b> · <b style="color:#ffa726">▮ discharging</b> · <b style="color:#03a9f4">▮ load run</b> · <b style="color:#4caf50">▮ can-take</b></p></div>
-<div class="card"><h2>Loads</h2><div class="grid" id="loads"></div></div>
-<div class="card" id="storagecard"><h2>Storage</h2><div class="grid" id="storage"></div></div>
-<div class="card"><h2>Alerts &amp; diagnostics</h2><div class="alerts" id="alerts"></div><pre id="diags" style="margin-top:10px"></pre></div>
+.arow{display:grid;grid-template-columns:96px 110px 1fr;gap:10px;align-items:baseline;font-size:13px;padding:8px 11px;border-radius:11px;border:1px solid var(--line)}
+.arow .sev{font-weight:700;font-size:11.5px;letter-spacing:.03em}
+.arow .scope{color:var(--muted)}
+.arow.crit{background:rgba(210,83,58,.06);border-color:rgba(210,83,58,.35)} .arow.crit .sev{color:var(--c-crit)}
+.arow.warn{background:rgba(219,160,23,.06);border-color:rgba(219,160,23,.35)} .arow.warn .sev{color:var(--c-warn)}
+.arow.info .sev{color:var(--c-run)}
+.diags{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);white-space:pre-wrap;margin:12px 0 0;line-height:1.6}
+.empty{color:var(--muted);font-size:13.5px;padding:6px 2px}
+
+@media(max-width:720px){
+ .wrap{padding:0 16px}
+ .tiles{grid-template-columns:repeat(2,1fr)}
+ .cards3{grid-template-columns:repeat(2,1fr)}
+ .cards2{grid-template-columns:1fr}
+ .sched{grid-template-columns:84px 1fr}
+ .nowline{left:98px} .axis{margin-left:98px}
+ .h1{font-size:26px}
+ .kind-grid{grid-template-columns:1fr!important}
+ .review-cards{grid-template-columns:1fr!important}
+ .stepper .step .lbl{display:none}
+}
+
+/* ── device management + wizard ── */
+.link{background:none;border:none;color:var(--accent);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;padding:6px 4px}
+.link.back{color:var(--muted)}
+.btn.sm{padding:7px 13px;font-size:12.5px;border-radius:10px}
+.dev-actions{display:flex;align-items:center;gap:12px}
+/* devices list */
+.dm-top{display:flex;justify-content:space-between;align-items:center;padding:18px 2px 6px}
+.dm-head{padding:6px 2px 18px}
+.dm-list{display:flex;flex-direction:column;gap:10px}
+.dm-row{display:flex;align-items:center;gap:16px;background:var(--card);border-radius:16px;padding:16px 18px}
+.dm-glyph{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.dm-id{min-width:150px}
+.dm-name{font-size:16px;font-weight:700}
+.dm-kind{font-size:12.5px;color:var(--muted)}
+.dm-map{flex:1;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--muted);line-height:1.5;overflow:hidden}
+.dm-map .rule{color:var(--fg)}
+.dm-badge{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px}
+.dm-badge.live{background:var(--live-bg);color:var(--live-fg)}
+.dm-badge.prev{background:var(--prev-bg);color:var(--prev-fg)}
+.dm-act{display:flex;gap:8px;align-items:center}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.btn.danger{background:#c4402a;color:#fff}
+.dm-empty{color:var(--muted);font-size:14px;padding:24px 2px}
+/* wizard */
+.wz-top{display:flex;justify-content:space-between;align-items:center;padding:18px 2px 8px}
+.wz-title{font-size:13px;font-weight:700;color:var(--muted)}
+.stepper{display:flex;gap:8px;margin:6px 0 22px}
+.stepper .step{flex:1;display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:var(--muted);border-top:3px solid var(--line);padding-top:12px}
+.stepper .step.act{color:var(--fg);border-top-color:var(--accent)}
+.stepper .step.done{border-top-color:var(--accent)}
+.stepper .sdot{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:var(--line);color:var(--muted)}
+.stepper .step.act .sdot{background:var(--accent);color:#fff}
+.stepper .step.done .sdot{background:rgba(232,116,59,.16);color:var(--accent)}
+.wz-card{padding:26px}
+.wz-h{font-size:22px;font-weight:800;letter-spacing:-.02em}
+.wz-sub{font-size:14px;color:var(--muted);margin:8px 0 22px;line-height:1.5}
+.kind-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.kind-card{text-align:left;background:var(--card);border:none;box-shadow:inset 0 0 0 1px var(--line);border-radius:16px;padding:18px;cursor:pointer;font-family:inherit}
+.kind-card.sel{box-shadow:inset 0 0 0 2px var(--accent)}
+.kind-card .kh{display:flex;align-items:center;gap:11px;font-size:16px;font-weight:700;margin-bottom:9px}
+.kind-card .kg{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.kind-card .kd{font-size:13.5px;color:var(--muted);line-height:1.5}
+.kind-card .keg{font-size:12.5px;color:var(--muted);margin-top:10px}
+.field{margin-bottom:18px}
+.field-label{font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px}
+.field-opt{font-size:11.5px;color:var(--muted);font-weight:500}
+.field-hint{font-size:12.5px;color:var(--muted);margin:3px 0 8px}
+.form-input,.form-sel{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:11px;padding:11px 13px;font-family:inherit;font-size:14px;color:var(--fg)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.unit{font-size:12.5px;color:var(--muted);margin-left:6px}
+/* literal ⇄ entity affordance */
+.vr{display:flex;gap:8px;align-items:stretch}
+.vr .form-input{flex:1}
+.vr-toggle{display:inline-flex;background:var(--line);border-radius:9px;padding:2px;gap:2px;flex-shrink:0}
+.vr-toggle button{border:none;background:transparent;font-family:inherit;font-size:11px;font-weight:700;color:var(--muted);padding:6px 9px;border-radius:7px;cursor:pointer}
+.vr-toggle button.on{background:#fff;color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+/* entity picker */
+.picker{position:relative}
+.picker-menu{position:absolute;left:0;right:0;top:calc(100% + 4px);background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:240px;overflow:auto;z-index:20}
+.picker-opt{padding:9px 13px;cursor:pointer;font-size:13.5px;display:flex;flex-direction:column;gap:1px}
+.picker-opt:hover,.picker-opt.hi{background:var(--bg)}
+.picker-opt .pid{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--muted)}
+.picker-opt.manual{color:var(--accent);font-weight:600}
+.wz-nav{display:flex;justify-content:space-between;align-items:center;margin-top:24px}
+.adv summary{cursor:pointer;font-size:13px;font-weight:700;color:var(--accent);margin:6px 0}
+.review-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+.mode-card{text-align:left;background:var(--card);border:none;box-shadow:inset 0 0 0 1px var(--line);border-radius:16px;padding:18px;cursor:pointer;font-family:inherit}
+.mode-card.sel{box-shadow:inset 0 0 0 2px var(--accent)}
+.mode-card .mh{font-size:16px;font-weight:700;margin-bottom:7px}
+.mode-card .md{font-size:13px;color:var(--muted);line-height:1.5}
+.summary{background:var(--bg);border-radius:14px;padding:6px 16px}
+.summary .srow{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line2);font-size:13.5px}
+.summary .srow:last-child{border-bottom:none}
+.summary .sk{color:var(--muted)}
+.summary .sv{font-weight:600;text-align:right}
+.wz-err{background:rgba(210,83,58,.08);border:1px solid rgba(210,83,58,.3);color:var(--c-crit);border-radius:11px;padding:11px 13px;font-size:13px;margin-top:14px}
+.edit-link{background:none;border:none;color:var(--accent);font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;padding:0}
+</style></head>
+<body>
+<div class="wrap" id="view-dashboard">
+ <div class="ubar">
+  <div class="ubar-l" id="ubarL"></div>
+  <div class="ubar-r">
+   <button class="pvtoggle" id="pvbtn"><span class="lbl">Preview</span><span class="track" id="pvtrack"><span class="knob"></span></span></button>
+   <span class="stamp mono" id="stamp">—</span>
+   <button class="btn" id="solvebtn">Update plan</button>
+  </div>
+ </div>
+ <div class="hero">
+  <div>
+   <div class="eyebrow">Your energy plan</div>
+   <div class="h1" id="heroH">—</div>
+   <div class="hsub" id="heroSub"></div>
+  </div>
+  <span class="health good" id="health"><span class="dot"></span>—</span>
+ </div>
+ <div id="banner"></div>
+ <div class="tiles" id="tiles"></div>
+ <div class="sec">
+  <div class="sechead">
+   <div class="sectitle">What's happening today</div>
+   <div class="legend">
+    <span><i style="background:var(--c-run)"></i>Load running</span>
+    <span><i style="background:var(--c-out)"></i>Battery powering house</span>
+    <span><i style="background:var(--c-idle)"></i>Idle</span>
+   </div>
+  </div>
+  <div class="schedcard" id="schedcard"></div>
+ </div>
+ <div class="sec">
+  <div class="sechead">
+   <div class="sectitle">Devices</div>
+   <div class="dev-actions">
+    <button class="link" id="manageBtn">Manage devices</button>
+    <button class="btn sm" id="addBtn">+ Add device</button>
+   </div>
+  </div>
+  <div class="cards3" id="loads"></div>
+ </div>
+ <div class="cards2" id="storage"></div>
+ <div id="diag"></div>
+</div>
+
+<!-- ── Devices management list (view = devices) ── -->
+<div class="wrap" id="view-devices" hidden>
+ <div class="dm-top">
+  <button class="link back" id="devBack">‹ Back to plan</button>
+  <button class="btn sm" id="devAdd">+ Add device</button>
+ </div>
+ <div class="dm-head">
+  <h1 class="h1">Devices</h1>
+  <p class="hsub">Each device maps your Home Assistant switches and sensors to something the scheduler can plan around. Add, edit or remove them here.</p>
+ </div>
+ <div class="dm-list" id="dmList"></div>
+</div>
+
+<!-- ── Add/edit wizard (view = wizard) ── -->
+<div class="wrap" id="view-wizard" hidden>
+ <div class="wz-top">
+  <button class="link back" id="wzCancel">‹ Cancel</button>
+  <span class="wz-title" id="wzTitle">Add a device</span>
+ </div>
+ <div class="stepper" id="wzStepper"></div>
+ <div class="card wz-card" id="wzBody"></div>
+</div>
+
 <script type="module">
-const chips=document.getElementById('chips'),loads=document.getElementById('loads'),diags=document.getElementById('diags');
-const storage=document.getElementById('storage'),storagecard=document.getElementById('storagecard');
-// Escape for HTML text AND quoted-attribute contexts (covers & < > " ').
+const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-// Per-device tab state, preserved across SSE re-renders (default: Overview).
-const tab={};let last=null;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const f=(v,d=2)=>v==null?'—':(+v).toFixed(d);
+
+// per-device tab state, preserved across SSE re-renders (default: overview)
+const tab={}; let last=null;
 const setTab=(id,w)=>{tab[id]=w;if(last)render(last);};
-// Delegated tab clicks: cards carry data-id/data-tab (no inline onclick, so a device
-// id never lands in a JS-string context). Listener attaches once to the persistent
-// container and survives innerHTML re-renders.
-[loads,storage].forEach(el=>el&&el.addEventListener('click',e=>{
+// delegated tab clicks: cards carry data-id/data-tab (no inline onclick, so a
+// device id never lands in a JS-string context; listener survives innerHTML swaps).
+['loads','storage'].forEach(k=>$(k).addEventListener('click',e=>{
+ const ed=e.target.closest&&e.target.closest('.edit-link');
+ if(ed&&ed.dataset.edit!=null){openWizardEdit(ed.dataset.edit);return;}
  const t=e.target.closest&&e.target.closest('.tab');
  if(t&&t.dataset.id!=null)setTab(t.dataset.id,t.dataset.tab);
 }));
-const bannersEl=document.getElementById('banners'),alertsEl=document.getElementById('alerts');
-// "What it would do NOW" pill + reason. A device is `advisory` (never executed)
-// when it lacks authority OR the add-on is in dry-run; the tag says which.
-const ACT={Start:['start','▶','START'],Stop:['stop','■','STOP'],NoChange:['hold','●','hold']};
-function pillLine(cls,ico,verb,isHold,advisory,tag,reason){
- const label=isHold?(advisory?`hold (${tag})`:'hold'):(advisory?`${verb} (${tag})`:`${verb} now`);
- const t=advisory?'<span class="adv-tag">advisory · not executed</span>'
-  :'<span class="adv-tag" style="color:var(--ok);border-color:var(--ok)">live · executes</span>';
- return `<div class="act"><span class="pill ${cls}${advisory?' adv':''}">${ico} ${esc(label)}</span>${t}</div>`
-  +(reason?`<div class="act-why">${esc(reason)}</div>`:'');
+$('pvbtn').onclick=()=>{const on=!(last&&last.preview);fetch('./api/preview?on='+on,{method:'POST'});};
+$('solvebtn').onclick=()=>fetch('./api/solve',{method:'POST'});
+
+// ── small parsers/formatters over the SolveReport view-model ──
+const mv=(arr,label)=>{const x=(arr||[]).find(o=>o.label===label);return x?x.value:null;};
+const durToMin=s=>{if(s==null)return null;const m=String(s).match(/(-?[\d.]+)\s*(h|min)/);return m?(m[2]==='h'?parseFloat(m[1])*60:parseFloat(m[1])):null;};
+const dur=m=>m==null?'—':(m>=90?`${(m/60).toFixed(1)} h`:`${Math.round(m)} min`);
+const hhmm=ts=>{const m=String(ts||'').match(/T(\d\d):(\d\d)/);return m?`${m[1]}:${m[2]}`:String(ts||'');};
+// "HH:MM" (24h) -> friendly 12h, e.g. "1pm", "10:30pm", "now" handled by caller
+const clock=t=>{const m=String(t).match(/^(\d+):(\d+)/);if(!m)return t;let h=+m[1],mn=+m[2];const ap=h<12?'am':'pm';let h12=h%12;if(h12===0)h12=12;return mn?`${h12}:${String(mn).padStart(2,'0')}${ap}`:`${h12}${ap}`;};
+const ageStr=at=>{const t=Date.parse(at);if(isNaN(t))return '';let s=Math.round((Date.now()-t)/1000);if(s<0)s=0;if(s<90)return `solved ${s} s ago`;const mi=Math.round(s/60);return mi<90?`solved ${mi} min ago`:`solved ${Math.round(mi/60)} h ago`;};
+const dayPart=t=>{const m=String(t).match(/^(\d+):/);const h=m?+m[1]:0;return h<5?'overnight':h<8?'early morning':h<12?'late morning':h<14?'midday':h<17?'this afternoon':h<21?'this evening':'tonight';};
+
+// contiguous true-runs over a boolean step array -> [{a,b}] (b end-exclusive)
+function runs(on){const out=[];let t=0,n=on.length;while(t<n){if(on[t]){const s=t;while(t<n&&on[t])t++;out.push({a:s,b:t});}else t++;}return out;}
+
+// ── price sparkline path from the real per-step series (nulls carried flat) ──
+function priceSpark(price){
+ const n=(price||[]).length; if(!n)return ['',''];
+ let lo=Infinity,hi=-Infinity; for(const p of price)if(p!=null){lo=Math.min(lo,p);hi=Math.max(hi,p);}
+ if(!isFinite(lo)){lo=0;hi=1;} if(hi-lo<1e-6)hi=lo+1;
+ const norm=p=>(p-lo)/(hi-lo);
+ let prev=0,line='';
+ for(let i=0;i<n;i++){const p=price[i]; if(p!=null)prev=norm(p); const x=(i/(n-1))*100, y=38-prev*34; line+=(i?' L':'M')+` ${x.toFixed(2)} ${y.toFixed(2)}`;}
+ return [line, line+' L 100 40 L 0 40 Z'];
 }
-function loadAction(l,r){
- if(!l.on||!l.on.length)return ''; // not solved (observe-only with preview off)
- const [cls,ico,verb]=ACT[l.action]||ACT.NoChange;
- const advisory=!l.authority||r.dry_run, tag=l.authority?'dry-run':'preview';
- return pillLine(cls,ico,verb,l.action==='NoChange',advisory,tag,l.reason);
+
+// ── now tiles, derived from live telemetry + the forecast series ──
+function tilesOf(r){
+ const price=r.price||[]; const pn=r.price_now;
+ // trend: compare now to the next ~2h of the price curve
+ let psub='steady';
+ if(price.length>1){const k=Math.min(8,price.length-1);const fut=price[k]; if(fut!=null&&pn!=null){const d=fut-pn; psub=d>0.03?'rising into evening':d<-0.03?'easing off':'holding steady';}}
+ const pv=r.pv_now;
+ const psun=pv==null?'no reading':pv<0.05?'after dark':pv<1?'light cloud':pv<3?'partly sunny':'strong sun';
+ const cons=r.consumption_now;
+ let hsub='steady';
+ if((r.baseload||[]).length>1){const d=r.baseload[Math.min(4,r.baseload.length-1)]-r.baseload[0];hsub=d>0.3?'climbing':d<-0.3?'falling':'steady';}
+ const g0=(r.grid_kw&&r.grid_kw.length)?r.grid_kw[0]:null;
+ const gsub=g0==null?'—':Math.abs(g0)<0.05?'balanced':g0>0?'importing':'exporting to grid';
+ return [
+  {l:'Price now',v:f(pn,2),u:'$/kWh',s:psub},
+  {l:'Solar',v:f(pv,2),u:'kW',s:psun},
+  {l:'Home use',v:f(cons,2),u:'kW',s:hsub},
+  {l:'Grid',v:f(g0==null?null:Math.abs(g0),1),u:'kW',s:gsub},
+ ];
 }
-function storageAction(b,r){
- const ch=(b.charge_kw&&b.charge_kw[0])||0, dis=(b.discharge_kw&&b.discharge_kw[0])||0;
- const why=(b.reasoning&&b.reasoning.narrative)||'';
- // Tag by the ACTIVE direction's authority — execute_storage drives charge and
- // discharge independently, so a charge-only cabinet's planned discharge is advisory
- // (won't be actuated) even though the device has authority on the other direction.
- const dirAuth=b.action==='charging'?!!b.charge_authority
-  :b.action==='discharging'?!!b.discharge_authority
-  :(!!b.charge_authority||!!b.discharge_authority); // idle: any executable direction
- const advisory=!dirAuth||r.dry_run, tag=dirAuth?'dry-run':'preview';
- if(b.action==='charging')return pillLine('start','▲',`CHARGE ${ch.toFixed(1)} kW`,false,advisory,tag,why);
- if(b.action==='discharging')return pillLine('stop','▼',`DISCHARGE ${dis.toFixed(1)} kW`,false,advisory,tag,why);
- return pillLine('hold','●','hold',true,advisory,tag,why);
-}
-// Full-width mode (info) + solve-failure (critical) banners.
-function bannersHtml(r){
- let h='';
- // Key the red banner off the critical scheduler alert, not `stale` alone: the
- // first solve after startup can fail with NO last-good plan to carry over, so the
- // report is critical-but-not-stale. (`stale` only flips when a prior plan exists.)
- const solveFailed=(r.alerts||[]).some(a=>a.severity==='critical'&&a.scope==='scheduler');
- if(solveFailed)h+=`<div class="banner crit"><div class="ico">⛔</div><div><b>SCHEDULER ERROR — could not solve this cycle.</b>`
-  +(r.stale
-    ?`<span class="sub">All loads were HELD; nothing was changed. The plan below is the last good one (solved ${esc(r.last_solved||'?')}).</span>`
-    :`<span class="sub">All loads were HELD; nothing was changed. No prior plan to fall back on — the panel stays empty until the next good solve.</span>`)
-  +`<span class="sub">Find it in the add-on log: <span class="grep">grep 'ALERT[critical]'</span></span></div></div>`;
- if(r.preview||r.dry_run){
-  // Be precise about what is actuated. dry-run = the executor makes NO calls at
-  // all (globally inert). preview WITHOUT dry-run only shadow-solves observe-only
-  // devices for display; Optimiser-authorised devices are STILL controlled live —
-  // so preview alone must never be advertised as a safe dry run.
-  if(r.dry_run){
-   h+=`<div class="banner info"><div class="ico">ⓘ</div><div><b>DRY-RUN — the optimiser computes its plan but controls no devices.</b>`
-    +`<span class="sub">${r.preview?'Preview also shadow-solves observe-only loads so you can see what they would do. ':''}Nothing is actuated until you turn the add-on’s dry-run off.</span></div></div>`;
-  }else{ // preview && !dry_run
-   h+=`<div class="banner info"><div class="ico">⚠️</div><div><b>PREVIEW — observe-only devices show what they WOULD do; they are not actuated.</b>`
-    +`<span class="sub">This is <b>not</b> a global dry-run: devices in Optimiser mode are still being controlled live. Turn on the add-on’s dry-run to halt all actuation.</span></div></div>`;
-  }
+
+// ── load: status, derived copy, progress ──
+const TONE={good:'var(--c-good)',warn:'var(--c-warn)',idle:'var(--c-idle)',out:'var(--c-out)',chg:'var(--c-chg)'};
+function loadView(l,r){
+ const R=l.reasoning||{}, M=R.metrics||[], I=R.inputs||[];
+ const advisory=!l.authority||r.dry_run;
+ const planned=(l.on||[]).some(Boolean);
+ const running=l.running===true;
+ const unmet=+l.unmet||0;
+ // status + dot
+ let status,tone;
+ if(running){status='Running';tone='good';}
+ else if(unmet>0.5){status='Waiting';tone='warn';}
+ else if(planned){status='On plan';tone='good';}
+ else status=(status='Idle','Idle'),tone='idle';
+ // is this a runtime load (Required metric) or a setpoint load?
+ const isRuntime=M.some(m=>m.label==='Required');
+ const firstBlock=(R.blocks||[])[0];
+ // headline
+ let headline;
+ if(running)headline='Running now';
+ else if(unmet>0.5)headline=(R.binding||'').includes('price')?'Waiting for cheaper power':(R.binding||'').includes('window')?'Waiting for its run window':'Waiting to catch up';
+ else if(isRuntime&&firstBlock)headline=`Scheduled for ${dayPart(firstBlock.start)}`;
+ else if(isRuntime)headline='Nothing needed today';
+ else{const band=mv(M,'Band'),keep=mv(M,'Keep at/below');headline=band?'Comfortable — nothing to do':keep?'Within target — nothing to do':'Nothing to do right now';}
+ // detail = the engine's plain narrative (truthful)
+ const detail=R.narrative||'';
+ // progress
+ let progW=0,progLabel='';
+ if(isRuntime){
+  const req=durToMin(mv(M,'Required'))||0, pl=durToMin(mv(M,'Planned'))||0;
+  progW=req>0?clamp(100*pl/req,0,100):(planned?100:0);
+  progLabel=unmet<=0.5?(req>0?'Fully covered for today':'Nothing required'):`${dur(pl)} of ${dur(req)} covered`;
+ }else{
+  const obs=parseFloat(mv(M,'Observed')); const band=mv(M,'Band'); const keep=parseFloat(mv(M,'Keep at/below'));
+  if(band){const mm=band.match(/(-?[\d.]+)\s*[–-]\s*(-?[\d.]+)/);if(mm&&!isNaN(obs)){const lo=+mm[1],hi=+mm[2];progW=clamp(100*(obs-lo)/((hi-lo)||1),0,100);progLabel=`${obs}° · comfort range ${lo}–${hi}°`;}}
+  else if(!isNaN(keep)&&!isNaN(obs)){progW=clamp(obs,0,100);progLabel=`${obs}% now · target ${keep}% or below`;}
  }
- return h;
-}
-// Header chip summarising open alerts (click scrolls to the Alerts section).
-function alertChip(a){
- a=a||[];const c=a.filter(x=>x.severity==='critical').length,w=a.filter(x=>x.severity==='warning').length;
- if(!c&&!w)return '';
- const parts=[];if(c)parts.push(`⛔ ${c} critical`);if(w)parts.push(`⚠ ${w} warning${w>1?'s':''}`);
- return `<span class="${c?'alert crit':'warn alert'}" onclick="document.getElementById('alerts').scrollIntoView({behavior:'smooth'})">${parts.join(' · ')}</span>`;
-}
-const SEV={critical:['crit','⛔ CRITICAL'],warning:['warn','⚠ WARNING'],info:['info','ⓘ INFO']},SORD={critical:0,warning:1,info:2};
-function alertsHtml(a){
- a=a||[];
- if(!a.length)return '<div class="allgood">✓ all good — no warnings this cycle.</div>';
- return a.slice().sort((x,y)=>(SORD[x.severity]??9)-(SORD[y.severity]??9)).map(al=>{
-  const [cls,label]=SEV[al.severity]||SEV.info;
-  return `<div class="alert-row ${cls}"><span class="sev">${label}</span><span class="scope">${esc(al.scope)}</span><span class="det">${esc(al.detail)}</span></div>`;
- }).join('');
-}
-// ---- Plan tab: ONE device's full-horizon schedule (sparkline + exact block table) ----
-// The MILP solves all 96 steps; the horizon is anchored at NOW (grid[0] contains now)
-// and runs forward 24 h, so the "now" marker sits at the left edge. Everything here is
-// derived client-side from the already-streamed arrays — no API change.
-const hm=(r,i)=>{const g=r.grid&&r.grid[i];return g?g.slice(11,16):'';};        // step i -> "HH:MM"
-// End-of-block label. `runs()` gives an END-EXCLUSIVE index b, so the block's true
-// end is the boundary at step b (= grid[b]). At the horizon (b===n) there is no
-// grid[b], so add one step to the final step's wall-clock (wrapping past midnight).
-const hmEnd=(r,b,n,stepMin)=>{
- if(b<n)return hm(r,b);
- const last=hm(r,n-1);if(!last)return '';
- const mm=(+last.slice(0,2))*60+(+last.slice(3,5))+stepMin;
- return `${String(Math.floor(mm/60)%24).padStart(2,'0')}:${String(mm%60).padStart(2,'0')}`;
-};
-const dur=m=>m>=90?`${(m/60).toFixed(1)} h`:`${Math.round(m)} min`;
-const money=p=>p==null?'—':`$${(+p).toFixed(2)}`;
-const priceCls=p=>p==null?'':(p<0?'pf':(p>=0.30?'pp':'pc'));                     // feed-in / peak / cheap
-function avgPrice(r,a,b){let s=0,k=0;for(let t=a;t<b;t++){const p=r.price&&r.price[t];if(p!=null){s+=p;k++;}}return k?s/k:null;}
-// Contiguous blocks from a per-step classifier (null => off/skip). Returns {k,a,b}.
-function runs(n,cls){const out=[];let s=0,c=null;for(let t=0;t<=n;t++){const k=t<n?cls(t):null;if(k!==c){if(c!=null)out.push({k:c,a:s,b:t});c=k;s=t;}}return out;}
-// A few wall-clock hour ticks across the horizon.
-function planAxis(r,n){if(!n)return '';const k=Math.max(1,Math.round(n/4)),t=[];for(let i=0;i<n;i+=k)t.push(`<span style="left:${(100*i/n).toFixed(1)}%">${hm(r,i)}</span>`);return `<div class="plan-axis">${t.join('')}</div>`;}
-function planBattery(b,r){
- const n=Math.min(b.charge_kw?b.charge_kw.length:0,r.grid?r.grid.length:0);
- if(!n)return '<td class="muted">no battery plan</td>';
- const stepMin=r.grid_minutes||15, stepH=stepMin/60; // grid step length (not a hard-coded 15min/0.25h)
- const cap=b.capacity_kwh||0,resv=cap?100*(b.min_soc_kwh||0)/cap:0,soc=b.soc_kwh||[];
- const W=560,H=64,X=i=>n?i/n*W:0,Y=p=>H-2-(p/100)*(H-6);
- const cls=t=>((b.charge_kw[t]||0)>0.05?'c':((b.discharge_kw[t]||0)>0.05?'d':null));
- const segs=runs(n,cls).filter(s=>s.k);
- const shade=segs.map(s=>`<rect x="${X(s.a).toFixed(1)}" y="0" width="${(X(s.b)-X(s.a)).toFixed(1)}" height="${H}" fill="${s.k==='c'?'#66bb6a':'#ffa726'}" fill-opacity="0.18"/>`).join('');
- let pts='';for(let i=0;i<=n;i++){pts+=`${X(i).toFixed(1)},${Y(cap?100*(soc[i]||0)/cap:0).toFixed(1)} `;}
- const resvLine=cap?`<line x1="0" y1="${Y(resv).toFixed(1)}" x2="${W}" y2="${Y(resv).toFixed(1)}" stroke="var(--warn)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>`:'';
- const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${shade}${resvLine}<polyline fill="none" stroke="#1e88e5" stroke-width="1.6" points="${pts.trim()}"/><line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
- const rows=segs.map(s=>{const a=s.k==='c'?b.charge_kw:b.discharge_kw;let e=0,pk=0;for(let t=s.a;t<s.b;t++){e+=(a[t]||0)*stepH;pk=Math.max(pk,a[t]||0);}
-  const end=cap?100*(soc[Math.min(s.b,soc.length-1)]||0)/cap:0,pr=avgPrice(r,s.a,s.b);
-  return `<tr><td>${hm(r,s.a)}–${hmEnd(r,s.b,n,stepMin)}</td><td><span class="dot ${s.k==='c'?'g':'o'}"></span>${s.k==='c'?'Charge':'Discharge'}</td><td class="n">${pk.toFixed(1)} kW</td><td class="n">${s.k==='c'?'+':'−'}${e.toFixed(1)} kWh → ${end.toFixed(0)}%</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
- let ce=0,de=0,cc=0,dc=0;for(let t=0;t<n;t++){const c=b.charge_kw[t]||0,d=b.discharge_kw[t]||0,p=(r.price&&r.price[t])||0;ce+=c*stepH;de+=d*stepH;cc+=c*stepH*p;dc+=d*stepH*p;}
- const foot=ce>0.05?`<div class="plan-foot">charged <b>${ce.toFixed(1)} kWh</b> @ avg $${(cc/ce).toFixed(2)}${de>0.05?` · discharged <b>${de.toFixed(1)} kWh</b> into avg $${(dc/de).toFixed(2)}`:''}</div>`:'';
- return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">Power</th><th class="n">Result (end SoC)</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">no charge/discharge planned — holds steady</td></tr>'}</tbody></table>${foot}`;
-}
-function planLoad(l,r){
- const n=Math.min(l.on?l.on.length:0,r.grid?r.grid.length:0);
- if(!n)return '<table class="plan-tbl"><tbody><tr><td class="muted">not solved this horizon (observe-only with preview off)</td></tr></tbody></table>';
- const W=560,H=26,X=i=>n?i/n*W:0;
- const cls=t=>(l.on[t]?((l.ct&&l.ct[t])?'t':'m'):null);
- const segs=runs(n,cls).filter(s=>s.k);
- const bars=segs.map(s=>`<rect x="${X(s.a).toFixed(1)}" y="4" width="${Math.max(X(s.b)-X(s.a),1).toFixed(1)}" height="${H-8}" rx="2" fill="${s.k==='m'?'#03a9f4':'#4caf50'}"/>`).join('');
- const spark=`<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><rect x="0" y="4" width="${W}" height="${H-8}" rx="2" fill="var(--border)" opacity="0.5"/>${bars}<line class="nowm" x1="1" y1="0" x2="1" y2="${H}"/></svg>`;
- const stepMin=r.grid_minutes||15; // minutes per grid step (not a hard-coded 15)
- let cum=0;const rows=segs.map(s=>{const mins=(s.b-s.a)*stepMin;cum+=mins;const pr=avgPrice(r,s.a,s.b);
-  return `<tr><td>${hm(r,s.a)}–${hmEnd(r,s.b,n,stepMin)}</td><td><span class="dot ${s.k==='m'?'b':'k'}"></span>${s.k==='m'?'Run':'Can-take'}</td><td class="n">${dur(mins)}</td><td class="n">${dur(cum)} total</td><td class="n ${priceCls(pr)}">${money(pr)}</td></tr>`;}).join('');
- return `${spark}${planAxis(r,n)}<table class="plan-tbl"><thead><tr><th>Time</th><th>Action</th><th class="n">For</th><th class="n">Cumulative</th><th class="n">Avg price</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">nothing scheduled this horizon</td></tr>'}</tbody></table>`;
-}
-function planView(d,r){
- if(!r.grid||!r.grid.length)return '<div class="plan-tbl"><tbody><tr><td class="muted">no plan solved yet</td></tr></tbody></div>';
- return `<div class="planv">${d.soc_kwh!==undefined?planBattery(d,r):planLoad(d,r)}</div>`;
-}
-// The per-device tabs panel shared by load + storage cards (Overview / Why / Plan).
-function why(d,r){
- const R=d.reasoning||{},act=tab[d.id]||'overview';
- const facts=arr=>`<table class="facts">${(arr||[]).map(f=>`<tr><td class="k">${esc(f.label)}</td><td class="n">${esc(f.value)}</td><td class="s">${f.source?esc(f.source):''}</td></tr>`).join('')}</table>`;
- const steps=R.steps||[],total=steps.reduce((a,b)=>a+b.count,0)||1;
- const seg=(label,cls)=>{const s=steps.find(x=>x.label===label);return s&&s.count?`<i class="${cls}" style="width:${100*s.count/total}%"></i>`:'';};
- const bar=steps.length?`<div class="bar">${seg('available','av')}${seg('over price cap','pr')}<i class="ot" style="flex:1"></i></div>`:'';
- const ledger=steps.map(s=>`${s.label} ${s.count}`).join(' · ');
+ // why = narrative + binding/fix (real reasoning, plain language)
+ let why=detail;
+ if(R.binding)why+=` ${R.binding[0].toUpperCase()+R.binding.slice(1)}${R.fix_hint?` — ${R.fix_hint}`:''}.`;
+ // plan items
  const blocks=R.blocks||[];
- const planLine=blocks.length?`plan: ${blocks.map(b=>`${b.start}–${b.end}${b.kind==='can-take'?' (opt)':b.kind==='discharge'?' (out)':''}`).join(', ')}`:'';
- const metricsLine=(R.metrics||[]).map(m=>`${esc(m.label)} <b>${esc(m.value)}</b>`).join(' · ');
- const overview=`${R.narrative?`<div class="narr">ⓘ ${esc(R.narrative)}</div>`:''}${metricsLine?`<div class="split">${metricsLine}</div>`:''}${bar}${ledger?`<div class="ledger">${esc(ledger)}</div>`:''}${planLine?`<div class="plan">${esc(planLine)}</div>`:''}`;
- const bind=R.binding?`<div class="bind"><b>▰ ${esc(R.binding)}</b>${R.fix_hint?`<span class="fix">→ ${esc(R.fix_hint)}</span>`:''}</div>`:'';
- const detail=`${R.narrative?`<div class="narr">${esc(R.narrative)}</div>`:''}${bind}`
-  +((R.metrics||[]).length?`<div class="sec">Outcome</div>${facts(R.metrics)}`:'')
-  +((R.inputs||[]).length?`<div class="sec">Resolved inputs (live from HA)</div>${facts(R.inputs)}`:'')
-  +(steps.length?`<div class="sec">Step availability</div>${facts(steps.map(s=>({label:s.label,value:String(s.count)})))}`:'')
-  +(blocks.length?`<div class="sec">Plan</div>${facts(blocks.map(b=>({label:b.kind,value:`${b.start}–${b.end}`,source:`${(+b.hours).toFixed(1)} h`})))}`:'');
- const id=esc(d.id);
- const content=act==='plan'?planView(d,r):act==='why'?detail:overview;
- return `<div class="tabs"><span class="tab ${act==='overview'?'act':''}" data-id="${id}" data-tab="overview">Overview</span>`
-  +`<span class="tab ${act==='why'?'act':''}" data-id="${id}" data-tab="why">Why</span>`
-  +`<span class="tab ${act==='plan'?'act':''}" data-id="${id}" data-tab="plan">Plan</span></div>`
-  +`<div class="why">${content}</div>`;
+ let items;
+ if(blocks.length){
+  items=blocks.map(b=>({label:`Run · ${clock(b.start)} – ${clock(b.end)}`,sub:`${(+b.hours).toFixed(1)} h block · ${b.kind==='can-take'?'optional (solar surplus)':'covered'}`}));
+ }else if(unmet>0.5){
+  items=[{label:'No run while it stays this pricey',sub:R.fix_hint||'holding off for now'},{label:'Re-checks every cycle',sub:'will start when power drops'}];
+ }else{
+  items=[{label:'No action needed',sub:isRuntime?'nothing required this horizon':'monitoring'}];
+ }
+ // tech line (raw values for power users)
+ const win=mv(I,'Window start'), winE=mv(I,'Window end'), cap=mv(I,'Price cap');
+ const tech=[advisory?'observe-only':'live']
+  .concat(M.map(m=>`${m.label.toLowerCase()} ${m.value}`))
+  .concat(win?[`window ${win}–${winE}`]:[])
+  .concat(cap&&cap!=='none'?[`cap ${cap}`]:[]).join(' · ');
+ return{id:l.id,name:prettyName(l.id),advisory,status,dot:TONE[tone],headline,detail,progW,progLabel,why,items,tech};
 }
+
+// ── battery ──
+function battView(b,r){
+ const R=b.reasoning||{}, M=R.metrics||[], I=R.inputs||[];
+ const ch=(b.charge_kw&&b.charge_kw[0])||0, dis=(b.discharge_kw&&b.discharge_kw[0])||0;
+ // Tag by whether the SHOWN action is actually committed this cycle (develop #45/#46):
+ // the card plots the advisory (rated-power) plan, so a charge can appear with
+ // charge_authority=true yet write 0 W because its arbitrage leans on an unauthorised
+ // discharge the executor skips. `action_actuated` folds in per-direction authority AND
+ // the gated command, so it — not raw authority — decides live vs advisory.
+ const live=!!b.action_actuated;
+ const advisory=!live||r.dry_run;
+ const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
+ let status,tone,headline;
+ if(b.action==='discharging'){status='Active';tone='out';headline=`Discharging ${dis.toFixed(1)} kW`;}
+ else if(b.action==='charging'){status='Charging';tone='chg';headline=`Charging ${ch.toFixed(1)} kW`;}
+ else{status='Holding';tone='idle';headline=`Holding at ${pct.toFixed(0)}%`;}
+ const detail=R.narrative||'';
+ let why=detail; if(R.binding)why+=` ${R.binding[0].toUpperCase()+R.binding.slice(1)}${R.fix_hint?` — ${R.fix_hint}`:''}.`;
+ // discharge windows -> "powers the house during" chips
+ const disOn=(b.discharge_kw||[]).map(kw=>kw>0.05);
+ const wins=runs(disOn).map(s=>({a:s.a,b:s.b}));
+ const grid=r.grid||[];
+ const endLabel=(e)=>{ if(e<grid.length)return hhmm(grid[e]); const lastT=hhmm(grid[grid.length-1]); const mm=parseInt(lastT.slice(0,2))*60+parseInt(lastT.slice(3,5))+(r.grid_minutes||15); return `${String(Math.floor(mm/60)%24).padStart(2,'0')}:${String(mm%60).padStart(2,'0')}`; };
+ const chips=wins.map(w=>`${clock(hhmm(grid[w.a]))} – ${clock(endLabel(w.b))}`);
+ const usable=mv(I,'')||'';
+ const tech=[advisory?'advisory · not actuated':'AUTH · live',(b.action||'idle')+(b.action==='discharging'?` ${dis.toFixed(1)} kW`:b.action==='charging'?` ${ch.toFixed(1)} kW`:'')]
+  .concat([`SoC ${(+b.soc_now_kwh).toFixed(1)} kWh (${pct.toFixed(0)}%)`,`usable ${(+b.min_soc_kwh).toFixed(1)}–${(+b.max_soc_kwh).toFixed(1)}`])
+  .concat(b.target_unmet>0.05?[`short ${(+b.target_unmet).toFixed(1)} kWh`]:[]).join(' · ');
+ return{id:b.id,name:prettyName(b.id),sys:b.id,advisory,status,dot:TONE[tone],
+  metric:`${pct.toFixed(0)}%`,metricSub:`${(+b.soc_now_kwh).toFixed(1)} kWh · usable to ${(+b.max_soc_kwh).toFixed(1)} kWh`,socW:clamp(pct,0,100),
+  headline,detail,why,chips,tech};
+}
+
+function prettyName(id){
+ const map={hot_water:'Hot water',dehumidifier:'Dehumidifier',aircon:'Aircon',sonnen01:'Battery 1',sonnen02:'Battery 2'};
+ return map[id]||id.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+
+// ── schedule lanes: loads (on/can-take) + batteries (discharge windows) ──
+function schedHtml(r){
+ const n=(r.grid||[]).length;
+ if(!n)return '<div class="empty">No plan solved yet.</div>';
+ const [line,area]=priceSpark(r.price);
+ const pctx=i=>(100*i/n).toFixed(2);
+ // lanes
+ const lanes=[];
+ (r.loads||[]).forEach(l=>{
+  const on=l.on||[]; const segs=runs(on).map(s=>{
+   const allCt=l.ct&&(()=>{for(let t=s.a;t<s.b;t++)if(!l.ct[t])return false;return true;})();
+   const col=allCt?'var(--c-chg)':'var(--c-run)';
+   return `<div class="seg" style="left:${pctx(s.a)}%;width:${pctx(s.b-s.a)}%;background:${col}"></div>`;
+  }).join('');
+  const idle=!on.some(Boolean);
+  const note=(+l.unmet>0.5)?'waiting — power too pricey':'no runs planned';
+  lanes.push({name:prettyName(l.id),segs,idle,note});
+ });
+ (r.storage||[]).forEach(b=>{
+  const dis=(b.discharge_kw||[]).map(kw=>kw>0.05);
+  const chg=(b.charge_kw||[]).map(kw=>kw>0.05);
+  const segs=runs(dis).map(s=>`<div class="seg" style="left:${pctx(s.a)}%;width:${pctx(s.b-s.a)}%;background:var(--c-out)"></div>`)
+   .concat(runs(chg).map(s=>`<div class="seg" style="left:${pctx(s.a)}%;width:${pctx(s.b-s.a)}%;background:var(--c-chg)"></div>`)).join('');
+  const idle=!dis.some(Boolean)&&!chg.some(Boolean);
+  lanes.push({name:prettyName(b.id),segs,idle,note:'holding'});
+ });
+ // time axis ticks (~7) from grid timestamps
+ const ticks=[]; const k=Math.max(1,Math.round(n/6));
+ for(let i=0;i<n;i+=k){const lbl=i===0?'now':clock(hhmm(r.grid[i]));ticks.push(`<span style="left:${pctx(i)}%">${esc(lbl)}</span>`);}
+ const laneHtml=lanes.map(ln=>
+  `<div class="rlabel dev">${esc(ln.name)}</div>`+
+  `<div class="lane">${ln.segs}${ln.idle?`<div class="note">${esc(ln.note)}</div>`:''}</div>`
+ ).join('');
+ return `<div class="sched"><div class="nowline"></div>`+
+  `<div class="rlabel">Price</div>`+
+  `<div class="pricebox"><svg viewBox="0 0 100 40" preserveAspectRatio="none">`+
+  `<path d="${area}" fill="var(--c-price-fill)"></path>`+
+  `<path d="${line}" fill="none" stroke="var(--c-price)" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linejoin="round"></path>`+
+  `</svg></div>${laneHtml}</div>`+
+  `<div class="axis">${ticks.join('')}</div>`;
+}
+
+// ── hero + health, derived from aggregate state ──
+function heroOf(r){
+ // Health follows the engine's own triage (alerts) + a real deadline shortfall —
+ // NOT a load that's merely holding for cheaper power (that's the system working).
+ const crit=(r.alerts||[]).some(a=>a.severity==='critical');
+ const warn=(r.alerts||[]).some(a=>a.severity==='warning');
+ const shortBatt=(r.storage||[]).some(b=>+b.target_unmet>0.1);
+ const waiting=(r.loads||[]).filter(l=>+l.unmet>0.5).length;
+ let health;
+ if(crit)health={cls:'crit',txt:'Needs attention'};
+ else if(warn||shortBatt)health={cls:'warn',txt:'Catching up'};
+ else health={cls:'good',txt:'All good'};
+ // headline from where the power is coming from
+ const g0=(r.grid_kw&&r.grid_kw.length)?r.grid_kw[0]:null;
+ const pv=r.pv_now||0;
+ const disch=(r.storage||[]).some(b=>b.action==='discharging');
+ let h;
+ if(crit)h='The scheduler hit a snag';
+ else if(disch&&pv>0.2)h="You're running on solar and stored power";
+ else if(disch)h="You're running on stored power";
+ else if(pv>0.2&&(g0==null||g0<=0.05))h="You're running on your own solar";
+ else if(g0!=null&&g0>0.05)h='Drawing some power from the grid';
+ else h='Following your energy plan';
+ // sub
+ let sub;
+ const wtxt=waiting>0?`${waiting===1?'One device is':waiting+' devices are'} waiting for power to get cheaper`:'Everything is running to plan';
+ if(crit)sub='Could not solve this cycle — the last good plan is shown below and nothing was changed.';
+ else if(warn||shortBatt)sub=`${wtxt}. Some targets may fall short this cycle — see the cards below.`;
+ else sub=(disch?"Dodging the pricier part of the day. ":"")+wtxt+' — nothing needs your attention.';
+ return{health,h,sub};
+}
+
+// ── mode banner: faithful 3-state (+critical) logic, not the mock's 2-state ──
+function bannerHtml(r){
+ const solveFailed=(r.alerts||[]).some(a=>a.severity==='critical'&&a.scope==='scheduler');
+ if(solveFailed){
+  return `<div class="banner crit"><div class="ico">⛔</div><div><div class="bt">Scheduler error — could not solve this cycle</div>`+
+   `<div class="bx">${r.stale?`All loads were held; nothing changed. The plan below is the last good one (solved ${esc(hhmm(r.last_solved)||'?')}).`:'All loads were held; nothing changed. No earlier plan to fall back on yet.'} Find it in the add-on log: <code>grep 'ALERT[critical]'</code></div></div></div>`;
+ }
+ if(r.dry_run){
+  return `<div class="banner dry"><div class="ico">◐</div><div><div class="bt">Dry-run — planning only, nothing is switched</div>`+
+   `<div class="bx">The optimiser computes the plan below but controls no devices${r.preview?', and preview also shadow-solves the observe-only loads':''}. Your batteries are held too until you turn the add-on's dry-run off.</div></div></div>`;
+ }
+ if(r.preview){
+  return `<div class="banner preview"><div class="ico">◉</div><div><div class="bt">Preview mode is on</div>`+
+   `<div class="bx">Your observe-only loads are only showing what they <b>would</b> do — they are not being switched. Anything in Optimiser mode (your batteries, and any load you've handed over) is still controlled live.</div></div></div>`;
+ }
+ return `<div class="banner live"><div class="ico">●</div><div><div class="bt">Live control is on</div>`+
+  `<div class="bx">The scheduler is actively switching your loads and batteries to follow the plan below.</div></div></div>`;
+}
+
+// ── card renderers ──
+const tabBtn=(id,key,cur,label)=>`<button class="tab ${cur===key?'act':''}" data-id="${esc(id)}" data-tab="${key}">${label}</button>`;
+function loadCard(d){
+ const t=tab[d.id]||'overview';
+ const badge=d.advisory?'<span class="badge prev">Preview</span>':'<span class="badge live">Live</span>';
+ let panel;
+ if(t==='why')panel=`<div class="why-p">${esc(d.why)}</div>`;
+ else if(t==='plan')panel=d.items.map(p=>`<div class="plan-item"><span class="pd" style="background:${d.dot}"></span><div><div class="pl">${esc(p.label)}</div><div class="ps">${esc(p.sub)}</div></div></div>`).join('')+`<div class="tech">${esc(d.tech)}</div>`;
+ else panel=`<div class="ov-h">${esc(d.headline)}</div><div class="ov-d">${esc(d.detail)}</div>`+
+  `<div class="prog"><div class="bar"><i style="width:${d.progW.toFixed(0)}%;background:${d.dot}"></i></div><div class="pl">${esc(d.progLabel)}</div></div>`;
+ return `<div class="dcard"><div class="dhead"><span class="dname">${esc(d.name)}</span><div style="display:flex;gap:9px;align-items:center">${badge}<button class="edit-link" data-edit="${esc(d.id)}">Edit</button></div></div>`+
+  `<div class="statuschip"><span class="dot" style="background:${d.dot}"></span><span class="st">${esc(d.status)}</span></div>`+
+  `<div class="tabs">${tabBtn(d.id,'overview',t,'Overview')}${tabBtn(d.id,'why',t,'Why')}${tabBtn(d.id,'plan',t,'Plan')}</div>`+
+  `<div class="panel">${panel}</div></div>`;
+}
+function battCard(d){
+ const t=tab[d.id]||'overview';
+ const badge=d.advisory?'<span class="badge prev">Advisory</span>':'<span class="badge live">Live</span>';
+ let panel;
+ if(t==='why')panel=`<div class="why-p">${esc(d.why)}</div>`;
+ else if(t==='plan'){
+  const chips=d.chips.length?d.chips.map(c=>`<span class="wchip">${esc(c)}</span>`).join(''):'<span class="empty">No discharge planned this horizon.</span>';
+  panel=`<div class="chiphead">Battery powers the house during:</div><div class="chips">${chips}</div><div class="tech">${esc(d.tech)}</div>`;
+ }else panel=`<div class="metric"><b>${esc(d.metric)}</b><u>${esc(d.metricSub)}</u></div>`+
+  `<div class="soc"><i style="width:${d.socW.toFixed(0)}%"></i></div>`+
+  `<div class="bh">${esc(d.headline)}</div><div class="bd">${esc(d.detail)}</div>`;
+ return `<div class="dcard batt"><div class="dhead"><div style="display:flex;align-items:center;gap:9px"><span class="dname">${esc(d.name)}</span><span class="dsys">${esc(d.sys)}</span></div><div style="display:flex;gap:9px;align-items:center">${badge}<button class="edit-link" data-edit="${esc(d.id)}">Edit</button></div></div>`+
+  `<div class="statuschip"><span class="dot" style="background:${d.dot}"></span><span class="st">${esc(d.status)}</span></div>`+
+  `<div class="tabs batt">${tabBtn(d.id,'overview',t,'Overview')}${tabBtn(d.id,'why',t,'Why')}${tabBtn(d.id,'plan',t,'Plan')}</div>`+
+  `<div class="panel">${panel}</div></div>`;
+}
+
+// ── alerts + diagnostics (preserved) ──
+const SEV={critical:['crit','⛔ CRITICAL'],warning:['warn','⚠ WARNING'],info:['info','ⓘ INFO']},SORD={critical:0,warning:1,info:2};
+function diagHtml(r){
+ const a=r.alerts||[], diags=r.diagnostics||[];
+ if(!a.length&&!diags.length)return '';
+ const rows=a.length?a.slice().sort((x,y)=>(SORD[x.severity]??9)-(SORD[y.severity]??9)).map(al=>{
+  const [cls,label]=SEV[al.severity]||SEV.info;
+  return `<div class="arow ${cls}"><span class="sev">${label}</span><span class="scope">${esc(al.scope)}</span><span>${esc(al.detail)}</span></div>`;
+ }).join(''):'<div class="allgood">✓ all good — no warnings this cycle.</div>';
+ return `<div class="diagcard"><h3>Alerts &amp; diagnostics</h3><div class="alerts">${rows}</div>`+
+  (diags.length?`<div class="diags">${esc(diags.join('\n'))}</div>`:'')+`</div>`;
+}
+
 function render(r){
  last=r;
- const f=(v,d=2)=>v==null?'?':(+v).toFixed(d);
- const g0=(r.grid_kw&&r.grid_kw.length)?r.grid_kw[0]:null;
- const gridChip=g0==null?'':`<span>grid ${g0>=0?'▲ import':'▼ export'} ${f(Math.abs(g0))} kW</span>`;
- let battChip='';
- (r.storage||[]).forEach(b=>{const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
-  const a=b.action==='charging'?'▲ charging':b.action==='discharging'?'▼ discharging':'idle';
-  const u=b.target_unmet>0.1?` · short ${f(b.target_unmet,1)} kWh`:'';
-  battChip+=`<span>🔋 ${b.id} ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}% · ${a}${u}</span>`;});
- chips.innerHTML=`<span class="${r.global_enabled?'on':'warn'}">${r.global_enabled?'enabled':'disabled'}</span>`
-  +(r.dry_run?'<span class="warn">observing · dry-run</span>':'')
-  +alertChip(r.alerts)
-  +`<span>price ${f(r.price_now,3)} /kWh</span><span>☀ ${f(r.pv_now)} kW</span>`
-  +`<span>house ${f(r.consumption_now)} kW</span>`+gridChip+battChip
-  +`<span>solve ${r.solver_ms} ms · ${r.at}</span>`;
- bannersEl.innerHTML=bannersHtml(r);
- loads.innerHTML=r.loads.map(l=>{
-  const chipsHtml=`<div class="chips"><span class="${l.authority?'on':'warn'}">${l.authority?'AUTH ✓':'observe-only'}</span>`
-   +`<span>${l.running===null?'unknown':(l.running?'● running':'○ idle')}</span><span>${esc(l.planning)}</span>`
-   +`${l.unmet>0?`<span class="warn">unmet ${l.unmet.toFixed(0)}</span>`:''}</div>`;
-  return `<div class="card"><h1>${esc(l.id)}</h1>${chipsHtml}${loadAction(l,r)}${why(l,r)}</div>`;
- }).join('');
- const sto=r.storage||[];
- if(storagecard)storagecard.style.display=sto.length?'':'none';
- if(storage)storage.innerHTML=sto.map(b=>{
-  const pct=b.capacity_kwh?100*b.soc_now_kwh/b.capacity_kwh:0;
-  const a=b.action==='charging'?'▲ charging':b.action==='discharging'?'▼ discharging':'○ idle';
-  const chipsHtml=`<div class="chips"><span>🔋 ${f(b.soc_now_kwh,1)} kWh · ${pct.toFixed(0)}%</span><span>${a}</span>`
-   +`<span class="${b.authority?'on':'warn'}">${b.authority?'AUTH ✓':'observe-only'}</span>`
-   +`${b.target_unmet>0.1?`<span class="warn">short ${f(b.target_unmet,1)} kWh</span>`:''}</div>`;
-  return `<div class="card"><h1>${esc(b.id)}</h1>${chipsHtml}${storageAction(b,r)}${why(b,r)}</div>`;
- }).join('');
- const pc=document.getElementById('preview'); if(pc) pc.checked=!!r.preview;
- alertsEl.innerHTML=alertsHtml(r.alerts);
- // The raw diagnostics bag stays below the triaged alerts (detail for the curious).
- diags.textContent=r.diagnostics.join('\n');
- fetch('./horizon.svg',{cache:'no-store'}).then(r=>r.text()).then(svg=>{document.getElementById('plot').innerHTML=svg;});
+ // utility bar left: brand + scheduler pill + alert pill
+ const a=r.alerts||[];const c=a.filter(x=>x.severity==='critical').length,w=a.filter(x=>x.severity==='warning').length;
+ let alertPill='';
+ if(c)alertPill=`<span class="pill alert" onclick="document.querySelector('.diagcard')?.scrollIntoView({behavior:'smooth'})"><span class="dot"></span>${c} critical</span>`;
+ else if(w)alertPill=`<span class="pill alert warn" onclick="document.querySelector('.diagcard')?.scrollIntoView({behavior:'smooth'})"><span class="dot"></span>${w} warning${w>1?'s':''}</span>`;
+ $('ubarL').innerHTML=`<span class="brand">LP Scheduler</span>`+
+  (r.global_enabled?`<span class="pill good"><span class="dot"></span>Scheduler on</span>`:`<span class="pill off"><span class="dot"></span>Scheduler off</span>`)+alertPill;
+ // preview toggle + stamp
+ $('pvtrack').className='track'+(r.preview?' on':'');
+ $('stamp').textContent=ageStr(r.at)||(r.solver_ms!=null?`solved in ${r.solver_ms} ms`:'');
+ // hero
+ const H=heroOf(r);
+ $('heroH').textContent=H.h; $('heroSub').textContent=H.sub;
+ $('health').className='health '+H.health.cls; $('health').innerHTML=`<span class="dot"></span>${esc(H.health.txt)}`;
+ // banner
+ $('banner').innerHTML=bannerHtml(r);
+ // tiles
+ $('tiles').innerHTML=tilesOf(r).map(t=>`<div class="tile"><div class="tl">${esc(t.l)}</div><div class="tv"><b>${esc(t.v)}</b><u>${esc(t.u)}</u></div><div class="ts">${esc(t.s)}</div></div>`).join('');
+ // schedule
+ $('schedcard').innerHTML=schedHtml(r);
+ // devices + batteries
+ $('loads').innerHTML=(r.loads||[]).map(l=>loadCard(loadView(l,r))).join('')||'<div class="empty">No loads configured.</div>';
+ $('storage').innerHTML=(r.storage||[]).map(b=>battCard(battView(b,r))).join('');
+ $('diag').innerHTML=diagHtml(r);
 }
-// Instant crosshair tooltip: reuse the per-step <title> readouts the server
-// renders into the hover bands, but show them immediately and styled (the native
-// <title> tooltip — kept as a no-JS fallback — lags ~0.5s and can't be styled).
-const horizon=document.getElementById('horizon'),xhair=document.getElementById('xhair'),tip=document.getElementById('tip');
-const hideTip=()=>{xhair.style.opacity=0;tip.style.opacity=0;};
-horizon.addEventListener('mouseleave',hideTip);
-horizon.addEventListener('mousemove',e=>{
- const hit=document.elementFromPoint(e.clientX,e.clientY)?.closest('.hit');
- const svg=document.querySelector('#plot svg'),title=hit&&hit.querySelector('title');
- if(!hit||!svg||!title){hideTip();return;}
- const wb=horizon.getBoundingClientRect(),hb=hit.getBoundingClientRect(),cx=hb.left+hb.width/2-wb.left;
- xhair.style.left=cx+'px';xhair.style.height=svg.getBoundingClientRect().height+'px';xhair.style.opacity=.6;
- tip.textContent=title.textContent;
- tip.style.left=Math.min(Math.max(cx,64),wb.width-64)+'px';
- tip.style.top=(e.clientY-wb.top-6)+'px';
- tip.style.opacity=1;
+
+// ============================================================================
+//  Device management + add/edit wizard (view = 'dashboard' | 'devices' | 'wizard')
+// ============================================================================
+let view='dashboard';
+function setView(v){
+ view=v;
+ $('view-dashboard').hidden=v!=='dashboard';
+ $('view-devices').hidden=v!=='devices';
+ $('view-wizard').hidden=v!=='wizard';
+ window.scrollTo(0,0);
+}
+// The 5 device kinds (plain-language → scheduler concept). `tint` is the kind's
+// dot colour; the row/wizard glyph sits on a ~14%-alpha tile of it.
+const KINDS=[
+ {key:'runtime',  label:'Scheduled run',   glyph:'⏱', tint:'#3b82c4', desc:'Runs for a set number of hours inside a window. The scheduler picks the cheapest times.', eg:'Pool pump, dishwasher, EV charger'},
+ {key:'comfort',  label:'Comfort range',   glyph:'❄', tint:'#dba017', desc:'Keeps a temperature inside a range you set, using cheap power when it can.',            eg:'Aircon, heat pump'},
+ {key:'threshold',label:'Keep under a limit',glyph:'➖',tint:'#e8743b', desc:'Runs to keep a sensor reading under (or over) a target value.',                        eg:'Dehumidifier, humidifier'},
+ {key:'program',  label:'Fixed program',   glyph:'▶', tint:'#3fae6b', desc:'Runs one fixed program once, choosing the best moment to start.',                       eg:'Washing machine, dryer'},
+ {key:'battery',  label:'Battery',         glyph:'🔋',tint:'#e8743b', desc:'A home battery — charges and discharges to follow prices and solar.',                  eg:'Home battery, inverter'},
+];
+const KIND_OF=k=>KINDS.find(x=>x.key===k)||KINDS[0];
+const tintBg=c=>{const m=c.replace('#','').match(/../g).map(h=>parseInt(h,16));return `rgba(${m[0]},${m[1]},${m[2]},.14)`;};
+
+// ── entity catalog (cached) for the picker ──
+let _catalog=null;
+async function catalog(){ if(_catalog)return _catalog; try{ const r=await fetch('./api/entities'); _catalog=r.ok?await r.json():[]; }catch{ _catalog=[]; } return _catalog; }
+
+// ── infer a kind from an existing (edited) config so the form pre-fills ──
+function kindOfLoad(l){ const mh=l.must_have||{}; if(mh.kind==='program')return 'program'; if(mh.kind==='temperature_band')return 'comfort'; if(mh.kind==='threshold'||mh.kind==='humidity_below')return 'threshold'; return 'runtime'; }
+
+// ── a literal⇄entity value: {mode, lit, ent}. Serialises to a number or {entity}. ──
+function vrFrom(v){ if(v==null)return {mode:'literal',lit:'',ent:''}; if(typeof v==='object'&&v.entity!=null)return {mode:'entity',lit:'',ent:v.entity}; if(typeof v==='object'&&v.value!=null)return {mode:'literal',lit:String(v.value),ent:''}; return {mode:'literal',lit:String(v),ent:''}; }
+// Emit a ValueRef field: {entity} for entity mode, a number for a literal, undefined when blank
+// (an absent optional). A malformed literal (e.g. "0.3O") is REJECTED, not passed through as NaN
+// — NaN serializes to null, which would silently drop an optional field (price cap, hysteresis) or
+// turn a bad battery discharge limit into charge-only. Callers surface the thrown message.
+function vrOut(vr){ if(!vr)return undefined; if(vr.mode==='entity')return vr.ent?{entity:vr.ent}:undefined; if(vr.lit==='')return undefined; const n=Number(vr.lit); if(!Number.isFinite(n)) throw new Error(`“${vr.lit}” is not a valid number.`); return n; }
+
+// ── DEVICES LIST ──
+let _devices={loads:[],storage:[]};
+async function loadDevices(){ try{ const r=await fetch('./api/devices'); _devices=r.ok?await r.json():{loads:[],storage:[]}; }catch{ _devices={loads:[],storage:[]}; } }
+function mapSummary(l){
+ const mh=l.must_have||{}; const ent=l.state||{}; const auth=(l.authority||{}).enabled_entity;
+ const ents=[(l.control&&l.control.start&&l.control.start.target),ent.observed_entity].filter(Boolean);
+ let rule='';
+ if(mh.kind==='runtime')rule=`runs ${vrLabel(mh.amount_hours||mh.amount_minutes)} in a window`;
+ else if(mh.kind==='program')rule=`program ${vrLabel(mh.length_hours||mh.length_minutes)}`;
+ else if(mh.kind==='temperature_band')rule=`target ${vrLabel(mh.target_c)}° ±${vrLabel(mh.band_c)}`;
+ else if(mh.kind==='threshold')rule=`keep ${mh.direction==='above'?'≥':'≤'} ${vrLabel(mh.value)}`;
+ else if(mh.kind==='humidity_below')rule=`keep ≤ ${vrLabel(mh.max_percent)}`;
+ return {ents:ents.join(' · '),rule,auth};
+}
+function storageSummary(b){ return {ents:(b.soc_entities||[]).join(' · '),rule:`${vrLabel(b.capacity_kwh)} kWh · max ±${vrLabel(b.max_charge_kw)}/${vrLabel(b.max_discharge_kw)} kW`}; }
+function vrLabel(v){ if(v==null)return '—'; if(typeof v==='object')return v.entity?'(live)':String(v.value); return String(v); }
+let _confirmRemove=null;
+function renderDevices(){
+ const rows=[];
+ (_devices.loads||[]).forEach(l=>{ const k=kindOfLoad(l), K=KIND_OF(k), s=mapSummary(l);
+  rows.push(rowHtml(l.id, prettyName(l.id), K, `${esc(s.ents)}`, esc(s.rule), s.auth?'live':'prev', false)); });
+ (_devices.storage||[]).forEach(b=>{ const K=KIND_OF('battery'), s=storageSummary(b);
+  rows.push(rowHtml(b.id, prettyName(b.id), K, esc(s.ents), esc(s.rule), 'live', true)); });
+ $('dmList').innerHTML=rows.length?rows.join(''):'<div class="dm-empty">No devices yet. Add your first with “+ Add device”.</div>';
+}
+function rowHtml(id,name,K,ents,rule,badge,isBatt){
+ const confirming=_confirmRemove===id;
+ const act=confirming
+  ? `<button class="btn sm danger" data-remove="${esc(id)}">Remove</button><button class="btn sm ghost" data-cancelremove="1">Cancel</button>`
+  : `<button class="btn sm ghost" data-edit2="${esc(id)}">Edit</button><button class="btn sm ghost" data-askremove="${esc(id)}">Remove</button>`;
+ return `<div class="dm-row">`+
+  `<div class="dm-glyph" style="background:${tintBg(K.tint)};color:${K.tint}">${K.glyph}</div>`+
+  `<div class="dm-id"><div class="dm-name">${esc(name)}</div><div class="dm-kind">${esc(K.label)}</div></div>`+
+  `<div class="dm-map"><span class="rule">${rule}</span><br>${ents}</div>`+
+  `<span class="dm-badge ${badge==='live'?'live':'prev'}">${badge==='live'?'Live':'Preview'}</span>`+
+  `<div class="dm-act">${act}</div></div>`;
+}
+// delegated clicks for the devices list
+$('dmList').addEventListener('click',e=>{
+ const t=e.target;
+ if(t.dataset.edit2!=null){openWizardEdit(t.dataset.edit2);return;}
+ if(t.dataset.askremove!=null){_confirmRemove=t.dataset.askremove;renderDevices();return;}
+ if(t.dataset.cancelremove!=null){_confirmRemove=null;renderDevices();return;}
+ if(t.dataset.remove!=null){doRemove(t.dataset.remove);return;}
 });
-fetch('./api/status').then(r=>r.json()).then(render);
-new EventSource('./api/events').onmessage=e=>render(JSON.parse(e.data));
+async function doRemove(id){
+ const r=await fetch('./api/devices/'+encodeURIComponent(id),{method:'DELETE'});
+ _confirmRemove=null;
+ if(r.ok){ await loadDevices(); renderDevices(); } else { alert('Could not remove: '+await r.text()); }
+}
+async function gotoDevices(){ await loadDevices(); renderDevices(); setView('devices'); }
+$('manageBtn').onclick=gotoDevices; $('devBack').onclick=()=>setView('dashboard');
+$('addBtn').onclick=()=>openWizardAdd(); $('devAdd').onclick=()=>openWizardAdd();
+$('wzCancel').onclick=()=>{ if(wz.step>0){wz.step--;renderWizard();} else setView(wz.from||'dashboard'); };
+
+// ── WIZARD ──
+let wz={mode:'add',from:'dashboard',step:0,kind:null,base:null,d:{}};
+function openWizardAdd(){ wz={mode:'add',from:view,step:0,kind:null,base:null,d:freshDraft()}; setView('wizard'); renderWizard(); }
+async function openWizardEdit(id){
+ await loadDevices();
+ const l=(_devices.loads||[]).find(x=>x.id===id), b=(_devices.storage||[]).find(x=>x.id===id);
+ if(l){ wz={mode:'edit',from:view,step:1,kind:kindOfLoad(l),base:JSON.parse(JSON.stringify(l)),d:draftFromLoad(l)}; }
+ else if(b){ wz={mode:'edit',from:view,step:1,kind:'battery',base:JSON.parse(JSON.stringify(b)),d:draftFromBattery(b)}; }
+ else return;
+ setView('wizard'); renderWizard();
+}
+function freshDraft(){ return {name:'',control:'',running:'',authority:'',observed:'',soc:'',power:{mode:'literal',lit:'',ent:''},
+ hours:{mode:'literal',lit:'3',ent:''},winStart:'00:00',winEnd:'24:00',cap:{mode:'literal',lit:'',ent:''},
+ target:{mode:'literal',lit:'21',ent:''},band:{mode:'literal',lit:'2',ent:''},thDir:'below',thValue:{mode:'literal',lit:'50',ent:''},hyst:{mode:'literal',lit:'2',ent:''},
+ minRun:'0',minOff:'0',startCost:'0',
+ capacity:{mode:'literal',lit:'10',ent:''},maxCharge:{mode:'literal',lit:'4',ent:''},maxDischarge:{mode:'literal',lit:'4',ent:''},eff:{mode:'literal',lit:'0.9',ent:''},reserve:{mode:'literal',lit:'10',ent:''},maxSoc:{mode:'literal',lit:'100',ent:''},gridCharge:true,cycleCost:{mode:'literal',lit:'0.001',ent:''} }; }
+function draftFromLoad(l){ const d=freshDraft(); const mh=l.must_have||{}; d.name=l.id; d.control=(l.control&&l.control.start&&l.control.start.target)||''; d.running=(l.state&&l.state.running_entity)||''; d.authority=(l.authority&&l.authority.enabled_entity)||''; d.observed=(l.state&&l.state.observed_entity)||''; d.power=vrFrom(l.capability&&l.capability.power_kw);
+ if(mh.amount_hours!=null||mh.length_hours!=null)d.hours=vrFrom(mh.amount_hours!=null?mh.amount_hours:mh.length_hours);
+ else if(mh.amount_minutes!=null||mh.length_minutes!=null){ const mv=mh.amount_minutes!=null?mh.amount_minutes:mh.length_minutes;
+  // The field is in hours: an entity-ref minutes value is shown as the entity (preserved as
+  // minutes on save); a literal minutes value is converted to hours so it isn't mislabelled.
+  d.hours=(mv!=null&&typeof mv==='object'&&mv.entity!=null)?vrFrom(mv):vrFrom((typeof mv==='object'?mv.value:mv)/60); }
+ if(mh.window){d.winStart=tref(mh.window.start);d.winEnd=tref(mh.window.end);}
+ d.cap=vrFrom(mh.max_price); d.target=vrFrom(mh.target_c); d.band=vrFrom(mh.band_c);
+ if(mh.kind==='threshold'){d.thDir=mh.direction||'below';d.thValue=vrFrom(mh.value);d.hyst=vrFrom(mh.start_hysteresis);}
+ if(mh.kind==='humidity_below'){d.thDir='below';d.thValue=vrFrom(mh.max_percent);d.hyst=vrFrom(mh.start_hysteresis);}
+ d.minRun=String(((l.hard_rules||{}).min_run_minutes!=null)?vrNum(l.hard_rules.min_run_minutes):0);
+ d.minOff=String(((l.hard_rules||{}).min_off_minutes!=null)?vrNum(l.hard_rules.min_off_minutes):0);
+ d.startCost=String(vrNum((l.preferences||{}).start_cost_aud)||0);
+ return d; }
+function draftFromBattery(b){ const d=freshDraft(); d.name=b.id; d.soc=(b.soc_entities||[]).join(','); d.capacity=vrFrom(b.capacity_kwh); d.maxCharge=vrFrom(b.max_charge_kw); d.maxDischarge=vrFrom(b.max_discharge_kw); d.eff=vrFrom(b.round_trip_efficiency); d.reserve=vrFrom(b.reserve_soc_pct); d.maxSoc=vrFrom(b.max_soc_pct); d.cycleCost=vrFrom(b.cycle_cost_aud_per_kwh); d.gridCharge=(typeof b.allow_grid_charge==='object')?true:!!b.allow_grid_charge; return d; }
+function tref(t){ return typeof t==='object'?(t.entity?'':''):String(t); }
+function vrNum(v){ if(v==null)return 0; if(typeof v==='object')return v.value!=null?v.value:0; return Number(v); }
+
+const STEPS=['Type','Connect','Rules','Review'];
+function renderWizard(){
+ $('wzTitle').textContent=wz.mode==='edit'?'Edit device':'Add a device';
+ // stepper
+ $('wzStepper').innerHTML=STEPS.map((s,i)=>{ const cls=i===wz.step?'act':(i<wz.step?'done':''); const dot=i<wz.step?'✓':(i+1);
+  return `<div class="step ${cls}"><span class="sdot">${dot}</span><span class="lbl">${s}</span></div>`; }).join('');
+ const body=[stepType,stepConnect,stepRules,stepReview][wz.step](); $('wzBody').innerHTML=body;
+ wireStep();
+}
+function nav(backLabel,nextLabel,nextId){ return `<div class="wz-nav"><button class="btn ghost" id="wzBack">${backLabel}</button>`+
+ (nextLabel?`<button class="btn" id="${nextId||'wzNext'}">${nextLabel}</button>`:'<span></span>')+`</div>`; }
+
+// Step 1 — Type
+function stepType(){
+ // On edit, keep the device CLASS fixed: a load can switch among the load-kinds but can't become
+ // a battery (and a battery stays a battery). The two share no config fields, so a class change is
+ // really a remove + add — converting in place would carry the old class's fields across. (The
+ // backend still supports a cross-type PUT for completeness; the wizard just doesn't offer it.)
+ const baseIsBattery=wz.mode==='edit'&&wz.base&&(wz.base.soc_entities!==undefined||wz.base.capacity_kwh!==undefined);
+ const shown=wz.mode!=='edit'?KINDS:KINDS.filter(k=>(k.key==='battery')===!!baseIsBattery);
+ const cards=shown.map(k=>`<button class="kind-card ${wz.kind===k.key?'sel':''}" data-kind="${k.key}">`+
+  `<div class="kh"><span class="kg" style="background:${tintBg(k.tint)};color:${k.tint}">${k.glyph}</span>${k.label}</div>`+
+  `<div class="kd">${k.desc}</div><div class="keg">e.g. ${k.eg}</div></button>`).join('');
+ const sub=wz.mode==='edit'?'Change how this device is optimised. To switch between a load and a battery, remove it and add it again.':'Pick the closest match. This decides what the scheduler optimises and which Home Assistant entities you’ll connect next.';
+ return `<div class="wz-h">What kind of device is it?</div><div class="wz-sub">${sub}</div>`+
+  `<div class="kind-grid">${cards}</div>`+nav('‹ Cancel','Continue →');
+}
+// Step 2 — Connect
+function picker(id,val,domains,ph){ return `<div class="picker" data-picker="${id}" data-domains="${domains}">`+
+  `<input class="form-input" id="pk_${id}" autocomplete="off" placeholder="${ph||'Search entities…'}" value="${esc(val||'')}"><div class="picker-menu" id="pm_${id}" hidden></div></div>`; }
+function stepConnect(){
+ const d=wz.d;
+ if(wz.kind==='battery'){
+  return `<div class="wz-h">Name it and connect entities</div><div class="wz-sub">Map each role to a Home Assistant entity. Search the list, or type an entity id directly.</div>`+
+   field('Display name','', `<input class="form-input" id="f_name" value="${esc(d.name)}" placeholder="e.g. Home battery">`)+
+   field('State-of-charge sensor(s)','The battery %; comma-separate two packs.', `<input class="form-input" id="f_soc" value="${esc(d.soc)}" placeholder="sensor.battery_soc">`)+
+   nav('‹ Back','Continue →');
+ }
+ // Control is driven by turn_on/turn_off, so only offer domains that support those services.
+ // (select/script/scene need select_option/data the wizard can't express — edit such a device
+ // by hand, or keep its existing custom control which an unchanged edit preserves.)
+ const ctrlDom='switch,input_boolean,light,fan,climate,humidifier', sensDom='sensor';
+ let roles=field('Display name','', `<input class="form-input" id="f_name" value="${esc(d.name)}" placeholder="e.g. Pool pump">`)
+  +field('Switch to control','The switch/climate the scheduler turns on and off.', picker('control',d.control,ctrlDom,'switch.pool_pump'))
+  +field('Authority entity','A boolean that says the scheduler is allowed to control it.', picker('authority',d.authority,'binary_sensor,input_boolean','binary_sensor.pool_pump_automated'));
+ if(wz.kind==='comfort'||wz.kind==='threshold')
+  roles+=field(wz.kind==='comfort'?'Temperature sensor':'Sensor to keep in check','The reading the scheduler watches.', picker('observed',d.observed,sensDom,'sensor.room_temp'));
+ roles+=`<details class="adv"><summary>Advanced</summary>`+
+  field('Running-state entity (optional)','Defaults to the control entity.', picker('running',d.running,'switch,input_boolean,climate,binary_sensor,sensor',''))+`</details>`;
+ return `<div class="wz-h">Name it and connect entities</div><div class="wz-sub">Map each role to a Home Assistant entity. Search the list, or type an entity id directly.</div>`+roles+nav('‹ Back','Continue →');
+}
+// Step 3 — Rules
+function vrField(id,label,opt,hint,vr,unit){ const isEnt=vr.mode==='entity';
+ return field(label+(opt?` <span class="field-opt">${opt}</span>`:''),hint,
+  `<div class="vr"><input class="form-input" id="vr_${id}" placeholder="${isEnt?'sensor.x':'number'}" value="${esc(isEnt?vr.ent:vr.lit)}">${unit?`<span class="unit">${unit}</span>`:''}`+
+  `<span class="vr-toggle" data-vr="${id}"><button data-m="literal" class="${!isEnt?'on':''}">Number</button><button data-m="entity" class="${isEnt?'on':''}">Entity</button></span></div>`); }
+function stepRules(){
+ const d=wz.d;
+ if(wz.kind==='battery'){
+  return `<div class="wz-h">Battery limits</div><div class="wz-sub">The physical limits the scheduler must stay inside.</div>`+
+   `<div class="row2">`+vrField('capacity','Usable capacity','','',d.capacity,'kWh')+vrField('eff','Round-trip efficiency','','0–1',d.eff,'')+`</div>`+
+   `<div class="row2">`+vrField('maxCharge','Max charge','','',d.maxCharge,'kW')+vrField('maxDischarge','Max discharge','','0 = charge-only',d.maxDischarge,'kW')+`</div>`+
+   `<details class="adv"><summary>Advanced</summary><div class="row3">`+vrField('reserve','Reserve floor','','%',d.reserve,'%')+vrField('maxSoc','Usable ceiling','','%',d.maxSoc,'%')+vrField('cycleCost','Wear cost','','$/kWh',d.cycleCost,'')+`</div>`+
+   field('Allow grid charging','', `<select class="form-sel" id="f_gridcharge"><option value="1" ${d.gridCharge?'selected':''}>Yes — charge from grid when cheap</option><option value="0" ${!d.gridCharge?'selected':''}>No — solar only</option></select>`)+`</details>`+
+   nav('‹ Back','Review →');
+ }
+ let inner='';
+ if(wz.kind==='runtime'||wz.kind==='program'){
+  inner=`<div class="row2">`+vrField('hours',wz.kind==='program'?'Program length':'Run-time needed per day','','',d.hours,'hours')+`<div></div></div>`+
+   `<div class="row2">`+field('Allowed run window','', `<input class="form-input" id="f_winStart" value="${esc(d.winStart)}">`)+field('to','', `<input class="form-input" id="f_winEnd" value="${esc(d.winEnd)}">`)+`</div>`;
+ } else if(wz.kind==='comfort'){
+  inner=`<div class="row2">`+vrField('target','Target temperature','','',d.target,'°C')+vrField('band','Allowed swing (±)','','',d.band,'°C')+`</div>`+
+   `<div class="row2">`+field('Allowed run window','', `<input class="form-input" id="f_winStart" value="${esc(d.winStart)}">`)+field('to','', `<input class="form-input" id="f_winEnd" value="${esc(d.winEnd)}">`)+`</div>`;
+ } else if(wz.kind==='threshold'){
+  inner=field('Direction','', `<select class="form-sel" id="f_thDir"><option value="below" ${d.thDir==='below'?'selected':''}>Keep at or below</option><option value="above" ${d.thDir==='above'?'selected':''}>Keep at or above</option></select>`)+
+   `<div class="row2">`+vrField('thValue','Target value','','',d.thValue,'')+vrField('hyst','Start hysteresis','optional','',d.hyst,'')+`</div>`;
+ }
+ inner+=`<div class="row2">`+vrField('power','Power it draws','','In kilowatts (a meter sensor reports watts — use a kW sensor or a literal).',d.power,'kW')+`<div></div></div>`;
+ inner+=vrField('cap','Price cap','optional','Runs only if its whole run fits under this price — otherwise it waits. Leave blank to always run when needed.',d.cap,'$/kWh');
+ inner+=`<details class="adv"><summary>Advanced</summary><div class="row3">`+
+  field('Min run','min', `<input class="form-input" id="f_minRun" value="${esc(d.minRun)}">`)+
+  field('Min off','min', `<input class="form-input" id="f_minOff" value="${esc(d.minOff)}">`)+
+  field('Startup penalty','$', `<input class="form-input" id="f_startCost" value="${esc(d.startCost)}">`)+`</div></details>`;
+ return `<div class="wz-h">How long, and when?</div><div class="wz-sub">Tell the scheduler what this device needs.</div>`+inner+nav('‹ Back','Review →');
+}
+// Step 4 — Review
+function stepReview(){
+ collect(); // pull current inputs into wz.d
+ let err=''; try{ buildPayload(); }catch(e){ err=`<div class="wz-err">${esc(e.message)}</div>`; }
+ const K=KIND_OF(wz.kind);
+ const rows=summaryRows();
+ const sumHtml=rows.map(r=>`<div class="srow"><span class="sk">${esc(r[0])}</span><span class="sv">${esc(r[1])}</span></div>`).join('');
+ // Batteries added via the wizard carry no charge/discharge control block, so the engine treats
+ // them as advisory (planned + reported) until those direction controls are configured — don't
+ // imply they actuate. Loads are governed by the authority entity mapped here.
+ const govern=wz.kind==='battery'
+  ?' A battery added here is advisory — the scheduler plans and reports it, but does not charge/discharge it until its control is configured separately.'
+  :' Control is governed by the authority entity you mapped; use the global Preview toggle on the dashboard to observe-only.';
+ return `<div class="wz-h">Review</div><div class="wz-sub">Check the mapping, then ${wz.mode==='edit'?'save your changes':'add the device'}.${govern}</div>`+
+  `<div class="summary">${sumHtml}</div>${err}`+
+  `<div class="wz-nav"><button class="btn ghost" id="wzBack">‹ Back</button><button class="btn" id="wzSave" ${err?'disabled':''}>${wz.mode==='edit'?'Save changes':'Add device'}</button></div>`;
+}
+function summaryRows(){ const d=wz.d,K=KIND_OF(wz.kind),rows=[['Type',K.label],['Name',d.name||'—']];
+ if(wz.kind==='battery'){ rows.push(['SoC sensor',d.soc||'—'],['Capacity',vrShow(d.capacity)+' kWh'],['Max charge/discharge',vrShow(d.maxCharge)+'/'+vrShow(d.maxDischarge)+' kW']); }
+ else { rows.push(['Controls',d.control||'—'],['Authority',d.authority||'—']);
+  if(wz.kind==='comfort'||wz.kind==='threshold')rows.push(['Sensor',d.observed||'—']);
+  if(wz.kind==='runtime')rows.push(['Run-time',vrShow(d.hours)+' h'],['Window',d.winStart+'–'+d.winEnd]);
+  if(wz.kind==='program')rows.push(['Program length',vrShow(d.hours)+' h'],['Window',d.winStart+'–'+d.winEnd]);
+  if(wz.kind==='comfort')rows.push(['Target',vrShow(d.target)+'° ±'+vrShow(d.band)],['Window',d.winStart+'–'+d.winEnd]);
+  if(wz.kind==='threshold')rows.push(['Keep',(d.thDir==='above'?'≥ ':'≤ ')+vrShow(d.thValue)]);
+  rows.push(['Price cap',d.cap.lit||d.cap.ent?vrShow(d.cap):'none']);
+ }
+ return rows; }
+function vrShow(vr){ return vr.mode==='entity'?(vr.ent?'(live: '+vr.ent+')':'—'):(vr.lit||'—'); }
+
+function field(label,hint,inner){ return `<div class="field"><div class="field-label">${label}</div>${hint?`<div class="field-hint">${hint}</div>`:''}${inner}</div>`; }
+function fieldOpt(label,opt,hint,inner){ return field(`${label} <span class="field-opt">${opt}</span>`,hint,inner); }
+
+// wire the current step's controls
+function wireStep(){
+ $('wzBack')&&($('wzBack').onclick=()=>{ if(wz.step>0){collect();wz.step--;renderWizard();} else setView(wz.from||'dashboard'); });
+ const next=$('wzNext'); if(next)next.onclick=()=>{ collect(); if(advance())renderWizard(); };
+ const save=$('wzSave'); if(save)save.onclick=doSave;
+ // kind cards
+ document.querySelectorAll('.kind-card').forEach(c=>c.onclick=()=>{ wz.kind=c.dataset.kind; renderWizard(); });
+ // vr toggles
+ document.querySelectorAll('.vr-toggle').forEach(tg=>tg.querySelectorAll('button').forEach(b=>b.onclick=()=>{ collect(); wz.d[vrKey(tg.dataset.vr)].mode=b.dataset.m; renderWizard(); }));
+ // entity pickers
+ document.querySelectorAll('[data-picker]').forEach(wirePicker);
+}
+function vrKey(id){ return id; } // vr field ids match draft keys
+function advance(){
+ if(wz.step===0){ if(!wz.kind){alert('Pick a device kind first.');return false;} wz.step=1; return true; }
+ if(wz.step===1||wz.step===2){ wz.step++; return true; }
+ return false;
+}
+// pull inputs of the visible step into the draft (so nothing is lost on nav)
+function collect(){
+ const d=wz.d, g=id=>$(id);
+ if(g('f_name'))d.name=g('f_name').value.trim();
+ if(g('pk_control'))d.control=g('pk_control').value.trim();
+ if(g('pk_authority'))d.authority=g('pk_authority').value.trim();
+ if(g('pk_observed'))d.observed=g('pk_observed').value.trim();
+ if(g('pk_running'))d.running=g('pk_running').value.trim();
+ if(g('f_soc'))d.soc=g('f_soc').value.trim();
+ if(g('f_winStart'))d.winStart=g('f_winStart').value.trim();
+ if(g('f_winEnd'))d.winEnd=g('f_winEnd').value.trim();
+ if(g('f_thDir'))d.thDir=g('f_thDir').value;
+ if(g('f_gridcharge'))d.gridCharge=g('f_gridcharge').value==='1';
+ ['minRun','minOff','startCost'].forEach(k=>{ if(g('f_'+k))d[k]=g('f_'+k).value.trim(); });
+ // vr inputs
+ [['hours'],['cap'],['power'],['target'],['band'],['thValue'],['hyst'],['capacity'],['eff'],['maxCharge'],['maxDischarge'],['reserve'],['maxSoc'],['cycleCost']].forEach(([k])=>{
+  const el=g('vr_'+k); if(el){ if(d[k].mode==='entity')d[k].ent=el.value.trim(); else d[k].lit=el.value.trim(); } });
+}
+function wirePicker(box){
+ const id=box.dataset.picker, dom=(box.dataset.domains||'').split(',').filter(Boolean);
+ const inp=box.querySelector('input'), menu=box.querySelector('.picker-menu');
+ const close=()=>{menu.hidden=true;};
+ inp.addEventListener('input',async()=>{ const q=inp.value.trim().toLowerCase();
+  let items=(await catalog()).filter(e=>dom.length===0||dom.includes(e.domain));
+  if(q)items=items.filter(e=>e.id.toLowerCase().includes(q)||(e.name||'').toLowerCase().includes(q));
+  items=items.slice(0,40);
+  let html=items.map(e=>`<div class="picker-opt" data-id="${esc(e.id)}"><span>${esc(e.name)}</span><span class="pid">${esc(e.id)}</span></div>`).join('');
+  if(q.length>2&&!items.some(e=>e.id===inp.value.trim())) html+=`<div class="picker-opt manual" data-id="${esc(inp.value.trim())}">Use “${esc(inp.value.trim())}” as a custom entity id</div>`;
+  menu.innerHTML=html||'<div class="picker-opt pid">No matches — type a full entity id</div>'; menu.hidden=false;
+ });
+ inp.addEventListener('focus',()=>inp.dispatchEvent(new Event('input')));
+ menu.addEventListener('click',e=>{ const o=e.target.closest('.picker-opt'); if(o&&o.dataset.id!=null){ inp.value=o.dataset.id; close(); } });
+ inp.addEventListener('blur',()=>setTimeout(close,150));
+}
+
+// build the {type, config} payload (throws with a plain message on a bad form)
+function buildPayload(){
+ const d=wz.d;
+ if(!d.name) throw new Error('Give the device a name.');
+ // Derive the id from the (editable) name so a rename persists (doSave PUTs to the ORIGINAL id in
+ // the URL; the backend replaces it, its 409 guard rejecting a collision). But if the name field
+ // is UNCHANGED from the existing id, keep it verbatim — slugging would silently rewrite a valid
+ // hand-authored id (e.g. `ev-charger` → `ev_charger`) on an edit that didn't touch the name.
+ const id=(wz.mode==='edit'&&d.name===wz.base.id)?wz.base.id:slug(d.name);
+ // No-hardcoding on edit: the wizard surfaces a simplified view (literal hours, a plain
+ // min-run number, a HH:MM window, a yes/no grid-charge toggle), but a live registry binds
+ // these to HA entities (sliders/booleans/datetimes). Overwriting them with the simplified
+ // value would silently freeze the live binding. So when EDITING, keep base's value for any
+ // field that is an entity-ref (or otherwise an object the wizard can't represent), and only
+ // write the simplified literal when base was itself a literal (or we're ADDING a device).
+ // A ValueRef object is EITHER an entity ref `{entity}` (preserve — the wizard can't express it)
+ // OR an explicit literal `{value:n}` (NOT a ref — the user can still edit the number). Only the
+ // entity form is kept; a `{value:30}` falls through to the edited literal so edits aren't ignored.
+ const isRef=v=>v!=null&&typeof v==='object'&&v.entity!=null;
+ const keepRef=(b,lit)=>(wz.mode==='edit'&&isRef(b))?b:lit;
+ if(wz.kind==='battery'){
+  const soc=d.soc.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!soc.length) throw new Error('A battery needs at least one state-of-charge sensor.');
+  const cfg=Object.assign({}, wz.base||{}, { id, soc_entities:soc,
+   capacity_kwh:req(vrOut(d.capacity),'usable capacity'), max_charge_kw:req(vrOut(d.maxCharge),'max charge'),
+   max_discharge_kw:numOr(vrOut(d.maxDischarge),0), round_trip_efficiency:req(vrOut(d.eff),'efficiency'),
+   reserve_soc_pct:req(vrOut(d.reserve),'reserve'), max_soc_pct:req(vrOut(d.maxSoc),'usable ceiling'),
+   // allow_grid_charge is a BoolRef: prod binds it to an input_boolean. The toggle can't
+   // express an entity, so on edit keep the base ref — never clobber it with a literal true.
+   allow_grid_charge:keepRef(wz.base&&wz.base.allow_grid_charge,d.gridCharge), cycle_cost_aud_per_kwh:req(vrOut(d.cycleCost),'wear cost') });
+  return {type:'storage',config:cfg};
+ }
+ if(!d.control) throw new Error('Choose the switch to control.');
+ if(!d.authority) throw new Error('Choose the authority entity.');
+ if((wz.kind==='comfort'||wz.kind==='threshold')&&!d.observed) throw new Error('Choose the sensor to watch.');
+ const dom=d.control.split('.')[0]||'switch';
+ const start=dom==='climate'?'climate.turn_on':dom+'.turn_on', stop=dom==='climate'?'climate.turn_off':dom+'.turn_off';
+ const base=wz.base||{}, bhr=base.hard_rules||{}, bmh=base.must_have||{}, bw=bmh.window||{};
+ const setpoint=(wz.kind==='comfort'||wz.kind==='threshold');
+ // The wizard has no planning-mode selector. On edit, keep the load's existing planning so a
+ // plain edit can't silently disable aircon pre-conditioning (predictive); a setpoint kind
+ // keeps immediate/predictive, a runtime/program kind is always runtime. Adding: derive from kind.
+ let planning=setpoint?'immediate':'runtime';
+ // predictive constraints are only built for a temperature_band, so keep predictive ONLY when
+ // the kind is still comfort. Switching a predictive load to threshold/runtime falls back to the
+ // kind default (immediate/runtime) — otherwise a predictive non-band demand never schedules.
+ if(wz.mode==='edit'&&wz.kind==='comfort'&&base.planning==='predictive')planning='predictive';
+ // Control: if the user didn't change the controlled entity on edit, keep base.control
+ // verbatim — it may use a custom service or `data` payload (a script, select.select_option,
+ // …) that the domain-derived turn_on/turn_off would silently drop. Synthesize only when the
+ // target actually changed (or we're adding).
+ const ctlSame=wz.mode==='edit'&&base.control&&base.control.start&&base.control.start.target===d.control;
+ // Synthesized control uses turn_on/turn_off; reject a domain that doesn't support them (a
+ // select/script needs select_option/data we can't generate) so we never save a config that
+ // validates but can't actuate. An unchanged edit keeps the device's existing custom control.
+ const ONOFF=['switch','input_boolean','light','fan','climate','humidifier'];
+ if(!ctlSame&&!ONOFF.includes(dom)) throw new Error(`Can't control a '${dom}' entity with on/off. Choose a switch/light/climate entity, or configure '${dom}' by editing the registry directly.`);
+ const control=ctlSame?base.control:{start:{service:start,target:d.control},stop:{service:stop,target:d.control}};
+ const cfg=Object.assign({}, base, {
+  id, planning,
+  authority:{enabled_entity:d.authority},
+  control,
+  state:Object.assign({}, base.state, {running_entity:d.running||d.control}),
+  capability:Object.assign({}, base.capability, {power_kw:req(vrOut(d.power),'power')}),
+  // nnum rejects a malformed entry (e.g. "3O") instead of coercing it to 0 — a silent 0 would
+  // quietly drop the min-run/min-off short-cycle protection. Blank = 0 ("no minimum", fail-safe).
+  hard_rules:Object.assign({}, base.hard_rules, {min_run_minutes:keepRef(bhr.min_run_minutes,nnum(d.minRun,'Min run')),min_off_minutes:keepRef(bhr.min_off_minutes,nnum(d.minOff,'Min off'))}),
+  // start_cost_aud can be an entity-ref; keep it on edit rather than freezing it to a literal.
+  preferences:Object.assign({}, base.preferences, {start_cost_aud:keepRef(base.preferences&&base.preferences.start_cost_aud,nnum(d.startCost,'Startup penalty'))}),
+ });
+ if(wz.kind==='comfort'||wz.kind==='threshold')cfg.state.observed_entity=d.observed; else delete cfg.state.observed_entity;
+ // Window times are TimeRefs: prod binds them to input_datetime sliders. Keep an entity-backed
+ // base window on edit (the wizard shows only HH:MM); use the literal HH:MM otherwise.
+ // hhmmReq rejects a malformed time rather than coercing it (old hhmmOut turned "7pm"→"07:00"
+ // and junk→"00:00", silently persisting the wrong run window). Skip it when the base window is
+ // an entity ref we're preserving (its literal field is empty by design).
+ const wstart=(wz.mode==='edit'&&isRef(bw.start))?bw.start:hhmmReq(d.winStart,'Run from');
+ const wend=(wz.mode==='edit'&&isRef(bw.end))?bw.end:hhmmReq(d.winEnd,'Run until');
+ const w={start:wstart,end:wend}, cap=vrOut(d.cap);
+ // The run-length toggle (d.hours) expresses entity-vs-literal directly, so emit vrOut(d.hours)
+ // as-is — switching Entity→Number genuinely replaces an entity-backed length. Keep the MINUTES
+ // unit only when the value is STILL an entity AND base used minutes (hot_water's slider); a
+ // literal is entered in hours (the field's unit), and a literal-minutes load was loaded as hours
+ // (÷60 in draftFromLoad) so "90 min" never shows as "90 h".
+ const amtMin=d.hours.mode==='entity'&&isRef(bmh.amount_minutes);
+ const lenMin=d.hours.mode==='entity'&&isRef(bmh.length_minutes);
+ if(wz.kind==='runtime'){ cfg.must_have={kind:'runtime',window:w}; const amt=req(vrOut(d.hours),'run-time'); if(amtMin)cfg.must_have.amount_minutes=amt; else cfg.must_have.amount_hours=amt; if(cap!=null)cfg.must_have.max_price=cap; }
+ else if(wz.kind==='program'){ cfg.must_have={kind:'program',window:w}; const len=req(vrOut(d.hours),'program length'); if(lenMin)cfg.must_have.length_minutes=len; else cfg.must_have.length_hours=len; if(cap!=null)cfg.must_have.max_price=cap; }
+ else if(wz.kind==='comfort'){ cfg.must_have={kind:'temperature_band',target_c:req(vrOut(d.target),'target'),band_c:req(vrOut(d.band),'band'),window:w}; if(cap!=null)cfg.must_have.max_price=cap; }
+ else if(wz.kind==='threshold'){ cfg.must_have={kind:'threshold',direction:d.thDir,value:req(vrOut(d.thValue),'target value')}; const h=vrOut(d.hyst); if(h!=null)cfg.must_have.start_hysteresis=h; cfg.must_have.window=w; if(cap!=null)cfg.must_have.max_price=cap; }
+ // can_take is a hidden optional demand of the ORIGINAL kind. Object.assign carried base.can_take
+ // through, so drop it whenever it no longer matches the new must_have: a different wizard kind,
+ // OR — within threshold — a flipped direction (a `below` can_take left on an `above` load would
+ // actuate the device for the opposite condition).
+ if(cfg.can_take){
+  const ctDir=cfg.can_take.direction||(cfg.can_take.kind==='humidity_below'?'below':null);
+  if(kindOfLoad(base)!==wz.kind || (wz.kind==='threshold'&&ctDir&&ctDir!==d.thDir)) delete cfg.can_take;
+ }
+ return {type:'load',config:cfg};
+}
+function req(v,what){ if(v==null||v==='') throw new Error('Enter a value for '+what+'.'); return v; }
+function numOr(v,dflt){ return (v==null||Number.isNaN(v))?dflt:(typeof v==='object'?v:Number(v)); }
+function slug(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'device'; }
+// A non-negative number, or 0 when blank ("no minimum"). Throws on a malformed entry so a typo
+// can't silently become 0 and drop short-cycle/startup protection.
+function nnum(s,what){ s=String(s==null?'':s).trim(); if(s==='')return 0; const n=Number(s); if(!Number.isFinite(n)||n<0) throw new Error(`${what} must be a number (0 or more), got “${s}”.`); return n; }
+// Strict HH:MM (00:00–24:00; 24:00 clamps to 23:59). Throws on malformed input rather than
+// coercing it, so a mistyped run window can never silently persist as the wrong time.
+function hhmmReq(s,what){ s=String(s==null?'':s).trim(); const m=s.match(/^(\d{1,2}):([0-5]\d)$/); if(!m) throw new Error(`${what} must be HH:MM (e.g. 21:30), got “${s}”.`); const h=+m[1]; if(h>24||(h===24&&m[2]!=='00')) throw new Error(`${what} must be between 00:00 and 24:00, got “${s}”.`); return h>=24?'23:59':`${String(h).padStart(2,'0')}:${m[2]}`; }
+
+async function doSave(){
+ collect(); let payload; try{ payload=buildPayload(); }catch(e){ renderWizard(); return; }
+ const url=wz.mode==='edit'?'./api/devices/'+encodeURIComponent(wz.base.id):'./api/devices';
+ const method=wz.mode==='edit'?'PUT':'POST';
+ const r=await fetch(url,{method,headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+ if(r.ok){ await loadDevices(); renderDevices(); setView('devices'); }
+ else { $('wzBody').insertAdjacentHTML('beforeend',`<div class="wz-err">Save failed: ${esc(await r.text())}</div>`); }
+}
+
+fetch('./api/status').then(r=>r.json()).then(render).catch(()=>{});
+new EventSource('./api/events').onmessage=e=>{try{render(JSON.parse(e.data));}catch{}};
+// keep the "solved N s ago" stamp ticking between solves
+setInterval(()=>{if(last)$('stamp').textContent=ageStr(last.at)||$('stamp').textContent;},5000);
 </script></body></html>

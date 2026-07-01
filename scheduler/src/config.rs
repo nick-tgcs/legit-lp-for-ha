@@ -4,12 +4,12 @@
 //! `LoadContract`s happens each cycle in the orchestrator (it needs `HaApi`).
 
 use chrono::NaiveTime;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::SchedulerError;
 
 /// A number that is either a literal or read live from an HA entity each cycle.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ValueRef {
     /// A bare number, e.g. `capacity_kwh: 18.1`.
@@ -42,7 +42,7 @@ impl ValueRef {
 
 /// A boolean that is either a literal (`true`/`false`) or read live from an HA
 /// entity each cycle (e.g. an `input_boolean` toggle).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum BoolRef {
     Plain(bool),
@@ -52,7 +52,7 @@ pub enum BoolRef {
 /// A clock time that is either a literal "HH:MM" or read live from an HA entity
 /// (e.g. an `input_datetime` the user edits) each cycle. This lets a load's run
 /// window track a UI control instead of being baked into the registry.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum TimeRef {
     Literal(String),
@@ -78,7 +78,7 @@ pub fn parse_clock(s: &str) -> Result<NaiveTime, SchedulerError> {
         .map_err(|e| SchedulerError::Config(format!("bad window time '{s}': {e}")))
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowCfg {
     pub start: TimeRef,
     pub end: TimeRef,
@@ -98,13 +98,19 @@ impl WindowCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegistryConfig {
     pub global: GlobalConfig,
+    /// Managed loads. `#[serde(default)]` so a storage-only registry (or one whose
+    /// last load was deleted from the panel) round-trips: `serialize_registry`
+    /// prunes an empty `loads: []` away, and a missing `loads:` key must then parse
+    /// back as empty — not fail the next boot with a "missing field" error. Validation
+    /// already accepts zero loads. Mirrors `global.storage`, which defaults the same way.
+    #[serde(default)]
     pub loads: Vec<LoadConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub enabled_entity: String,
     /// Optional HA boolean: when ON, the scheduler ALSO solves observe-only loads
@@ -126,7 +132,7 @@ pub struct GlobalConfig {
     pub hard_rules: Vec<serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PricingConfig {
     pub import_entity: String,
     pub feedin_entity: Option<String>,
@@ -139,7 +145,7 @@ pub struct PricingConfig {
     pub feedin_forecast: Option<ForecastConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ForecastConfig {
     pub entity: String,
     /// Attribute on `entity` holding the forecast list. Required — the engine never
@@ -149,7 +155,7 @@ pub struct ForecastConfig {
     pub fields: Option<FieldMap>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FieldMap {
     pub start: Option<String>,
     pub end: Option<String>,
@@ -157,7 +163,7 @@ pub struct FieldMap {
     pub export_per_kwh: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PowerConfig {
     pub consumption_entity: String,
     pub pv_entity: String,
@@ -167,7 +173,7 @@ pub struct PowerConfig {
     pub baseline_kw: ValueRef,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PvForecastConfig {
     pub today_entity: String,
     pub tomorrow_entity: String,
@@ -179,7 +185,7 @@ pub struct PvForecastConfig {
 /// for any direction given a `charge:`/`discharge:` control block AND live
 /// authority (Optimiser mode), drives it by writing the planned rate; a direction
 /// without a control block stays advisory (planned + reported, never actuated).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageConfig {
     pub id: String,
     /// State-of-charge sensors (%), one per pack unit; averaged to a device SoC.
@@ -226,7 +232,7 @@ pub struct StorageConfig {
 /// `set_rate` (the service's value = watts) each cycle and, if `set_threshold` is
 /// given, sets it to `active` while acting / `idle` while not — so an existing
 /// price-gated executor automation fires exactly when the LP intends.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageDirectionCfg {
     pub authority: AuthorityCfg,
     /// The LP fills this call's value with the planned rate in watts.
@@ -235,7 +241,7 @@ pub struct StorageDirectionCfg {
     pub set_threshold: Option<StorageThresholdCfg>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageThresholdCfg {
     /// `domain.service`, e.g. `input_number.set_value`.
     pub service: String,
@@ -260,7 +266,7 @@ impl StorageThresholdCfg {
 
 /// A storage charging goal. Multiple goals compose on one device — e.g. an EV
 /// with both a morning target and opportunistic cheap top-ups.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StorageGoalCfg {
     /// Charge to `soc_pct` by the next occurrence of `ready_by`, as cheaply as
@@ -276,7 +282,7 @@ pub enum StorageGoalCfg {
 // Every operational field is required (a missing key is a hard parse error); only
 // the structural grid/horizon below keep defaults (solve mechanics, not config).
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanningConfig {
     #[serde(default = "default_grid_minutes")]
     pub grid_minutes: u32,
@@ -297,15 +303,7 @@ fn default_horizon_hours() -> u32 {
     24
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LoadTypeCfg {
-    HotWater,
-    Dehumidifier,
-    Aircon,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanningMode {
     Runtime,
@@ -313,11 +311,9 @@ pub enum PlanningMode {
     Immediate,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoadConfig {
     pub id: String,
-    #[serde(rename = "type")]
-    pub load_type: LoadTypeCfg,
     pub planning: PlanningMode,
     pub authority: AuthorityCfg,
     pub control: ControlCfg,
@@ -329,18 +325,18 @@ pub struct LoadConfig {
     pub preferences: PreferencesCfg,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuthorityCfg {
     pub enabled_entity: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ControlCfg {
     pub start: ServiceCallCfg,
     pub stop: ServiceCallCfg,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServiceCallCfg {
     /// `domain.service`, e.g. `input_boolean.turn_on`.
     pub service: String,
@@ -360,14 +356,14 @@ impl ServiceCallCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StateCfg {
     pub running_entity: String,
     /// Humidity/temperature sensor for setpoint loads; runtime loads omit it.
     pub observed_entity: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CapabilityCfg {
     /// Rated electrical draw (kW) — literal or entity-ref (e.g. a live power meter).
     pub power_kw: ValueRef,
@@ -379,7 +375,7 @@ pub struct CapabilityCfg {
     pub ambient_entity: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HardRulesCfg {
     /// Minimum continuous run once started (minutes) — literal or entity-ref.
     /// Required (use a literal `0` for "no minimum"); the engine never defaults it.
@@ -393,7 +389,7 @@ pub struct HardRulesCfg {
     pub windows: Vec<WindowCfg>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DemandCfg {
     Runtime {
@@ -413,12 +409,37 @@ pub enum DemandCfg {
         max_minutes: Option<ValueRef>,
         max_price: Option<ValueRef>,
     },
+    /// Keep an observed reading on one side of a limit (the wizard's "keep under a
+    /// limit" kind). `direction: below` is the dehumidifier/cooling case (the
+    /// generalisation of `humidity_below`); `above` is the humidifier case.
+    Threshold {
+        direction: ThresholdDirCfg,
+        /// Must-have limit (%RH, ppm, …) — literal or entity-ref.
+        value: ValueRef,
+        /// Can-take target (tighter than the must-have limit).
+        target_value: Option<ValueRef>,
+        start_hysteresis: Option<ValueRef>,
+        window: Option<WindowCfg>,
+        max_minutes: Option<ValueRef>,
+        max_price: Option<ValueRef>,
+    },
     TemperatureBand {
         target_c: ValueRef,
         /// Half-band around target (°C) — literal or entity-ref (e.g. a hysteresis slider).
         band_c: ValueRef,
         window: WindowCfg,
         max_minutes: Option<ValueRef>,
+        max_price: Option<ValueRef>,
+    },
+    /// A fixed program that runs ONCE as a contiguous block, started at the cheapest
+    /// feasible moment inside `window` (the wizard's "fixed program" kind:
+    /// washing machine, dryer). Lowered to a `runtime` demand with `min_run` forced
+    /// to the block length and a single allowed start, so the whole run lands under
+    /// any price cap or not at all (all-or-nothing).
+    Program {
+        length_hours: Option<ValueRef>,
+        length_minutes: Option<ValueRef>,
+        window: WindowCfg,
         max_price: Option<ValueRef>,
     },
 }
@@ -430,12 +451,23 @@ impl DemandCfg {
         match self {
             DemandCfg::Runtime { max_minutes, .. }
             | DemandCfg::HumidityBelow { max_minutes, .. }
+            | DemandCfg::Threshold { max_minutes, .. }
             | DemandCfg::TemperatureBand { max_minutes, .. } => max_minutes.as_ref(),
+            // A program is run-once (never a can-take); it carries no cap.
+            DemandCfg::Program { .. } => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Which side of its limit a `threshold` load keeps the observed reading on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThresholdDirCfg {
+    Below,
+    Above,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PreferencesCfg {
     /// Per-start wear cost (AUD) — literal or entity-ref.
     pub start_cost_aud: ValueRef,
@@ -447,27 +479,20 @@ pub fn hours_to_minutes(hours: f64) -> u32 {
     (hours * 60.0).ceil().max(0.0) as u32
 }
 
-/// The bundled example registry, seeded on first boot: the add-on config dir
-/// starts empty, and crashing on a missing file would make install require a
-/// manual file drop before the panel even comes up. The example is this site's
-/// real contract surface and boots observe-only (authorities/global gate it).
-const SEED_REGISTRY: &str = include_str!("../../addon/example.yaml");
-
-/// Read the registry, writing the bundled example first if none exists yet.
-/// Never overwrites an existing file.
-pub fn load_or_seed(path: &std::path::Path) -> Result<String, SchedulerError> {
+/// Read the site registry, or FAIL LOUD if it is missing. The engine never ships
+/// or seeds a bundled example: booting on an invented config is exactly how prod
+/// once silently ran a placeholder registry. The real site config is written to the
+/// add-on's config dir directly (deploy step); if it is absent the scheduler refuses
+/// to run rather than fabricate one — consistent with the no-hardcoding rule
+/// (`docs/lp-no-hardcoding.md`).
+pub fn load_registry(path: &std::path::Path) -> Result<String, SchedulerError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(path, SEED_REGISTRY).map_err(|e| {
-                SchedulerError::Config(format!("seed registry {}: {e}", path.display()))
-            })?;
-            tracing::warn!(
-                "registry {} was missing; seeded the bundled example — edit it for this site",
-                path.display()
-            );
-            Ok(SEED_REGISTRY.to_string())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(SchedulerError::Config(format!(
+            "registry {} not found — write this site's registry before starting (the engine \
+             never seeds a placeholder; see docs/lp-no-hardcoding.md)",
+            path.display()
+        ))),
         Err(e) => Err(SchedulerError::Config(format!("read registry {}: {e}", path.display()))),
     }
 }
@@ -477,6 +502,62 @@ pub fn parse(yaml: &str) -> Result<RegistryConfig, SchedulerError> {
         serde_yaml::from_str(yaml).map_err(|e| SchedulerError::Config(e.to_string()))?;
     validate(&cfg)?;
     Ok(cfg)
+}
+
+/// Serialize a registry back to YAML, **validating it first**. The UI owns the
+/// whole registry file (D1), so every save round-trips through the same
+/// validation the loader applies — a save can never persist a config the engine
+/// would reject on its next boot. Comments are not preserved (the file is
+/// machine-managed); the full parsed struct is re-emitted, so fields the wizard
+/// never surfaces are still round-tripped intact rather than dropped.
+pub fn serialize_registry(cfg: &RegistryConfig) -> Result<String, SchedulerError> {
+    validate(cfg)?;
+    let mut v = serde_yaml::to_value(cfg).map_err(|e| SchedulerError::Config(e.to_string()))?;
+    prune_empty(&mut v);
+    serde_yaml::to_string(&v).map_err(|e| SchedulerError::Config(e.to_string()))
+}
+
+/// Drop `null` map entries and empty sequences/maps so the machine-managed file
+/// stays clean and diff-friendly — every absent optional reads as an absence,
+/// not a `null` line. Round-trips identically: a dropped Option re-parses to
+/// `None`, a dropped `#[serde(default)]` Vec to empty (the round-trip test guards this).
+fn prune_empty(v: &mut serde_yaml::Value) {
+    use serde_yaml::Value;
+    match v {
+        Value::Mapping(m) => {
+            let keys: Vec<Value> = m.keys().cloned().collect();
+            for k in keys {
+                if let Some(val) = m.get_mut(&k) {
+                    prune_empty(val);
+                }
+                let drop = match m.get(&k) {
+                    Some(Value::Null) => true,
+                    Some(Value::Sequence(s)) => s.is_empty(),
+                    Some(Value::Mapping(mm)) => mm.is_empty(),
+                    _ => false,
+                };
+                if drop {
+                    m.remove(&k);
+                }
+            }
+        }
+        Value::Sequence(s) => s.iter_mut().for_each(prune_empty),
+        _ => {}
+    }
+}
+
+/// Atomically write the (validated) registry to `path`: write a sibling temp
+/// file in the same directory, then rename over the target — so an interrupted
+/// write can never truncate or corrupt the live registry the engine reads.
+pub fn save_registry(path: &std::path::Path, cfg: &RegistryConfig) -> Result<(), SchedulerError> {
+    let yaml = serialize_registry(cfg)?;
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("registry.yaml");
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    std::fs::write(&tmp, &yaml)
+        .map_err(|e| SchedulerError::Config(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| SchedulerError::Config(format!("rename {}: {e}", path.display())))?;
+    Ok(())
 }
 
 fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
@@ -493,18 +574,21 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
     if !(1..=48).contains(&h) {
         return err(format!("planning.horizon_hours must be 1..=48, got {h}"));
     }
-    let mut storage_ids = std::collections::HashSet::new();
+    // Device ids are a SINGLE namespace across loads + storage: the panel API addresses
+    // every device by a bare id (`/api/devices/{id}`), so a load and a battery sharing an
+    // id would make list/edit/delete ambiguous (a delete would hit both). Check both in one
+    // set so a cross-type collision is rejected, not just same-type duplicates.
+    let mut seen = std::collections::HashSet::new();
     for s in &cfg.global.storage {
-        if !storage_ids.insert(&s.id) {
-            return err(format!("duplicate storage id '{}'", s.id));
+        if !seen.insert(&s.id) {
+            return err(format!("duplicate device id '{}'", s.id));
         }
         validate_storage(s)?;
     }
 
-    let mut seen = std::collections::HashSet::new();
     for l in &cfg.loads {
         if !seen.insert(&l.id) {
-            return err(format!("duplicate load id '{}'", l.id));
+            return err(format!("duplicate device id '{}'", l.id));
         }
         l.control.start.split()?;
         l.control.stop.split()?;
@@ -521,17 +605,37 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
                 ));
             }
         }
+        // A `program` must_have lowers to a run-once runtime block and is only
+        // honoured under planning=runtime (the cycle emits it, but the LP enforces
+        // it solely in the Runtime path). Under immediate/predictive it would be
+        // persisted and then silently never scheduled — reject it loudly instead.
+        if matches!(l.must_have, DemandCfg::Program { .. })
+            && !matches!(l.planning, PlanningMode::Runtime)
+        {
+            return err(format!(
+                "load '{}': a program must_have requires planning=runtime (got {:?})",
+                l.id, l.planning
+            ));
+        }
         match l.planning {
             PlanningMode::Runtime => {
-                let ok = matches!(
+                let runtime_ok = matches!(
                     &l.must_have,
                     DemandCfg::Runtime { amount_hours, amount_minutes, .. }
                         if amount_hours.is_some() || amount_minutes.is_some()
                 );
-                if !ok {
+                // A `program` is a run-once contiguous block — it plans as a runtime
+                // demand, so it must declare a block length (hours or minutes).
+                let program_ok = matches!(
+                    &l.must_have,
+                    DemandCfg::Program { length_hours, length_minutes, .. }
+                        if length_hours.is_some() || length_minutes.is_some()
+                );
+                if !runtime_ok && !program_ok {
                     return err(format!(
-                        "load '{}': planning=runtime requires a runtime must_have \
-                         with amount_hours or amount_minutes",
+                        "load '{}': planning=runtime requires a runtime must_have with \
+                         amount_hours/amount_minutes, or a program must_have with \
+                         length_hours/length_minutes",
                         l.id
                     ));
                 }
@@ -633,10 +737,10 @@ fn validate_storage(s: &StorageConfig) -> Result<(), SchedulerError> {
 
 fn validate_demand_windows(d: &DemandCfg) -> Result<(), SchedulerError> {
     match d {
-        DemandCfg::Runtime { window, .. } | DemandCfg::TemperatureBand { window, .. } => {
-            window.validate()
-        }
-        DemandCfg::HumidityBelow { window, .. } => {
+        DemandCfg::Runtime { window, .. }
+        | DemandCfg::TemperatureBand { window, .. }
+        | DemandCfg::Program { window, .. } => window.validate(),
+        DemandCfg::HumidityBelow { window, .. } | DemandCfg::Threshold { window, .. } => {
             window.as_ref().map(|w| w.validate()).transpose().map(|_| ())
         }
     }
@@ -646,39 +750,35 @@ fn validate_demand_windows(d: &DemandCfg) -> Result<(), SchedulerError> {
 mod tests {
     use super::*;
 
-    fn example_yaml() -> String {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
-        std::fs::read_to_string(path).expect("read addon/example.yaml")
+    fn test_registry() -> String {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
+        std::fs::read_to_string(path).expect("read tests/fixtures/registry.yaml")
     }
 
     #[test]
-    fn load_or_seed_missing_file_writes_the_bundled_example() {
+    fn load_registry_missing_file_fails_loud_without_seeding() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legit_lp.yaml");
-        let yaml = load_or_seed(&path).expect("seeds on first boot");
-        assert!(path.exists(), "registry file was created");
-        parse(&yaml).expect("seeded registry parses + validates");
-        assert_eq!(yaml, std::fs::read_to_string(&path).unwrap());
+        let err = load_registry(&path).expect_err("a missing registry must fail, not seed");
+        assert!(!path.exists(), "nothing is written — the engine never fabricates a config");
+        match err {
+            SchedulerError::Config(m) => assert!(m.contains("not found"), "actionable error: {m}"),
+            other => panic!("expected a Config error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn load_or_seed_existing_file_is_returned_untouched() {
+    fn load_registry_existing_file_is_returned_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legit_lp.yaml");
         std::fs::write(&path, "user: edited").unwrap();
-        let yaml = load_or_seed(&path).expect("reads existing");
-        assert_eq!(yaml, "user: edited", "never overwrites a user registry");
+        let yaml = load_registry(&path).expect("reads existing");
+        assert_eq!(yaml, "user: edited", "never rewrites a user registry");
     }
 
     #[test]
-    fn load_or_seed_unwritable_dir_errors_without_panic() {
-        let path = std::path::Path::new("/nonexistent-dir/legit_lp.yaml");
-        assert!(load_or_seed(path).is_err());
-    }
-
-    #[test]
-    fn example_registry_round_trips_and_validates() {
-        let cfg = parse(&example_yaml()).expect("example.yaml parses + validates");
+    fn test_registry_round_trips_and_validates() {
+        let cfg = parse(&test_registry()).expect("the test registry parses + validates");
         assert_eq!(cfg.loads.len(), 3);
         let ids: Vec<&str> = cfg.loads.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["hot_water", "dehumidifier", "aircon"]);
@@ -865,7 +965,192 @@ global:
 loads: []
 ";
         assert!(
-            matches!(parse(dup), Err(SchedulerError::Config(m)) if m.contains("duplicate storage"))
+            matches!(parse(dup), Err(SchedulerError::Config(m)) if m.contains("duplicate device"))
+        );
+    }
+
+    #[test]
+    fn rejects_a_load_and_storage_sharing_an_id() {
+        // Codex P2: device ids are ONE namespace across loads + storage (the panel addresses
+        // every device by a bare id). A load colliding with a battery id must be rejected, not
+        // accepted because loads/storage were de-duplicated separately.
+        let clash = "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+  storage:
+    - { id: shared, soc_entities: [sensor.s], capacity_kwh: 10, max_charge_kw: 5, max_discharge_kw: 0, round_trip_efficiency: 0.9, reserve_soc_pct: 0, max_soc_pct: 100, allow_grid_charge: true, cycle_cost_aud_per_kwh: 0.001 }
+loads:
+  - id: shared
+    planning: runtime
+    authority: { enabled_entity: binary_sensor.a }
+    control: { start: { service: switch.turn_on, target: switch.s }, stop: { service: switch.turn_off, target: switch.s } }
+    state: { running_entity: switch.s }
+    capability: { power_kw: 1 }
+    hard_rules: { min_run_minutes: 0, min_off_minutes: 0 }
+    must_have: { kind: runtime, amount_hours: 1, window: { start: \"00:00\", end: \"06:00\" } }
+    preferences: { start_cost_aud: 0 }
+";
+        assert!(
+            matches!(parse(clash), Err(SchedulerError::Config(m)) if m.contains("duplicate device id 'shared'")),
+            "a load sharing a battery's id is a duplicate device"
+        );
+    }
+
+    // ---- D1: the UI owns the registry — serialize round-trips losslessly ----
+
+    #[test]
+    fn serialize_round_trips_the_example_registry() {
+        // Parse -> serialize -> parse must reproduce the EXACT same struct: the UI
+        // re-emits the whole file on every save, so any field it doesn't surface
+        // (start/stop services, can_take, preferences, per-direction battery control)
+        // must survive untouched. Plain vs Literal vs Entity value forms are distinct
+        // variants and must each be preserved.
+        let cfg = parse(&test_registry()).expect("example parses");
+        let yaml = serialize_registry(&cfg).expect("serializes");
+        let round = parse(&yaml).expect("re-parses");
+        assert_eq!(cfg, round, "full struct survived a serialize/parse round-trip");
+        // Spot-check the three value forms came back as the SAME variant, not coerced.
+        assert!(matches!(round.loads[0].capability.power_kw, ValueRef::Plain(_)), "Plain kept");
+        match &round.loads[0].must_have {
+            DemandCfg::Runtime { amount_hours, max_price, .. } => {
+                assert!(matches!(amount_hours, Some(ValueRef::Entity { .. })), "Entity kept");
+                assert!(max_price.is_none(), "a None optional stays None across round-trip");
+            }
+            other => panic!("hot_water must_have wrong kind: {other:?}"),
+        }
+        let charge = round.global.storage[0].charge.as_ref().unwrap();
+        assert!(
+            matches!(charge.set_threshold.as_ref().unwrap().active, ValueRef::Literal { .. }),
+            "Literal {{ value }} form kept distinct from a bare Plain"
+        );
+    }
+
+    #[test]
+    fn serialize_validates_before_emitting() {
+        // A save must never persist a config the loader would reject. Mutate a parsed
+        // registry to something invalid and confirm serialize refuses it.
+        let mut cfg = parse(&test_registry()).expect("example parses");
+        cfg.global.planning.grid_minutes = 7; // does not divide 60
+        assert!(
+            matches!(serialize_registry(&cfg), Err(SchedulerError::Config(m)) if m.contains("divide 60")),
+            "serialize rejects an invalid registry instead of writing it"
+        );
+    }
+
+    #[test]
+    fn save_registry_writes_atomically_and_reloads_equal() {
+        let cfg = parse(&test_registry()).expect("example parses");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legit_lp.yaml");
+        save_registry(&path, &cfg).expect("saves");
+        // The live file parses back to the same struct, and no temp file is left behind.
+        let reloaded = parse(&std::fs::read_to_string(&path).unwrap()).expect("reloads");
+        assert_eq!(cfg, reloaded);
+        assert!(!path.with_file_name("legit_lp.yaml.tmp").exists(), "temp file cleaned up");
+    }
+
+    #[test]
+    fn storage_only_registry_survives_a_save_round_trip() {
+        // Codex P1: deleting the last load (or a storage-only site) leaves `loads == []`,
+        // which validation accepts. `prune_empty` drops the empty `loads:` key, so the
+        // persisted file must still parse — `loads` defaults to empty rather than failing
+        // the next boot with "missing field `loads`". Guards the serialize/parse symmetry.
+        let mut cfg = parse(&test_registry()).expect("parses");
+        cfg.loads.clear();
+        assert!(!cfg.global.storage.is_empty(), "fixture has storage to keep it a real config");
+        let yaml = serialize_registry(&cfg).expect("a storage-only registry serializes");
+        assert!(!yaml.contains("loads:"), "the empty loads list is pruned from the file");
+        let reloaded = parse(&yaml).expect("the pruned file still parses on the next boot");
+        assert!(reloaded.loads.is_empty(), "absent loads -> empty, not a parse error");
+        assert_eq!(cfg, reloaded, "storage-only registry round-trips struct-lossless");
+    }
+
+    // ---- D3: new device kinds parse, validate, and round-trip ----
+
+    fn new_kinds_yaml() -> &'static str {
+        "
+global:
+  enabled_entity: input_boolean.x
+  pricing: { import_entity: sensor.p }
+loads:
+  - id: humidifier
+    planning: immediate
+    authority: { enabled_entity: binary_sensor.hum_auth }
+    control:
+      start: { service: switch.turn_on, target: switch.humidifier }
+      stop: { service: switch.turn_off, target: switch.humidifier }
+    state: { running_entity: switch.humidifier, observed_entity: sensor.humidity }
+    capability: { power_kw: 0.2 }
+    hard_rules: { min_run_minutes: 10, min_off_minutes: 10 }
+    must_have:
+      kind: threshold
+      direction: above
+      value: 40
+      start_hysteresis: 2
+    preferences: { start_cost_aud: 0.01 }
+  - id: washer
+    planning: runtime
+    authority: { enabled_entity: binary_sensor.washer_auth }
+    control:
+      start: { service: switch.turn_on, target: switch.washer }
+      stop: { service: switch.turn_off, target: switch.washer }
+    state: { running_entity: switch.washer }
+    capability: { power_kw: 0.5 }
+    hard_rules: { min_run_minutes: 0, min_off_minutes: 0 }
+    must_have:
+      kind: program
+      length_minutes: 90
+      window: { start: \"09:00\", end: \"17:00\" }
+      max_price: { value: 0.30 }
+    preferences: { start_cost_aud: 0.02 }
+"
+    }
+
+    #[test]
+    fn threshold_above_and_program_parse_validate_and_round_trip() {
+        let cfg = parse(new_kinds_yaml()).expect("new kinds parse + validate");
+        match &cfg.loads[0].must_have {
+            DemandCfg::Threshold { direction, value, .. } => {
+                assert_eq!(*direction, ThresholdDirCfg::Above);
+                assert_eq!(value.as_literal(), Some(40.0));
+            }
+            other => panic!("humidifier wrong kind: {other:?}"),
+        }
+        match &cfg.loads[1].must_have {
+            DemandCfg::Program { length_minutes, .. } => {
+                assert_eq!(length_minutes.as_ref().and_then(|v| v.as_literal()), Some(90.0));
+            }
+            other => panic!("washer wrong kind: {other:?}"),
+        }
+        // The UI owns the registry: these kinds survive a serialize/parse round-trip.
+        let round = parse(&serialize_registry(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg, round);
+    }
+
+    #[test]
+    fn rejects_program_without_a_length() {
+        // planning=runtime + a program must_have with no length is a hard error.
+        let y = new_kinds_yaml().replace("length_minutes: 90", "length_minutes_typo: 90");
+        assert!(
+            matches!(parse(&y), Err(SchedulerError::Config(m)) if m.contains("planning=runtime"))
+        );
+    }
+
+    #[test]
+    fn rejects_a_program_under_non_runtime_planning() {
+        // A program must_have only schedules under planning=runtime; under
+        // immediate/predictive it would be persisted and silently never run.
+        // Validation must reject the combination loudly.
+        let y = new_kinds_yaml().replace(
+            "  - id: washer\n    planning: runtime",
+            "  - id: washer\n    planning: immediate",
+        );
+        let r = parse(&y);
+        assert!(
+            matches!(&r, Err(SchedulerError::Config(m))
+                if m.contains("program must_have requires planning=runtime")),
+            "expected program/planning rejection, got {r:?}"
         );
     }
 
@@ -886,7 +1171,7 @@ loads: []
     }
 
     fn mutate_example(from: &str, to: &str) -> Result<RegistryConfig, SchedulerError> {
-        let y = example_yaml();
+        let y = test_registry();
         assert!(y.contains(from), "fixture must contain '{from}'");
         parse(&y.replacen(from, to, 1))
     }

@@ -1,4 +1,4 @@
-//! One full solve cycle over the module seams: real example registry, real
+//! One full solve cycle over the module seams: real test registry fixture, real
 //! fixture payloads, RecordingHa, real HiGHS.
 
 use std::sync::atomic::AtomicBool;
@@ -19,7 +19,7 @@ fn fixture(name: &str) -> Value {
 }
 
 fn registry() -> config::RegistryConfig {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../addon/example.yaml");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/registry.yaml");
     config::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
@@ -590,4 +590,233 @@ async fn c16_unreadable_baseline_does_not_become_free_pv_headroom() {
         report.diagnostics
     );
     assert!(!report.is_solver_failure(), "an unreadable baseline still yields a valid plan");
+}
+
+#[tokio::test]
+async fn c_new_kinds_resolve_through_the_cycle_threshold_above_and_program() {
+    // Cover the new config resolution arms end-to-end: a `threshold` (at-or-above)
+    // load and a `program` (run-once block) load resolve through cycle.run, are
+    // planned, and never panic. The program forces a contiguous single block.
+    use config::{DemandCfg, ThresholdDirCfg, TimeRef, ValueRef, WindowCfg};
+    let mut reg = registry();
+
+    // dehumidifier -> a humidifier-style threshold kept AT/ABOVE 45%.
+    let deh = reg.loads.iter_mut().find(|l| l.id == "dehumidifier").unwrap();
+    deh.must_have = DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Above,
+        value: ValueRef::Plain(45.0),
+        target_value: None,
+        start_hysteresis: Some(ValueRef::Plain(2.0)),
+        window: None,
+        max_minutes: None,
+        max_price: None,
+    };
+    deh.can_take = None;
+
+    // hot_water -> a 1-hour fixed program inside 00:00–06:00.
+    let hw = reg.loads.iter_mut().find(|l| l.id == "hot_water").unwrap();
+    hw.must_have = DemandCfg::Program {
+        length_hours: None,
+        length_minutes: Some(ValueRef::Plain(60.0)),
+        window: WindowCfg {
+            start: TimeRef::Literal("00:00".into()),
+            end: TimeRef::Literal("06:00".into()),
+        },
+        max_price: None,
+    };
+    hw.can_take = None;
+
+    let mut ha = canned_ha();
+    // Observed humidity 30% is below the 45% target → the "above" threshold needs ON.
+    set_state(&mut ha, "sensor.humidity_average_inside", "30");
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on");
+    set_state(&mut ha, "binary_sensor.hot_water_automated", "on");
+
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 2, 0)).await;
+    assert!(!report.is_solver_failure(), "new kinds solve cleanly");
+    // Both new-kind loads resolved through the cycle and were planned (the arms ran).
+    assert!(report.loads.iter().any(|l| l.id == "dehumidifier"), "threshold load present");
+    let hw = report.loads.iter().find(|l| l.id == "hot_water").expect("program load present");
+    // The program forms a full contiguous 60-min block (4×15-min steps) for the
+    // current day — proving the min-run-forced contiguity. (A short tail can appear
+    // only at the 24h horizon edge, where the next day's window is clipped; it is an
+    // MPC artifact that never executes, since only step 0 is actuated.)
+    let mut best = 0;
+    let mut t = 0;
+    while t < hw.on.len() {
+        if hw.on[t] {
+            let s = t;
+            while t < hw.on.len() && hw.on[t] {
+                t += 1;
+            }
+            best = best.max(t - s);
+        } else {
+            t += 1;
+        }
+    }
+    assert!(best >= 4, "the program scheduled its full 60-min block, longest run {best} steps");
+}
+
+#[tokio::test]
+async fn c_can_take_threshold_uses_the_tighter_target_not_the_must_have_limit() {
+    // Codex P2: a `threshold` can_take with both `value` and `target_value` must be held to the
+    // tighter target_value. must_have keeps humidity ≤60 (satisfied at 57, so no forced run);
+    // can_take optionally preconditions to ≤55. At observed 57 the can-take is only "wanted" if
+    // the tighter 55 drives it — if the loose 60 were used, 57 ≤ 60 would read as satisfied and
+    // the can-take lane would stay empty.
+    use config::{DemandCfg, ThresholdDirCfg, ValueRef, WindowCfg};
+    let mut reg = registry();
+    let deh = reg.loads.iter_mut().find(|l| l.id == "dehumidifier").unwrap();
+    deh.must_have = DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Below,
+        value: ValueRef::Plain(60.0),
+        target_value: None,
+        start_hysteresis: Some(ValueRef::Plain(0.0)),
+        window: None,
+        max_minutes: None,
+        max_price: Some(ValueRef::Plain(10.0)),
+    };
+    deh.can_take = Some(DemandCfg::Threshold {
+        direction: ThresholdDirCfg::Below,
+        value: ValueRef::Plain(60.0),
+        target_value: Some(ValueRef::Plain(55.0)),
+        start_hysteresis: Some(ValueRef::Plain(0.0)),
+        window: Some(WindowCfg {
+            start: config::TimeRef::Literal("00:00".into()),
+            end: config::TimeRef::Literal("23:59".into()),
+        }),
+        max_minutes: Some(ValueRef::Plain(120.0)),
+        max_price: Some(ValueRef::Plain(10.0)),
+    });
+
+    let mut ha = canned_ha();
+    set_state(&mut ha, "sensor.humidity_average_inside", "57"); // between target 55 and limit 60
+    set_state(&mut ha, "binary_sensor.dehumidifier_automated", "on");
+    set_state(&mut ha, "sensor.current_grid_cost", "0.02"); // cheap, so taking the option is worth it
+
+    let cyc = Cycle {
+        registry: reg,
+        planner: LpPlanner { grid_minutes: 15, horizon_hours: 24 },
+        dry_run: true,
+        profile_path: None,
+        preview_override: Arc::new(AtomicBool::new(false)),
+    };
+    let mut profiles = Profiles::default();
+    let report = cyc.run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    assert!(!report.is_solver_failure(), "solves cleanly");
+    let deh = report.loads.iter().find(|l| l.id == "dehumidifier").expect("dehumidifier present");
+    assert!(
+        deh.ct.iter().any(|&x| x),
+        "can-take lane is active — proving the tighter target_value (55) drove it, not the \
+         must-have limit (60); ct={:?}",
+        deh.ct
+    );
+}
+
+/// Cheap-now / dear-later forecast (mirrors c12): one cheap hour at the injected `now`
+/// (10:00 Sydney == 00:00 UTC), dear for the rest of the horizon — a clean arbitrage.
+fn cheap_now_dear_later(ha: &mut RecordingHa) {
+    set_state(ha, "sensor.current_grid_cost", "0.02");
+    ha.states.insert(
+        "sensor.beckton_general_forecast".into(),
+        json!({"state": "0.02", "attributes": {"forecasts": [
+            {"per_kwh": 0.02, "start_time": "2026-06-10T00:00:00+00:00", "end_time": "2026-06-10T01:00:00+00:00"},
+            {"per_kwh": 0.60, "start_time": "2026-06-10T01:00:00+00:00", "end_time": "2026-06-11T00:00:00+00:00"}
+        ]}}),
+    );
+}
+
+#[tokio::test]
+async fn c17_unauthorised_storage_previews_its_full_plan_yet_actuates_nothing() {
+    // The user's demand: a Scheduled battery (BOTH directions Manual) must still PREVIEW
+    // its intended trajectory. Planning is decoupled from authority — the advisory panel
+    // plans the cheap-now/dear-later charge — while not a single rate is written (authority
+    // gates actuation). This is the symptom that started this whole thread: the cards used
+    // to show "short, never plans" because an unauthorised device was modelled frozen.
+    let mut ha = canned_ha(); // both authority sensors default OFF
+    cheap_now_dear_later(&mut ha);
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 modelled");
+    assert!(
+        !s.charge_authority && !s.discharge_authority,
+        "both directions are advisory (Scheduled)"
+    );
+    assert!(
+        s.charge_kw.iter().any(|&kw| kw > 0.1),
+        "preview shows the charge plan even while unauthorised: {:?}",
+        s.charge_kw
+    );
+    assert!(
+        s.reasoning.narrative.contains("advisory"),
+        "an unactuated plan must read as advisory, not live: {:?}",
+        s.reasoning.narrative
+    );
+    assert!(
+        !s.action_actuated,
+        "unauthorised => the shown action is not committed (pill: advisory)"
+    );
+    assert!(
+        storage_rate_calls(&ha).is_empty(),
+        "unauthorised storage is never actuated: {:?}",
+        storage_rate_calls(&ha)
+    );
+}
+
+#[tokio::test]
+async fn c18_charge_authorised_discharge_not_never_commits_an_arbitrage_charge() {
+    // P1 guard (the regression #43 introduced and #45 reverted): planning at rated power
+    // must not let a COMMITTED charge lean on a future discharge the executor will skip.
+    // Charge is Optimiser, export stays Manual; cheap-now/dear-later with no target goal,
+    // so the ONLY reason to charge now is arbitrage that NEEDS the (unauthorised) discharge.
+    // The advisory panel still shows the charge plan, but the actuation model has every
+    // unauthorised direction zeroed — a charge-only cabinet with no dischargeable payoff —
+    // so the committed charge rate is ~0. A real charge command here would be the P1.
+    let mut ha = canned_ha();
+    set_state(&mut ha, "binary_sensor.battery_charge_automated", "on"); // export stays Manual
+    cheap_now_dear_later(&mut ha);
+    let mut profiles = Profiles::default();
+    let report = cycle(false).run(&ha, &mut profiles, sydney(2026, 6, 10, 10, 0)).await;
+
+    // Advisory: the panel still plans the arbitrage charge (rated power, both directions).
+    let s = report.storage.iter().find(|s| s.id == "sonnen01").expect("sonnen01 modelled");
+    assert!(s.charge_authority && !s.discharge_authority, "charge Optimiser, export Manual");
+    assert!(
+        s.charge_kw.iter().any(|&kw| kw > 0.1),
+        "advisory panel shows the charge plan: {:?}",
+        s.charge_kw
+    );
+    // P2 (Codex on #46): charge IS authorised, but the shown charge isn't committed this
+    // step, so the narrative must be tagged advisory — not described as a live "charging now".
+    assert!(
+        s.reasoning.narrative.contains("advisory"),
+        "an authorised-but-uncommitted charge must read as advisory: {:?}",
+        s.reasoning.narrative
+    );
+    assert!(
+        !s.action_actuated,
+        "charge authorised but not committed this step => pill must read advisory, not live"
+    );
+
+    // Actuation: the executor runs (charge is authorised) but the gated model commits ~0 W —
+    // no arbitrage charge that depends on the skipped discharge leg.
+    let calls = storage_rate_calls(&ha);
+    let charge =
+        calls.iter().find(|(t, _)| t == "input_number.input_number_sonnen01_grid_charge_rate");
+    assert!(
+        matches!(charge, Some((_, w)) if *w < 1.0),
+        "charge with no dischargeable payoff must commit ~0 W, got {charge:?} (all: {calls:?})"
+    );
+    assert!(
+        !calls.iter().any(|(t, _)| t.contains("grid_discharge_rate")),
+        "export stays Manual => no discharge rate written: {calls:?}"
+    );
 }

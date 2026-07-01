@@ -21,7 +21,7 @@ See `.claude/skills/verify-release/SKILL.md` for the full contract.
    (`export SCHED_TOKEN=$(cat .token); docker compose --profile scheduler up scheduler`)
    or a local build:
    `SCHED_HASS_URL=http://localhost:8123 SCHED_TOKEN=$(cat .token) \
-    SCHED_LOADS_CONFIG=../addon/example.yaml cargo run`
+    SCHED_LOADS_CONFIG=../scheduler/tests/fixtures/registry.yaml cargo run`
 5. `./scenario.sh` (S1/S5; add `LIVE=1` for S2-S4/S6 with a live scheduler).
 
 Sanity-check the seed without booting:
