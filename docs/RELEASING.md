@@ -40,6 +40,15 @@
    truth — Supervisor pulls `image:<version>`, so the config version and the
    GHCR image tag must stay in lockstep). This lands via a normal PR, so it is
    `test`-gated like anything else.
+
+   **Version scheme: CalVer `YYYY.MM.N`** — four-digit year, **zero-padded**
+   two-digit month, then `N` = the release number *within that month*, starting
+   at `1` and resetting to `1` at each new month. So the first release cut in
+   July 2026 is `2026.07.1`, the second is `2026.07.2`, and the first in August
+   is `2026.08.1`. HA Supervisor and the add-on linter compare versions with
+   `AwesomeVersion`, which detects this as CalVer and orders it correctly
+   (including `2026.07.10 > 2026.07.2` and the one-time jump up from the old
+   `0.x` SemVer line). No leading zero on `N`.
 2. **`make release`** opens a `develop` → `main` PR **with your own credentials**
    (a plain `gh pr create` — no bot creates or approves it; that is the whole
    point). CI runs the `validate` workflow on the PR (`pull_request` trigger);

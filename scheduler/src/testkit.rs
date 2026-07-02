@@ -179,6 +179,7 @@ pub fn flat_world(now: DateTime<Tz>, steps: usize, price: f64) -> WorldState {
         pv: vec![0.0; steps],
         baseload: vec![0.8; steps],
         storage: vec![],
+        grid_import_caps: vec![],
     }
 }
 

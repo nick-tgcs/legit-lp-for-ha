@@ -227,6 +227,37 @@ async fn resolve_time<A: HaApi>(
     }
 }
 
+/// Decide a single grid-import cap from its live-resolved parts. Pure (no HA), so
+/// the fail-loud-but-safe policy is unit-testable without a mock cycle. `Ok` = a
+/// usable cap; `Err(diagnostic)` = skip it this cycle, never invent one: either a
+/// part didn't resolve, or a magnitude came back invalid — negative OR non-finite.
+/// A miswired entity can report `NaN`/`inf` (which `HaState::as_f64` parses into an
+/// `f64`); accepting it would poison the LP objective/constraints into a solver
+/// error, and clamping a negative would forge a cap the user never wrote. Both are
+/// rejected here, mirroring the parse-time literal check in `config::validate`.
+fn grid_import_cap_from_resolved(
+    idx: usize,
+    window: Option<Window>,
+    max_kw: Option<f64>,
+    penalty: Option<f64>,
+) -> Result<GridImportCapInput, String> {
+    let valid = |v: f64| v.is_finite() && v >= 0.0;
+    match (window, max_kw, penalty) {
+        (Some(window), Some(max_kw), Some(penalty)) => {
+            if valid(max_kw) && valid(penalty) {
+                Ok(GridImportCapInput { window, max_kw, penalty_aud_per_kwh: penalty })
+            } else {
+                Err(format!(
+                    "grid_import_caps[{idx}] resolved to an invalid magnitude (max_kw={max_kw}, penalty={penalty}); expected finite and >= 0, skipped this cycle"
+                ))
+            }
+        }
+        _ => Err(format!(
+            "grid_import_caps[{idx}] unresolved (window/max_kw/penalty); peak grid-avoidance skipped this cycle"
+        )),
+    }
+}
+
 /// Resolve both bounds of a window; None if either bound is unresolved.
 async fn resolve_window<A: HaApi>(
     ha: &A,
@@ -945,6 +976,25 @@ impl Cycle {
         let storage_gated = gate_storage_for_actuation(&storage, &storage_controls);
         let needs_advisory = storage_gated != storage;
 
+        // ---- grid-import caps (the "no grid during peak" control) ----
+        // Resolve each windowed cap live. Fail LOUD but SAFE: an unresolved cap is
+        // SKIPPED this cycle (with a diagnostic), never invented — it is a cost
+        // preference, not a safety gate, so skipping only forgoes peak grid-avoidance;
+        // it can never make a device act. (Failing "closed" here would mean guessing a
+        // penalty magnitude, which the no-hardcoding rule forbids.)
+        let mut grid_import_caps = Vec::new();
+        for (i, cap) in g.grid_import_caps.iter().enumerate() {
+            match grid_import_cap_from_resolved(
+                i,
+                resolve_window(ha, &cap.window, &mut diags).await,
+                resolve(ha, &cap.max_kw, &mut diags).await,
+                resolve(ha, &cap.penalty_aud_per_kwh, &mut diags).await,
+            ) {
+                Ok(cap) => grid_import_caps.push(cap),
+                Err(diag) => diags.push(diag),
+            }
+        }
+
         let world = WorldState {
             now,
             global_enabled,
@@ -954,6 +1004,7 @@ impl Cycle {
             pv,
             baseload,
             storage: storage_gated,
+            grid_import_caps,
         };
         let out = self.planner.plan_with_preview(&world, &contracts, preview);
         // Advisory storage trajectory for the panel: a second, DISPLAY-ONLY solve at
@@ -1394,7 +1445,7 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 mod tests {
     use super::{
         derive_alerts, diag_is_actionable, diag_scope, gate_storage_for_actuation,
-        reads_as_climate, storage_action_actuated,
+        grid_import_cap_from_resolved, reads_as_climate, storage_action_actuated,
     };
     use crate::lp::LoadPlan;
     use crate::model::{LoadId, ServiceCall, StorageControl, StorageDirection, StorageInput};
@@ -1426,6 +1477,43 @@ mod tests {
                 data: serde_json::Value::Null,
             },
             set_threshold: None,
+        }
+    }
+
+    #[test]
+    fn grid_import_cap_resolution_is_fail_loud_but_safe() {
+        use crate::model::Window;
+        use chrono::NaiveTime;
+        let w = Window {
+            start: NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+        };
+        // Happy path: all parts resolved, non-negative → a usable cap.
+        let ok = grid_import_cap_from_resolved(0, Some(w), Some(0.0), Some(10.0)).unwrap();
+        assert_eq!((ok.max_kw, ok.penalty_aud_per_kwh), (0.0, 10.0));
+        // Invalid magnitude — negative OR non-finite (a miswired entity can report
+        // NaN/inf) → skip loud, never clamped or passed through to poison the LP.
+        for (mx, pen) in [
+            (-1.0, 10.0),
+            (0.0, -5.0),
+            (f64::NAN, 10.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+        ] {
+            assert!(
+                grid_import_cap_from_resolved(1, Some(w), Some(mx), Some(pen))
+                    .unwrap_err()
+                    .contains("invalid magnitude"),
+                "max_kw={mx} penalty={pen} must be rejected as invalid"
+            );
+        }
+        // Any unresolved part → skip (never invent a window or magnitude).
+        for parts in
+            [(None, Some(0.0), Some(1.0)), (Some(w), None, Some(1.0)), (Some(w), Some(0.0), None)]
+        {
+            assert!(grid_import_cap_from_resolved(3, parts.0, parts.1, parts.2)
+                .unwrap_err()
+                .contains("unresolved"));
         }
     }
 

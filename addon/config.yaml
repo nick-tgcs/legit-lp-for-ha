@@ -2,7 +2,7 @@ name: Legit LP Scheduler
 description: LP (MILP) home load scheduler (Rust + HiGHS)
 url: https://github.com/nick-tgcs/legit-lp-for-ha
 slug: legit_lp_scheduler
-version: "0.2.0"
+version: "2026.07.1"
 arch: [aarch64, amd64]
 image: "ghcr.io/nick-tgcs/legit-lp-for-ha"
 init: false
