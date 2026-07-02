@@ -169,6 +169,21 @@ pub struct WorldState {
     /// discharge (`max_discharge_kw > 0`) self-arbitrages, while charge-only
     /// devices are driven by their `goals`.
     pub storage: Vec<StorageInput>,
+    /// Resolved windowed grid-import caps (the "no grid during peak" control):
+    /// inside each window, import above `max_kw` is penalised at `penalty_aud_per_kwh`
+    /// per kWh in the LP's cost — soft, so the balance stays feasible. Empty = none.
+    pub grid_import_caps: Vec<GridImportCapInput>,
+}
+
+/// A resolved windowed grid-import cap. Inside `window`, grid import above `max_kw`
+/// (kW) is charged `penalty_aud_per_kwh` per kWh in the LP's cost. SOFT — an
+/// overage slack absorbs whatever draw is physically unavoidable (PV+battery
+/// short), so the site balance can never go infeasible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridImportCapInput {
+    pub window: Window,
+    pub max_kw: f64,
+    pub penalty_aud_per_kwh: f64,
 }
 
 /// One resolved storage device the planner co-optimises, built from config + a

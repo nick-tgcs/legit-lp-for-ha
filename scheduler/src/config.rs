@@ -130,6 +130,31 @@ pub struct GlobalConfig {
     /// Site-wide hard rules: reserved; v1 rejects non-empty.
     #[serde(default)]
     pub hard_rules: Vec<serde_yaml::Value>,
+    /// Windowed grid-import caps — the "no grid during peak" control. During each
+    /// window the plan is charged `penalty_aud_per_kwh` on every kWh of grid import
+    /// ABOVE `max_kw` (set `max_kw: 0` for "no grid at all"). SOFT by design: a hard
+    /// cap could make the site balance infeasible — the house must draw from
+    /// somewhere when PV+battery can't cover it — which would blank the whole plan;
+    /// so exceeding the cap is penalised, never forbidden. Empty = no caps.
+    #[serde(default)]
+    pub grid_import_caps: Vec<GridImportCap>,
+}
+
+/// A windowed cap on grid import (the "no grid during peak" control). Enforced
+/// SOFTLY in the MILP: inside `window`, import above `max_kw` costs
+/// `penalty_aud_per_kwh` per kWh, charged in stage-2 cost only — so avoiding peak
+/// grid never trades off against must-have comfort (stage 1), and the site balance
+/// can never go infeasible. Make the penalty large to strongly avoid grid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GridImportCap {
+    /// The window the cap applies to (literal "HH:MM" bounds, or entity-refs — e.g.
+    /// the `input_datetime` peak start/end helpers). `end < start` crosses midnight.
+    pub window: WindowCfg,
+    /// Grid-import ceiling (kW) inside the window — literal or entity-ref. `0` = no grid.
+    pub max_kw: ValueRef,
+    /// Penalty ($/kWh) on import above `max_kw` — literal or entity-ref. Required
+    /// (no engine default; how hard to avoid grid is the user's call).
+    pub penalty_aud_per_kwh: ValueRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -565,6 +590,26 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
 
     if !cfg.global.hard_rules.is_empty() {
         return err("site-wide hard_rules are not supported in v1 (must be empty)".into());
+    }
+    // Grid-import caps: validate literal window bounds AND literal magnitudes now
+    // (entity-ref magnitudes are checked live each cycle in cycle.rs). A negative
+    // or non-finite ceiling/penalty is a config error, not something to clamp.
+    for (i, cap) in cfg.global.grid_import_caps.iter().enumerate() {
+        cap.window.validate()?;
+        if let Some(m) = cap.max_kw.as_literal() {
+            if !m.is_finite() || m < 0.0 {
+                return err(format!(
+                    "grid_import_caps[{i}]: max_kw must be finite and >= 0, got {m}"
+                ));
+            }
+        }
+        if let Some(p) = cap.penalty_aud_per_kwh.as_literal() {
+            if !p.is_finite() || p < 0.0 {
+                return err(format!(
+                    "grid_import_caps[{i}]: penalty_aud_per_kwh must be finite and >= 0, got {p}"
+                ));
+            }
+        }
     }
     let g = cfg.global.planning.grid_minutes;
     if g == 0 || 60 % g != 0 {
@@ -1152,6 +1197,85 @@ loads:
                 if m.contains("program must_have requires planning=runtime")),
             "expected program/planning rejection, got {r:?}"
         );
+    }
+
+    // ---- grid-import caps (the "no grid during peak" control) ----
+
+    fn caps_yaml(cap_block: &str) -> String {
+        format!(
+            "
+global:
+  enabled_entity: input_boolean.x
+  pricing: {{ import_entity: sensor.p }}
+  grid_import_caps:
+{cap_block}
+loads: []
+"
+        )
+    }
+
+    #[test]
+    fn grid_import_cap_parses_and_round_trips() {
+        // A window (entity start / entity end), a 0 kW ceiling, an entity-ref penalty:
+        // the whole "no grid during peak" wiring the prod registry will use.
+        let cfg = parse(&caps_yaml(
+            "    - window: { start: { entity: input_datetime.peak_power_start_time }, \
+                    end: { entity: input_datetime.peak_power_end_time } }\n\
+             \x20     max_kw: 0\n\
+             \x20     penalty_aud_per_kwh: { entity: input_number.peak_grid_penalty }\n",
+        ))
+        .expect("grid_import_cap parses + validates");
+        assert_eq!(cfg.global.grid_import_caps.len(), 1);
+        let cap = &cfg.global.grid_import_caps[0];
+        assert_eq!(cap.max_kw.as_literal(), Some(0.0));
+        assert_eq!(cap.window.start.source(), Some("input_datetime.peak_power_start_time"));
+        assert!(matches!(cap.penalty_aud_per_kwh, ValueRef::Entity { .. }));
+        // The UI owns the registry: the cap survives a serialize/parse round-trip.
+        let round = parse(&serialize_registry(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg, round);
+    }
+
+    #[test]
+    fn grid_import_cap_requires_max_kw_and_penalty() {
+        // No-hardcoding: neither magnitude has an engine default, so omitting either is
+        // a hard parse error rather than a silent assumed value.
+        for missing in ["max_kw", "penalty_aud_per_kwh"] {
+            let full = "    - window: { start: \"14:55\", end: \"21:00\" }\n\
+                        \x20     max_kw: 0\n\
+                        \x20     penalty_aud_per_kwh: 100\n";
+            let broken = full.replace(&format!("{missing}:"), &format!("{missing}_typo:"));
+            let r = parse(&caps_yaml(&broken));
+            assert!(r.is_err(), "omitting {missing} must be a parse error, got {r:?}");
+        }
+    }
+
+    #[test]
+    fn grid_import_cap_rejects_a_bad_window_literal() {
+        let r = parse(&caps_yaml(
+            "    - window: { start: \"25:99\", end: \"21:00\" }\n\
+             \x20     max_kw: 0\n\
+             \x20     penalty_aud_per_kwh: 100\n",
+        ));
+        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("bad window time")));
+    }
+
+    #[test]
+    fn grid_import_cap_rejects_a_negative_literal_magnitude() {
+        // A negative literal ceiling or penalty is a config error, caught at parse —
+        // not silently clamped (which would forge a cap the user never wrote).
+        let base = "    - window: { start: \"14:55\", end: \"21:00\" }\n\
+                    \x20     max_kw: 0\n\
+                    \x20     penalty_aud_per_kwh: 100\n";
+        for (field, from, bad) in [
+            ("max_kw", "max_kw: 0", "max_kw: -1"),
+            ("penalty_aud_per_kwh", "penalty_aud_per_kwh: 100", "penalty_aud_per_kwh: -5"),
+        ] {
+            let r = parse(&caps_yaml(&base.replace(from, bad)));
+            assert!(
+                matches!(&r, Err(SchedulerError::Config(m)) if m.contains(field) && m.contains(">= 0")),
+                "negative {field} must be rejected, got {r:?}"
+            );
+        }
     }
 
     #[test]
