@@ -945,6 +945,32 @@ impl Cycle {
         let storage_gated = gate_storage_for_actuation(&storage, &storage_controls);
         let needs_advisory = storage_gated != storage;
 
+        // ---- grid-import caps (the "no grid during peak" control) ----
+        // Resolve each windowed cap live. Fail LOUD but SAFE: an unresolved cap is
+        // SKIPPED this cycle (with a diagnostic), never invented — it is a cost
+        // preference, not a safety gate, so skipping only forgoes peak grid-avoidance;
+        // it can never make a device act. (Failing "closed" here would mean guessing a
+        // penalty magnitude, which the no-hardcoding rule forbids.)
+        let mut grid_import_caps = Vec::new();
+        for cap in &g.grid_import_caps {
+            match (
+                resolve_window(ha, &cap.window, &mut diags).await,
+                resolve(ha, &cap.max_kw, &mut diags).await,
+                resolve(ha, &cap.penalty_aud_per_kwh, &mut diags).await,
+            ) {
+                (Some(window), Some(max_kw), Some(penalty)) => grid_import_caps.push(
+                    GridImportCapInput {
+                        window,
+                        max_kw: max_kw.max(0.0),
+                        penalty_aud_per_kwh: penalty.max(0.0),
+                    },
+                ),
+                _ => diags.push(
+                    "grid_import_cap unresolved (window/max_kw/penalty); peak grid-avoidance skipped this cycle".into(),
+                ),
+            }
+        }
+
         let world = WorldState {
             now,
             global_enabled,
@@ -954,6 +980,7 @@ impl Cycle {
             pv,
             baseload,
             storage: storage_gated,
+            grid_import_caps,
         };
         let out = self.planner.plan_with_preview(&world, &contracts, preview);
         // Advisory storage trajectory for the panel: a second, DISPLAY-ONLY solve at

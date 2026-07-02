@@ -547,6 +547,73 @@ fn b4_flat_prices_hold_soc_flat_no_dump_no_churn() {
 }
 
 #[test]
+fn b6_peak_import_cap_forces_the_battery_to_zero_grid_in_the_window() {
+    // The "no grid during peak" control. Flat price (so absent any cap the battery
+    // holds SoC flat and the grid just carries the 0.8 kW baseload — see b4). Add a
+    // grid-import cap of 0 kW over 15:00-17:00 (steps 60..68) with a large penalty:
+    // the optimiser must now discharge the battery to zero the grid across the peak,
+    // while leaving the rest of the day untouched.
+    let now = sydney(2026, 6, 10, 0, 0); // step t == local t*15min; 15:00 == step 60
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let base = {
+        let mut w = flat_world(now, STEPS, 0.20);
+        w.storage = vec![test_storage()]; // 5 kWh on hand — ample for 0.8 kW × 2 h
+        w
+    };
+
+    // Without the cap: flat price → grid carries the baseload right through the peak.
+    let uncapped = planner().plan(&base, &[]);
+    assert!(uncapped.grid_kw[62] > 0.5, "baseline imports the 0.8 kW baseload at peak");
+
+    // With the cap: import above 0 kW during the peak costs $10/kWh extra.
+    let mut capped_world = base.clone();
+    capped_world.grid_import_caps =
+        vec![GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 10.0 }];
+    let capped = planner().plan(&capped_world, &[]);
+    let b = &capped.storage[0];
+    for t in 60..68 {
+        assert!(
+            capped.grid_kw[t] < 0.1,
+            "step {t}: grid not zeroed in peak ({})",
+            capped.grid_kw[t]
+        );
+        assert!(
+            b.discharge_kw[t] > 0.5,
+            "step {t}: battery not covering the house ({})",
+            b.discharge_kw[t]
+        );
+    }
+    // Outside the window the cap is inert: the grid still carries the baseload.
+    assert!(capped.grid_kw[0] > 0.5, "pre-peak grid unchanged");
+    assert!(capped.grid_kw[80] > 0.5, "post-peak grid unchanged");
+}
+
+#[test]
+fn b7_peak_import_cap_stays_feasible_when_grid_is_unavoidable() {
+    // Fail-SAFE: a cap is soft. With no battery and a hard baseload, the house MUST
+    // import during the peak — a hard cap would make the balance infeasible and blank
+    // the whole plan. The soft cap must instead just pay the penalty and still solve:
+    // the grid carries the baseload, no solver error, no held loads.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20); // no storage, 0.8 kW baseload
+    world.grid_import_caps =
+        vec![GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 1000.0 }];
+    let out = planner().plan(&world, &[]);
+    assert!(out.solver_error.is_none(), "soft cap must never make the solve infeasible");
+    assert!(
+        out.grid_kw[62] > 0.5,
+        "unavoidable baseload is still imported (penalty paid, not forbidden)"
+    );
+}
+
+#[test]
 fn b5_grid_charge_policy_gates_charging_from_the_grid() {
     // Cheap night, no solar. With grid-charging ON the pack fills from the grid;
     // with it OFF (solar-only) the pack cannot charge at all.

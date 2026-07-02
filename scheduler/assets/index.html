@@ -42,6 +42,9 @@ body{font-family:'Hanken Grotesk',system-ui,sans-serif;color:var(--fg);backgroun
 .track.on{background:var(--accent)}
 .knob{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .18s}
 .track.on .knob{transform:translateX(18px)}
+.track.pending{opacity:.6}
+.track.pending .knob{animation:pvpulse .8s ease-in-out infinite}
+@keyframes pvpulse{50%{opacity:.5}}
 .stamp{font-size:11px;color:var(--muted)}
 .btn{font-size:13px;font-weight:700;color:#fff;background:var(--accent);border:none;border-radius:11px;padding:9px 16px;cursor:pointer;font-family:inherit}
 .btn:active{transform:translateY(1px)}
@@ -147,6 +150,7 @@ body{font-family:'Hanken Grotesk',system-ui,sans-serif;color:var(--fg);backgroun
 .chiphead{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:6px}
 .chips{display:flex;flex-wrap:wrap;gap:7px}
 .wchip{font-size:12px;font-weight:500;padding:5px 11px;border-radius:999px;background:rgba(232,116,59,.12);color:var(--live-fg)}
+.wchip.chg{background:rgba(63,174,107,.14);color:var(--c-chg)}
 
 /* alerts + diagnostics (preserved — not in the redesign, restyled to the palette) */
 .diagcard{background:var(--card);border-radius:20px;padding:20px 22px;margin-top:16px}
@@ -339,7 +343,18 @@ const setTab=(id,w)=>{tab[id]=w;if(last)render(last);};
  const t=e.target.closest&&e.target.closest('.tab');
  if(t&&t.dataset.id!=null)setTab(t.dataset.id,t.dataset.tab);
 }));
-$('pvbtn').onclick=()=>{const on=!(last&&last.preview);fetch('./api/preview?on='+on,{method:'POST'});};
+$('pvbtn').onclick=()=>{
+ const on=!(last&&last.preview);
+ // Optimistic: flip the switch NOW so it never feels frozen. The POST only nudges
+ // a full re-solve (seconds of serial HA reads) and doesn't echo state back, so
+ // waiting for that round-trip is what made the toggle feel dead. `.pending` shows
+ // the plan is catching up; the authoritative r.preview from the next SSE report
+ // reconciles this in render() (which reassigns the class in full, clearing pending).
+ if(last)last.preview=on;
+ $('pvtrack').className='track'+(on?' on':'')+' pending';
+ $('stamp').textContent='solving…';
+ fetch('./api/preview?on='+on,{method:'POST'}).catch(()=>{});
+};
 $('solvebtn').onclick=()=>fetch('./api/solve',{method:'POST'});
 
 // ── small parsers/formatters over the SolveReport view-model ──
@@ -470,13 +485,16 @@ function battView(b,r){
  const grid=r.grid||[];
  const endLabel=(e)=>{ if(e<grid.length)return hhmm(grid[e]); const lastT=hhmm(grid[grid.length-1]); const mm=parseInt(lastT.slice(0,2))*60+parseInt(lastT.slice(3,5))+(r.grid_minutes||15); return `${String(Math.floor(mm/60)%24).padStart(2,'0')}:${String(mm%60).padStart(2,'0')}`; };
  const chips=wins.map(w=>`${clock(hhmm(grid[w.a]))} – ${clock(endLabel(w.b))}`);
+ // charge windows -> "battery charges during" chips (mirror of the discharge block)
+ const chgOn=(b.charge_kw||[]).map(kw=>kw>0.05);
+ const chgChips=runs(chgOn).map(s=>`${clock(hhmm(grid[s.a]))} – ${clock(endLabel(s.b))}`);
  const usable=mv(I,'')||'';
  const tech=[advisory?'advisory · not actuated':'AUTH · live',(b.action||'idle')+(b.action==='discharging'?` ${dis.toFixed(1)} kW`:b.action==='charging'?` ${ch.toFixed(1)} kW`:'')]
   .concat([`SoC ${(+b.soc_now_kwh).toFixed(1)} kWh (${pct.toFixed(0)}%)`,`usable ${(+b.min_soc_kwh).toFixed(1)}–${(+b.max_soc_kwh).toFixed(1)}`])
   .concat(b.target_unmet>0.05?[`short ${(+b.target_unmet).toFixed(1)} kWh`]:[]).join(' · ');
  return{id:b.id,name:prettyName(b.id),sys:b.id,advisory,status,dot:TONE[tone],
   metric:`${pct.toFixed(0)}%`,metricSub:`${(+b.soc_now_kwh).toFixed(1)} kWh · usable to ${(+b.max_soc_kwh).toFixed(1)} kWh`,socW:clamp(pct,0,100),
-  headline,detail,why,chips,tech};
+  headline,detail,why,chips,chgChips,tech};
 }
 
 function prettyName(id){
@@ -599,7 +617,9 @@ function battCard(d){
  if(t==='why')panel=`<div class="why-p">${esc(d.why)}</div>`;
  else if(t==='plan'){
   const chips=d.chips.length?d.chips.map(c=>`<span class="wchip">${esc(c)}</span>`).join(''):'<span class="empty">No discharge planned this horizon.</span>';
-  panel=`<div class="chiphead">Battery powers the house during:</div><div class="chips">${chips}</div><div class="tech">${esc(d.tech)}</div>`;
+  const chgChips=d.chgChips.length?d.chgChips.map(c=>`<span class="wchip chg">${esc(c)}</span>`).join(''):'<span class="empty">No charging planned this horizon.</span>';
+  panel=`<div class="chiphead">Battery powers the house during:</div><div class="chips">${chips}</div>`+
+   `<div class="chiphead">Battery charges during:</div><div class="chips">${chgChips}</div><div class="tech">${esc(d.tech)}</div>`;
  }else panel=`<div class="metric"><b>${esc(d.metric)}</b><u>${esc(d.metricSub)}</u></div>`+
   `<div class="soc"><i style="width:${d.socW.toFixed(0)}%"></i></div>`+
   `<div class="bh">${esc(d.headline)}</div><div class="bd">${esc(d.detail)}</div>`;

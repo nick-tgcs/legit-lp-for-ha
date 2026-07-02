@@ -11,7 +11,7 @@ use good_lp::{constraint, variable, variables, Expression, Solution, SolverModel
 
 use crate::model::*;
 use crate::rules::{self, Masks};
-use crate::time::{window_instances, Grid};
+use crate::time::{in_window, window_instances, Grid};
 
 pub struct LpPlanner {
     pub grid_minutes: u32,
@@ -633,6 +633,19 @@ impl LpPlanner {
             constraints.push(constraint!(imp - exp == balance));
             let price = world.import[t].unwrap_or(0.0);
             cost_expr += imp * (price * dt_h) - exp * (world.feedin[t] * dt_h);
+            // Windowed grid-import caps (the "no grid during peak" control): inside a
+            // cap's window, penalise import above its ceiling. SOFT — the `over` slack
+            // absorbs whatever draw is physically unavoidable (PV+battery short), so the
+            // balance can never go infeasible; the penalty lives in `cost_expr`, which is
+            // the stage-2 objective ONLY, so peak-avoidance never trades off against a
+            // must-have (stage 1 minimises `unmet` alone).
+            for cap in &world.grid_import_caps {
+                if in_window(grid.steps[t].time(), &cap.window) {
+                    let over = vars.add(variable().min(0));
+                    constraints.push(constraint!(over >= imp - cap.max_kw));
+                    cost_expr += over * (cap.penalty_aud_per_kwh * dt_h);
+                }
+            }
             imps.push(imp);
             exps.push(exp);
         }
