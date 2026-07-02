@@ -230,27 +230,30 @@ async fn resolve_time<A: HaApi>(
 /// Decide a single grid-import cap from its live-resolved parts. Pure (no HA), so
 /// the fail-loud-but-safe policy is unit-testable without a mock cycle. `Ok` = a
 /// usable cap; `Err(diagnostic)` = skip it this cycle, never invent one: either a
-/// part didn't resolve, or a magnitude came back negative (a miswired entity/literal
-/// — clamping `max_kw<0` to 0 would forge a HARDER "no grid" cap the user never
-/// wrote, and clamping `penalty<0` to 0 would silently disable avoidance).
+/// part didn't resolve, or a magnitude came back invalid — negative OR non-finite.
+/// A miswired entity can report `NaN`/`inf` (which `HaState::as_f64` parses into an
+/// `f64`); accepting it would poison the LP objective/constraints into a solver
+/// error, and clamping a negative would forge a cap the user never wrote. Both are
+/// rejected here, mirroring the parse-time literal check in `config::validate`.
 fn grid_import_cap_from_resolved(
     idx: usize,
     window: Option<Window>,
     max_kw: Option<f64>,
     penalty: Option<f64>,
 ) -> Result<GridImportCapInput, String> {
+    let valid = |v: f64| v.is_finite() && v >= 0.0;
     match (window, max_kw, penalty) {
         (Some(window), Some(max_kw), Some(penalty)) => {
-            if max_kw < 0.0 || penalty < 0.0 {
-                Err(format!(
-                    "grid_import_cap[{idx}] resolved to a negative magnitude (max_kw={max_kw}, penalty={penalty}); skipped this cycle"
-                ))
-            } else {
+            if valid(max_kw) && valid(penalty) {
                 Ok(GridImportCapInput { window, max_kw, penalty_aud_per_kwh: penalty })
+            } else {
+                Err(format!(
+                    "grid_import_caps[{idx}] resolved to an invalid magnitude (max_kw={max_kw}, penalty={penalty}); expected finite and >= 0, skipped this cycle"
+                ))
             }
         }
         _ => Err(format!(
-            "grid_import_cap[{idx}] unresolved (window/max_kw/penalty); peak grid-avoidance skipped this cycle"
+            "grid_import_caps[{idx}] unresolved (window/max_kw/penalty); peak grid-avoidance skipped this cycle"
         )),
     }
 }
@@ -1488,13 +1491,22 @@ mod tests {
         // Happy path: all parts resolved, non-negative → a usable cap.
         let ok = grid_import_cap_from_resolved(0, Some(w), Some(0.0), Some(10.0)).unwrap();
         assert_eq!((ok.max_kw, ok.penalty_aud_per_kwh), (0.0, 10.0));
-        // Negative magnitude (miswired) → skip loud, never clamped into a forged cap.
-        assert!(grid_import_cap_from_resolved(1, Some(w), Some(-1.0), Some(10.0))
-            .unwrap_err()
-            .contains("negative"));
-        assert!(grid_import_cap_from_resolved(2, Some(w), Some(0.0), Some(-5.0))
-            .unwrap_err()
-            .contains("negative"));
+        // Invalid magnitude — negative OR non-finite (a miswired entity can report
+        // NaN/inf) → skip loud, never clamped or passed through to poison the LP.
+        for (mx, pen) in [
+            (-1.0, 10.0),
+            (0.0, -5.0),
+            (f64::NAN, 10.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+        ] {
+            assert!(
+                grid_import_cap_from_resolved(1, Some(w), Some(mx), Some(pen))
+                    .unwrap_err()
+                    .contains("invalid magnitude"),
+                "max_kw={mx} penalty={pen} must be rejected as invalid"
+            );
+        }
         // Any unresolved part → skip (never invent a window or magnitude).
         for parts in
             [(None, Some(0.0), Some(1.0)), (Some(w), None, Some(1.0)), (Some(w), Some(0.0), None)]
