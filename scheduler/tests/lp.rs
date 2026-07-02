@@ -614,6 +614,47 @@ fn b7_peak_import_cap_stays_feasible_when_grid_is_unavoidable() {
 }
 
 #[test]
+fn b8_overlapping_caps_apply_the_single_most_restrictive_ceiling() {
+    // Overlap semantics: when two caps' windows cover the same step, the plan honours
+    // the MOST restrictive (lowest ceiling) once — not a per-cap sum, and not whichever
+    // happens to be first. A loose 5 kW cap and a 0 kW cap over the same peak → the
+    // 0 kW ceiling wins, so the battery still zeroes the grid. Order-independent.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let mut base = flat_world(now, STEPS, 0.20);
+    base.storage = vec![test_storage()];
+
+    let loose = GridImportCapInput { window: peak, max_kw: 5.0, penalty_aud_per_kwh: 0.5 };
+    let strict = GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 10.0 };
+
+    // Loose cap ALONE: the 0.8 kW baseload is under 5 kW, so nothing is penalised and
+    // the grid still carries it — establishes that only the strict cap changes things.
+    let mut loose_only = base.clone();
+    loose_only.grid_import_caps = vec![loose.clone()];
+    assert!(
+        planner().plan(&loose_only, &[]).grid_kw[62] > 0.5,
+        "loose 5 kW cap alone leaves the baseload on the grid"
+    );
+
+    // Both caps, in EITHER order: the 0 kW ceiling dominates → grid zeroed across peak.
+    for order in [vec![loose.clone(), strict.clone()], vec![strict.clone(), loose.clone()]] {
+        let mut w = base.clone();
+        w.grid_import_caps = order;
+        let out = planner().plan(&w, &[]);
+        for t in 60..68 {
+            assert!(
+                out.grid_kw[t] < 0.1,
+                "step {t}: most-restrictive 0 kW ceiling not honoured ({})",
+                out.grid_kw[t]
+            );
+        }
+    }
+}
+
+#[test]
 fn b5_grid_charge_policy_gates_charging_from_the_grid() {
     // Cheap night, no solar. With grid-charging ON the pack fills from the grid;
     // with it OFF (solar-only) the pack cannot charge at all.

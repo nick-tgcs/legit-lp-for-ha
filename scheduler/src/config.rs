@@ -591,10 +591,25 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
     if !cfg.global.hard_rules.is_empty() {
         return err("site-wide hard_rules are not supported in v1 (must be empty)".into());
     }
-    // Grid-import caps: validate any literal window bounds now (magnitudes are
-    // resolved live each cycle, so nothing else can be checked at parse time).
-    for cap in &cfg.global.grid_import_caps {
+    // Grid-import caps: validate literal window bounds AND literal magnitudes now
+    // (entity-ref magnitudes are checked live each cycle in cycle.rs). A negative
+    // or non-finite ceiling/penalty is a config error, not something to clamp.
+    for (i, cap) in cfg.global.grid_import_caps.iter().enumerate() {
         cap.window.validate()?;
+        if let Some(m) = cap.max_kw.as_literal() {
+            if !m.is_finite() || m < 0.0 {
+                return err(format!(
+                    "grid_import_caps[{i}]: max_kw must be finite and >= 0, got {m}"
+                ));
+            }
+        }
+        if let Some(p) = cap.penalty_aud_per_kwh.as_literal() {
+            if !p.is_finite() || p < 0.0 {
+                return err(format!(
+                    "grid_import_caps[{i}]: penalty_aud_per_kwh must be finite and >= 0, got {p}"
+                ));
+            }
+        }
     }
     let g = cfg.global.planning.grid_minutes;
     if g == 0 || 60 % g != 0 {
@@ -1242,6 +1257,25 @@ loads: []
              \x20     penalty_aud_per_kwh: 100\n",
         ));
         assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("bad window time")));
+    }
+
+    #[test]
+    fn grid_import_cap_rejects_a_negative_literal_magnitude() {
+        // A negative literal ceiling or penalty is a config error, caught at parse —
+        // not silently clamped (which would forge a cap the user never wrote).
+        let base = "    - window: { start: \"14:55\", end: \"21:00\" }\n\
+                    \x20     max_kw: 0\n\
+                    \x20     penalty_aud_per_kwh: 100\n";
+        for (field, from, bad) in [
+            ("max_kw", "max_kw: 0", "max_kw: -1"),
+            ("penalty_aud_per_kwh", "penalty_aud_per_kwh: 100", "penalty_aud_per_kwh: -5"),
+        ] {
+            let r = parse(&caps_yaml(&base.replace(from, bad)));
+            assert!(
+                matches!(&r, Err(SchedulerError::Config(m)) if m.contains(field) && m.contains(">= 0")),
+                "negative {field} must be rejected, got {r:?}"
+            );
+        }
     }
 
     #[test]

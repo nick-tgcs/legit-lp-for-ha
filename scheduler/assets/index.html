@@ -353,7 +353,13 @@ $('pvbtn').onclick=()=>{
  if(last)last.preview=on;
  $('pvtrack').className='track'+(on?' on':'')+' pending';
  $('stamp').textContent='solving…';
- fetch('./api/preview?on='+on,{method:'POST'}).catch(()=>{});
+ fetch('./api/preview?on='+on,{method:'POST'}).catch(()=>{
+  // POST failed (network / 500): roll the optimistic flip back, else the toggle
+  // stays stuck on "solving…" forever waiting for an SSE echo that won't arrive.
+  if(last)last.preview=!on;
+  $('pvtrack').className='track'+(!on?' on':'');
+  $('stamp').textContent='preview failed — tap to retry';
+ });
 };
 $('solvebtn').onclick=()=>fetch('./api/solve',{method:'POST'});
 
