@@ -525,6 +525,15 @@ async fn build_storage<A: HaApi>(
             }
         }
     }
+    // Load share: the fraction of its BANK's own charge/discharge this cabinet
+    // carries (paralleled cabinets load-share both directions) — NOT a fraction of
+    // house load. An entity-ref may map it to a live consumption-share sensor;
+    // unreadable → None → the LP falls back to an equal split (safe default, not a
+    // fabricated rate). An explicit 0.0 parks this cabinet; an all-0.0 bank is idle.
+    let load_share = match &sc.load_share {
+        Some(vr) => resolve(ha, vr, diags).await.map(|v| v.clamp(0.0, 1.0)),
+        None => None,
+    };
     let input = StorageInput {
         id: sc.id.clone(),
         capacity_kwh,
@@ -538,6 +547,10 @@ async fn build_storage<A: HaApi>(
         available,
         cycle_cost_aud_per_kwh: cycle_cost,
         goals,
+        // Structural grouping (a literal id): devices sharing a bank are
+        // co-driven as one unit in the LP. No live value to resolve.
+        bank: sc.bank.clone(),
+        load_share,
     };
     Some(StorageBuild { input: Some(input), control })
 }
@@ -1465,6 +1478,8 @@ mod tests {
             available: true,
             cycle_cost_aud_per_kwh: 0.001,
             goals: vec![],
+            bank: None,
+            load_share: None,
         }
     }
     fn dir(authority: bool) -> StorageDirection {
