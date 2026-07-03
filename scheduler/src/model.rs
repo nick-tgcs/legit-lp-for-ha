@@ -224,10 +224,11 @@ pub struct StorageInput {
     pub bank: Option<String>,
     /// Fraction [0,1] of its bank's charge/discharge this cabinet carries —
     /// paralleled cabinets load-share both directions in hardware. `None` = an
-    /// equal split. Shares are normalised within the bank (they always sum to 1)
+    /// equal split. Non-zero shares are normalised within the bank (they sum to 1)
     /// and force a proportional split of whatever the bank does, so the plan
-    /// can't park one cabinet idle while the other carries the house. `0.0` is
-    /// allowed and parks this member (its peers do the bank's work).
+    /// can't park one cabinet idle while the other carries the house. `0.0` parks
+    /// this member (its peers do the bank's work); if EVERY member is `0.0` the
+    /// whole bank stays parked (zero throughput, any targets left unmet).
     pub load_share: Option<f64>,
 }
 

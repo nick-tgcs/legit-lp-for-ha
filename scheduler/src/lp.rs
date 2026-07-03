@@ -540,8 +540,10 @@ impl LpPlanner {
             *bank_size.entry(bank_key(st)).or_default() += 1;
         }
         // Normalised per-cabinet share of its bank's throughput (paralleled cabinets
-        // load-share both directions in hardware). Default = equal split; explicit
-        // shares are normalised within the bank so they always sum to 1.
+        // load-share both directions in hardware). An unset — or non-finite — share
+        // defaults to an equal weight (1/n), so an all-default bank splits evenly;
+        // non-zero shares normalise to sum to 1. An all-zero bank (every member
+        // explicitly parked at 0.0) stays parked — see the fallback below.
         let mut shares = vec![1.0_f64; world.storage.len()];
         {
             let mut by_bank: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
@@ -552,12 +554,24 @@ impl LpPlanner {
                 let raw: Vec<f64> = members
                     .iter()
                     .map(|&i| {
-                        world.storage[i].load_share.unwrap_or(1.0 / members.len() as f64).max(0.0)
+                        // A non-finite share (a sensor emitting NaN/inf) is garbage:
+                        // treat it as unset so it can't poison the bank's share-sum and
+                        // park otherwise-valid members. `clamp` alone PRESERVES NaN
+                        // (NaN.clamp == NaN), so filter to finite before defaulting.
+                        world.storage[i]
+                            .load_share
+                            .filter(|s| s.is_finite())
+                            .unwrap_or(1.0 / members.len() as f64)
+                            .clamp(0.0, 1.0)
                     })
                     .collect();
                 let sum: f64 = raw.iter().sum();
                 for (k, &i) in members.iter().enumerate() {
-                    shares[i] = if sum > 1e-9 { raw[k] / sum } else { 1.0 / members.len() as f64 };
+                    // `sum ≤ 0` only when EVERY member is explicitly ~0.0 — an unset
+                    // share defaults to 1/n > 0, so an all-default bank never lands
+                    // here. Keep an all-parked bank parked (zero throughput, targets
+                    // left unmet) instead of fabricating an equal split that un-parks it.
+                    shares[i] = if sum > 1e-9 { raw[k] / sum } else { 0.0 };
                 }
             }
         }

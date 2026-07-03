@@ -261,11 +261,11 @@ pub struct StorageConfig {
     pub bank: Option<String>,
     /// Fraction [0,1] of its bank's charge/discharge this cabinet carries —
     /// literal or entity-ref (e.g. a live consumption-share sensor); resolved
-    /// values are clamped to [0,1] and normalised within the bank (shares sum
-    /// to 1). Absent = an equal split. Paralleled cabinets load-share in
-    /// hardware; this tells the plan how, so it never parks one cabinet idle
-    /// while the other carries the whole house. `0.0` parks this member (its
-    /// peers do the bank's work).
+    /// values are clamped to [0,1] and normalised within the bank (non-zero
+    /// shares sum to 1). Absent = an equal split. Paralleled cabinets load-share
+    /// in hardware; this tells the plan how, so it never parks one cabinet idle
+    /// while the other carries the whole house. `0.0` parks this member (its peers
+    /// do the bank's work); an all-`0.0` bank stays parked (zero throughput).
     #[serde(default)]
     pub load_share: Option<ValueRef>,
 }
