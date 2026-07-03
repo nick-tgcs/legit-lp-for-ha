@@ -250,6 +250,24 @@ pub struct StorageConfig {
     pub charge: Option<StorageDirectionCfg>,
     #[serde(default)]
     pub discharge: Option<StorageDirectionCfg>,
+    /// Optional coordination bank id. Storage devices sharing a bank are driven
+    /// as ONE unit: the LP forces a single charge/discharge direction across the
+    /// whole bank each step (matching a paralleled-cabinet controller — e.g. two
+    /// Sonnen cabinets that always charge/serve/export together), instead of
+    /// splitting two identical cabinets onto an arbitrary vertex. Absent =
+    /// independent. Structural (a literal id, like `id`), not an operational
+    /// magnitude, so it is not entity-ref'd.
+    #[serde(default)]
+    pub bank: Option<String>,
+    /// Fraction [0,1] of its bank's charge/discharge this cabinet carries —
+    /// literal or entity-ref (e.g. a live consumption-share sensor); resolved
+    /// values are clamped to [0,1] and normalised within the bank (shares sum
+    /// to 1). Absent = an equal split. Paralleled cabinets load-share in
+    /// hardware; this tells the plan how, so it never parks one cabinet idle
+    /// while the other carries the whole house. `0.0` parks this member (its
+    /// peers do the bank's work).
+    #[serde(default)]
+    pub load_share: Option<ValueRef>,
 }
 
 /// Control surface for ONE storage direction (charge or discharge). While the LP
@@ -916,6 +934,8 @@ global:
       capacity_kwh: 10
       max_charge_kw: 5
       max_discharge_kw: 5
+      bank: pair
+      load_share: 0.5
 {req}    - id: ev
       soc_entities: [sensor.ev_soc]
       capacity_kwh: 60
@@ -939,7 +959,18 @@ loads: []
         assert_eq!(home.max_soc_pct.as_literal(), Some(100.0));
         assert_eq!(home.reserve_soc_pct.as_literal(), Some(0.0));
         assert!(home.allow_grid_charge == BoolRef::Plain(true) && home.available_entity.is_none());
+        // Coordination fields: a structural bank id + an optional (here literal) share.
+        assert_eq!(home.bank.as_deref(), Some("pair"), "bank id parses");
+        assert_eq!(
+            home.load_share.as_ref().and_then(ValueRef::as_literal),
+            Some(0.5),
+            "load_share literal parses"
+        );
         let ev = &cfg.global.storage[1];
+        assert!(
+            ev.bank.is_none() && ev.load_share.is_none(),
+            "absent bank/share => independent device, equal-split default"
+        );
         assert_eq!(ev.max_discharge_kw.as_literal(), Some(0.0), "charge-only (explicit 0)");
         assert_eq!(ev.available_entity.as_deref(), Some("binary_sensor.ev_plugged_in"));
         assert_eq!(ev.goals.len(), 2);

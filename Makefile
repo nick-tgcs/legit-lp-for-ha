@@ -11,8 +11,11 @@ test:
 # a green `make coverage` locally means a green gate. `--follow-exec` makes the
 # tracer follow the binary the e2e test spawns, so main.rs counts as the tested
 # code it is. Writes an HTML report under scheduler/target/tarpaulin/.
+# `--timeout` is tarpaulin's per-test RESPONSE timeout (not the floor ratchet):
+# the slowest cycle MILP test runs ~48s uninstrumented, which under the tracer
+# sits right at 180s and flakes on runner weather — 360 gives real headroom.
 coverage:
-	cd scheduler && cargo tarpaulin --timeout 180 --follow-exec \
+	cd scheduler && cargo tarpaulin --timeout 360 --follow-exec \
 	  --out Stdout --out Html --out Lcov \
 	  --output-dir target/tarpaulin \
 	  --fail-under $(COVERAGE_FLOOR)

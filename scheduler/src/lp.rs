@@ -522,8 +522,50 @@ impl LpPlanner {
         // VALUE falls straight out of the grid-balance cost below; round-trip
         // loss lives in the SoC dynamics. Goals layer on deadline targets (soft,
         // into `unmet`) and opportunistic price-charging rewards.
-        let mut svs: Vec<StorageVars> = Vec::new();
+        // Coordination banks: devices sharing a `bank` id are driven as ONE unit —
+        // a single charge/discharge direction across the whole bank each step
+        // (matching a paralleled-cabinet controller that runs them together), rather
+        // than letting the linear objective split two identical cabinets onto an
+        // arbitrary vertex (one working, one idle). A device with no bank, or the sole
+        // member of its bank, is independent and keeps its own per-device mutex below.
+        // Keys are namespaced: a bank-less device's synthetic singleton key lives in
+        // a different namespace from explicit `bank` ids, so `bank: X` can never
+        // silently capture an unbanked device that happens to have `id: X`.
+        let bank_key = |st: &StorageInput| match &st.bank {
+            Some(b) => format!("bank:{b}"),
+            None => format!("solo:{}", st.id),
+        };
+        let mut bank_size: std::collections::BTreeMap<String, usize> = Default::default();
         for st in &world.storage {
+            *bank_size.entry(bank_key(st)).or_default() += 1;
+        }
+        // Normalised per-cabinet share of its bank's throughput (paralleled cabinets
+        // load-share both directions in hardware). Default = equal split; explicit
+        // shares are normalised within the bank so they always sum to 1.
+        let mut shares = vec![1.0_f64; world.storage.len()];
+        {
+            let mut by_bank: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+            for (i, st) in world.storage.iter().enumerate() {
+                by_bank.entry(bank_key(st)).or_default().push(i);
+            }
+            for members in by_bank.values() {
+                let raw: Vec<f64> = members
+                    .iter()
+                    .map(|&i| {
+                        world.storage[i].load_share.unwrap_or(1.0 / members.len() as f64).max(0.0)
+                    })
+                    .collect();
+                let sum: f64 = raw.iter().sum();
+                for (k, &i) in members.iter().enumerate() {
+                    shares[i] = if sum > 1e-9 { raw[k] / sum } else { 1.0 / members.len() as f64 };
+                }
+            }
+        }
+
+        let mut svs: Vec<StorageVars> = Vec::new();
+        for (i, st) in world.storage.iter().enumerate() {
+            let bkey = bank_key(st);
+            let multi = bank_size.get(&bkey).copied().unwrap_or(1) > 1;
             let eta = st.round_trip_efficiency.max(1e-6).sqrt();
             // Availability gates power to zero (e.g. an EV that is unplugged).
             let max_ch = if st.available { st.max_charge_kw } else { 0.0 };
@@ -537,8 +579,11 @@ impl LpPlanner {
                 .collect();
             constraints
                 .push(constraint!(soc[0] == st.soc_now_kwh.clamp(st.min_soc_kwh, st.max_soc_kwh)));
-            // Mutex only when the device can do both (charge-only needs none).
-            let mode: Vec<Variable> = if max_ch > 0.0 && max_dis > 0.0 {
+            // Per-device charge/discharge mutex — ONLY for an independent device. A
+            // banked member's direction comes from the shared bank selector added after
+            // this loop, so it takes no private mutex (bc/bd give the bank the same
+            // charge-XOR-discharge exclusivity).
+            let mode: Vec<Variable> = if !multi && max_ch > 0.0 && max_dis > 0.0 {
                 (0..n).map(|_| vars.add(variable().binary())).collect()
             } else {
                 Vec::new()
@@ -552,8 +597,10 @@ impl LpPlanner {
                     constraints.push(constraint!(ch[t] <= max_ch * mode[t]));
                     constraints.push(constraint!(dis[t] <= max_dis * (1 - mode[t])));
                 }
-                // Grid-charge policy: when disallowed, only soak instantaneous PV.
-                if !st.allow_grid_charge {
+                // Grid-charge policy: when disallowed, only soak instantaneous PV. For a
+                // banked member this is enforced ONCE at the bank level (a shared PV
+                // can't be soaked twice), so skip the per-device bound here.
+                if !st.allow_grid_charge && !multi {
                     constraints.push(constraint!(ch[t] <= world.pv[t].max(0.0)));
                 }
                 // Wear: a tiny throughput cost breaks indifference (no idle cycling).
@@ -593,6 +640,12 @@ impl LpPlanner {
             }
             svs.push(StorageVars {
                 id: st.id.clone(),
+                bank_key: bkey,
+                multi,
+                share: shares[i],
+                max_ch,
+                max_dis,
+                allow_grid_charge: st.allow_grid_charge,
                 ch,
                 dis,
                 soc,
@@ -601,6 +654,53 @@ impl LpPlanner {
                 max_soc_kwh: st.max_soc_kwh,
                 target_unmet,
             });
+        }
+
+        // Bank direction coupling: one shared charge/discharge selector per bank drives
+        // every member in lockstep — the whole bank charges, discharges, or idles as a
+        // unit (what the paralleled controller does), and never charges one cabinet
+        // while discharging another. Multi-member banks only; singletons kept their own
+        // mutex above.
+        let mut banks: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+        for (j, sv) in svs.iter().enumerate() {
+            if sv.multi {
+                banks.entry(sv.bank_key.clone()).or_default().push(j);
+            }
+        }
+        for members in banks.values() {
+            let bc: Vec<Variable> = (0..n).map(|_| vars.add(variable().binary())).collect();
+            let bd: Vec<Variable> = (0..n).map(|_| vars.add(variable().binary())).collect();
+            // Grid-charge off for the bank if ANY member forbids it (fail-safe).
+            let bank_allows_grid_charge = members.iter().all(|&j| svs[j].allow_grid_charge);
+            for t in 0..n {
+                constraints.push(constraint!(bc[t] + bd[t] <= 1));
+                let mut sum_ch = Expression::from(0.0);
+                let mut sum_dis = Expression::from(0.0);
+                for &j in members {
+                    constraints.push(constraint!(svs[j].ch[t] <= svs[j].max_ch * bc[t]));
+                    constraints.push(constraint!(svs[j].dis[t] <= svs[j].max_dis * bd[t]));
+                    sum_ch += svs[j].ch[t];
+                    sum_dis += svs[j].dis[t];
+                }
+                // Load-share: each member moves exactly its share of whatever the BANK
+                // does, both directions — paralleled cabinets split the work, they don't
+                // elect a worker. Because the normalised shares sum to 1, these `≤` caps
+                // sum to a tight bound and force the proportional split at EVERY activity
+                // level (a slack cap would leave partial-power steps degenerate again).
+                // Deliberately independent of house load / export / PV, so a PV-driven
+                // feed-in spike can't relax one cabinet's cap and re-admit the lopsided
+                // plan. Always feasible: all-zero satisfies every cap; a member pinned by
+                // SoC or power limits simply caps the whole bank's rate — conservative,
+                // and exactly how a bonded pair behaves.
+                for &j in members {
+                    constraints.push(constraint!(svs[j].ch[t] <= svs[j].share * sum_ch.clone()));
+                    constraints.push(constraint!(svs[j].dis[t] <= svs[j].share * sum_dis.clone()));
+                }
+                // Shared PV: the whole bank soaks ONE instantaneous PV, not per cabinet.
+                if !bank_allows_grid_charge {
+                    constraints.push(constraint!(sum_ch <= world.pv[t].max(0.0)));
+                }
+            }
         }
 
         // ---- site balance: imp - exp = baseload + Σ pkw·x − pv + Σ(ch − dis) -
@@ -623,10 +723,16 @@ impl LpPlanner {
                 constraints.push(constraint!(e <= pv_t + sum_dis));
                 e
             };
-            let mut balance = Expression::from(world.baseload[t] - world.pv[t]);
+            // Gross house load this step (baseload + any managed load draw).
+            // (Banked-cabinet load-sharing is enforced in the bank loop above, as a
+            // proportional split of the bank's own throughput — NOT as a fraction of
+            // house load + export, which a PV feed-in spike would inflate enough to
+            // let one cabinet do all the work again.)
+            let mut house_load_t = Expression::from(world.baseload[t]);
             for lv in &lvs {
-                balance += lv.x[t] * loads[lv.idx].power_kw;
+                house_load_t += lv.x[t] * loads[lv.idx].power_kw;
             }
+            let mut balance = house_load_t - world.pv[t];
             for sv in &svs {
                 balance = balance + sv.ch[t] - sv.dis[t];
             }
@@ -735,6 +841,18 @@ fn deadline_step(grid: &Grid, ready_by: chrono::NaiveTime) -> Option<usize> {
 /// Per-device storage variable bundle inside the MILP.
 struct StorageVars {
     id: String,
+    /// Namespaced coordination key: `bank:<id>` for a banked device, `solo:<id>`
+    /// for a bank-less one — the namespaces can't collide.
+    bank_key: String,
+    /// True when this device shares its bank with ≥1 other (bank-coupled +
+    /// share-proportioned). A singleton keeps its own per-device mutex instead.
+    multi: bool,
+    /// Normalised fraction of its bank's charge/discharge this cabinet carries.
+    share: f64,
+    /// Availability-gated power limits (kW), used by the bank coupling.
+    max_ch: f64,
+    max_dis: f64,
+    allow_grid_charge: bool,
     ch: Vec<Variable>,
     dis: Vec<Variable>,
     soc: Vec<Variable>,

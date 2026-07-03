@@ -200,5 +200,7 @@ pub fn test_storage() -> StorageInput {
         // Tiny wear cost: breaks indifference without distorting real arbitrage.
         cycle_cost_aud_per_kwh: 0.001,
         goals: vec![],
+        bank: None,
+        load_share: None,
     }
 }
