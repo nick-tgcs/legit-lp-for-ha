@@ -525,9 +525,11 @@ async fn build_storage<A: HaApi>(
             }
         }
     }
-    // Load share (fraction of house load this cabinet serves in its bank). An
-    // entity-ref may map it to a live consumption-share sensor; unreadable → None →
-    // the LP falls back to an equal split (safe default, not a fabricated rate).
+    // Load share: the fraction of its BANK's own charge/discharge this cabinet
+    // carries (paralleled cabinets load-share both directions) — NOT a fraction of
+    // house load. An entity-ref may map it to a live consumption-share sensor;
+    // unreadable → None → the LP falls back to an equal split (safe default, not a
+    // fabricated rate). An explicit 0.0 parks this cabinet; an all-0.0 bank is idle.
     let load_share = match &sc.load_share {
         Some(vr) => resolve(ha, vr, diags).await.map(|v| v.clamp(0.0, 1.0)),
         None => None,

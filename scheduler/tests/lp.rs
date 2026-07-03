@@ -919,6 +919,46 @@ fn bank4_unbanked_device_is_not_captured_by_a_matching_bank_id() {
 }
 
 #[test]
+fn bank5_all_zero_shares_park_the_whole_bank() {
+    // Regression (release #57 review, Codex P2): when EVERY member's load_share
+    // resolves to 0.0 (all explicitly parked), the bank must do ZERO throughput and
+    // leave any target unmet — NOT be silently un-parked into an equal split. Same
+    // setup as bank4 (target reachable only by grid-charging, which bank4 proves the
+    // pair CAN do here), but both cabinets are parked at share 0.0.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.pv = vec![0.0; STEPS]; // no PV: charging could ONLY come from the grid
+    let mut pair = banked_pair();
+    for cab in &mut pair {
+        cab.goals = vec![StorageGoal::Target { soc_kwh: 10.0, ready_by: t(10, 0) }];
+        cab.load_share = Some(0.0); // every member explicitly parked
+    }
+    world.storage = pair;
+    let out = planner().plan(&world, &[]);
+    let cab1 = out.storage.iter().find(|s| s.id == "cab1").unwrap();
+    let cab2 = out.storage.iter().find(|s| s.id == "cab2").unwrap();
+    // The whole bank is parked: zero charge AND discharge on both cabinets, always.
+    for t in 0..STEPS {
+        assert!(
+            cab1.charge_kw[t] < 1e-6 && cab1.discharge_kw[t] < 1e-6,
+            "step {t}: cab1 not parked (ch={}, dis={})",
+            cab1.charge_kw[t],
+            cab1.discharge_kw[t]
+        );
+        assert!(
+            cab2.charge_kw[t] < 1e-6 && cab2.discharge_kw[t] < 1e-6,
+            "step {t}: cab2 not parked (ch={}, dis={})",
+            cab2.charge_kw[t],
+            cab2.discharge_kw[t]
+        );
+    }
+    // …and the unreachable target is reported unmet, not silently satisfied by an
+    // equal-split fallback that ignored the explicit parks (bank4 meets it at <0.2).
+    assert!(cab1.target_unmet > 1.0, "cab1 target left unmet ({})", cab1.target_unmet);
+    assert!(cab2.target_unmet > 1.0, "cab2 target left unmet ({})", cab2.target_unmet);
+}
+
+#[test]
 fn b8_charge_only_ev_without_goals_does_not_charge() {
     // No discharge => no terminal value => no economic reason to charge. A
     // goal-less EV must just sit (charging it would be a pure loss).
