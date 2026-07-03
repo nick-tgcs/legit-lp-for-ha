@@ -748,6 +748,80 @@ fn test_ev() -> StorageInput {
         available: true,
         cycle_cost_aud_per_kwh: 0.0,
         goals: vec![],
+        bank: None,
+        load_share: None,
+    }
+}
+
+/// Two paralleled cabinets in one bank, each a clone of `test_storage()` with a
+/// distinct id — the real Beckton pair (two Sonnen cabinets driven together).
+fn banked_pair() -> Vec<StorageInput> {
+    let mut a = test_storage();
+    a.id = "cab1".into();
+    a.bank = Some("home".into());
+    let mut b = test_storage();
+    b.id = "cab2".into();
+    b.bank = Some("home".into());
+    vec![a, b]
+}
+
+#[test]
+fn bank1_cabinets_move_together_and_share_the_load() {
+    // The reported bug: one cabinet "holding" while the other discharges. With the
+    // two cabinets banked, the plan must (1) never split directions and (2) share the
+    // house across both — neither parked idle while the other carries it.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = battery_arb_world(now);
+    world.storage = banked_pair();
+    let out = planner().plan(&world, &[]);
+    assert_eq!(out.storage.len(), 2, "both cabinets planned");
+    let a = &out.storage[0];
+    let b = &out.storage[1];
+
+    // (1) One direction for the whole bank each step — never one charging while the
+    //     other discharges (a paralleled controller can't express that).
+    for t in 0..STEPS {
+        let (a_ch, a_dis) = (a.charge_kw[t] > 1e-3, a.discharge_kw[t] > 1e-3);
+        let (b_ch, b_dis) = (b.charge_kw[t] > 1e-3, b.discharge_kw[t] > 1e-3);
+        assert!(
+            !(a_ch && b_dis || a_dis && b_ch),
+            "step {t}: cabinets split directions (a_ch={a_ch} a_dis={a_dis} b_ch={b_ch} b_dis={b_dis})"
+        );
+    }
+
+    // (2) Load-share across the expensive peak: BOTH cabinets carry the house — the
+    //     thing that was broken (one idle while the other did all the work).
+    let a_peak: f64 = a.discharge_kw[40..44].iter().sum();
+    let b_peak: f64 = b.discharge_kw[40..44].iter().sum();
+    assert!(a_peak > 0.3 && b_peak > 0.3, "both cabinets discharge across the peak (a={a_peak}, b={b_peak})");
+    assert!(
+        (a_peak - b_peak).abs() < 0.5 * (a_peak + b_peak),
+        "peak discharge is shared ~evenly, not lopsided (a={a_peak}, b={b_peak})"
+    );
+}
+
+#[test]
+fn bank2_load_share_caps_each_cabinet_at_its_share_of_the_house() {
+    // With equal shares the cabinets split the served load ~50/50: neither may serve
+    // more than half the house, so covering the baseload needs BOTH. A 0 kW peak
+    // import cap forces the bank to zero the grid — each cabinet supplies ~half.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = banked_pair();
+    world.grid_import_caps =
+        vec![GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 10.0 }];
+    let out = planner().plan(&world, &[]);
+    let a = &out.storage[0];
+    let b = &out.storage[1];
+    for t in 60..68 {
+        assert!(out.grid_kw[t] < 0.1, "step {t}: grid not zeroed in peak ({})", out.grid_kw[t]);
+        // The 0.8 kW baseload is split: each cabinet ~0.4 kW (its half), not 0.8/0.
+        assert!(a.discharge_kw[t] > 0.2, "step {t}: cab1 not carrying its share ({})", a.discharge_kw[t]);
+        assert!(b.discharge_kw[t] > 0.2, "step {t}: cab2 not carrying its share ({})", b.discharge_kw[t]);
     }
 }
 

@@ -215,6 +215,18 @@ pub struct StorageInput {
     /// Composable charging goals (in addition to inherent self-consumption /
     /// arbitrage for dischargeable devices). Empty = price-only behaviour.
     pub goals: Vec<StorageGoal>,
+    /// Coordination bank id. Devices sharing a bank are driven as ONE unit — the
+    /// LP forces a single charge/discharge direction across the whole bank each
+    /// step (paralleled cabinets run together, as the real controller does),
+    /// instead of letting a linear objective split two identical cabinets onto an
+    /// arbitrary vertex (one working, one idle). `None` = independent (its own
+    /// singleton bank); single-device behaviour is unchanged.
+    pub bank: Option<String>,
+    /// Fraction (0,1] of the house load this cabinet serves when its bank
+    /// discharges to self-consume — paralleled cabinets load-share. `None` = an
+    /// equal split across the bank. Caps each cabinet's share of the served load
+    /// so the plan can't park one cabinet idle while the other carries the house.
+    pub load_share: Option<f64>,
 }
 
 /// A resolved storage charging goal. Multiple goals compose (a device may have a
