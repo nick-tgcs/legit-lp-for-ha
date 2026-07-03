@@ -804,10 +804,11 @@ fn bank1_cabinets_move_together_and_share_the_load() {
 }
 
 #[test]
-fn bank2_load_share_caps_each_cabinet_at_its_share_of_the_house() {
-    // With equal shares the cabinets split the served load ~50/50: neither may serve
-    // more than half the house, so covering the baseload needs BOTH. A 0 kW peak
-    // import cap forces the bank to zero the grid — each cabinet supplies ~half.
+fn bank2_load_share_splits_the_served_load_across_both_cabinets() {
+    // With equal shares the cabinets split the bank's work ~50/50: neither may do
+    // more than its share of the bank's discharge, so covering the baseload needs
+    // BOTH. A 0 kW peak import cap forces the bank to zero the grid — each cabinet
+    // supplies ~half.
     let now = sydney(2026, 6, 10, 0, 0);
     let peak = Window {
         start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
@@ -834,6 +835,87 @@ fn bank2_load_share_caps_each_cabinet_at_its_share_of_the_house() {
             b.discharge_kw[t]
         );
     }
+}
+
+#[test]
+fn bank3_export_spike_still_splits_the_bank_proportionally() {
+    // Regression (PR #55 review): the share cap must NOT be relative to house
+    // load + export — a PV feed-in spike inflates export enough that such a cap
+    // stops binding and one cabinet can again do all the discharging. The split
+    // is proportional to the BANK's own throughput, so it holds even mid-spike.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = banked_pair();
+    // A full-ish pair, strong midday PV, and a feed-in spike worth selling into.
+    for st in &mut world.storage {
+        st.soc_now_kwh = 9.0;
+    }
+    for t in 32..48 {
+        world.pv[t] = 6.0; // PV alone already exports (house is 0.8 kW)
+    }
+    for t in 40..44 {
+        world.feedin[t] = 1.0;
+    }
+    let out = planner().plan(&world, &[]);
+    let a = &out.storage[0];
+    let b = &out.storage[1];
+    // The scenario really exercises the flaw: the site exports through the spike
+    // and the bank discharges into it…
+    assert!(out.grid_kw[40..44].iter().any(|&g| g < -1.0), "site exports during the feed-in spike");
+    let spike_total: f64 = (40..44).map(|t| a.discharge_kw[t] + b.discharge_kw[t]).sum();
+    assert!(spike_total > 1.0, "the bank discharges into the spike ({spike_total})");
+    // …and every active step still splits ~50/50, both directions — no lopsided
+    // cabinet even though export dwarfs the house load.
+    for t in 0..STEPS {
+        let (da, db) = (a.discharge_kw[t], b.discharge_kw[t]);
+        let tot = da + db;
+        if tot > 0.1 {
+            assert!(
+                (da - tot * 0.5).abs() <= tot * 0.02 + 1e-6,
+                "step {t}: discharge not proportional (a={da}, b={db})"
+            );
+        }
+        let (ca, cb) = (a.charge_kw[t], b.charge_kw[t]);
+        let ctot = ca + cb;
+        if ctot > 0.1 {
+            assert!(
+                (ca - ctot * 0.5).abs() <= ctot * 0.02 + 1e-6,
+                "step {t}: charge not proportional (a={ca}, b={cb})"
+            );
+        }
+    }
+}
+
+#[test]
+fn bank4_unbanked_device_is_not_captured_by_a_matching_bank_id() {
+    // Regression (PR #55 review): bank keys are namespaced — a device with NO
+    // bank whose id happens to equal another device's `bank` string must stay
+    // independent. Here the loner (`id: home`, grid-charge FORBIDDEN, no PV)
+    // would, if wrongly grouped into `bank: home`, veto grid-charging bank-wide
+    // and the pair could never reach its deadline target.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.pv = vec![0.0; STEPS]; // no PV: the target is reachable ONLY from grid
+    let mut pair = banked_pair();
+    for cab in &mut pair {
+        cab.goals = vec![StorageGoal::Target { soc_kwh: 10.0, ready_by: t(10, 0) }];
+    }
+    let mut loner = test_storage();
+    loner.id = "home".into(); // collides with the pair's bank id on purpose
+    loner.allow_grid_charge = false;
+    world.storage = pair;
+    world.storage.push(loner);
+    let out = planner().plan(&world, &[]);
+    let cab1 = out.storage.iter().find(|s| s.id == "cab1").unwrap();
+    let cab2 = out.storage.iter().find(|s| s.id == "cab2").unwrap();
+    let home = out.storage.iter().find(|s| s.id == "home").unwrap();
+    // The pair grid-charges to its target (impossible if the loner's
+    // no-grid-charge rule were wrongly applied bank-wide)…
+    assert!(cab1.target_unmet < 0.2, "cab1 meets its target ({})", cab1.target_unmet);
+    assert!(cab2.target_unmet < 0.2, "cab2 meets its target ({})", cab2.target_unmet);
+    assert!(cab1.charge_kw.iter().any(|&c| c > 0.1), "cab1 grid-charges");
+    // …and the loner (no PV, no grid-charge) never charges.
+    assert!(home.charge_kw.iter().all(|&c| c < 1e-6), "loner never charges");
 }
 
 #[test]

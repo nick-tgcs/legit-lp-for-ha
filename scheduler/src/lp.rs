@@ -528,14 +528,20 @@ impl LpPlanner {
         // than letting the linear objective split two identical cabinets onto an
         // arbitrary vertex (one working, one idle). A device with no bank, or the sole
         // member of its bank, is independent and keeps its own per-device mutex below.
-        let bank_key = |st: &StorageInput| st.bank.clone().unwrap_or_else(|| st.id.clone());
+        // Keys are namespaced: a bank-less device's synthetic singleton key lives in
+        // a different namespace from explicit `bank` ids, so `bank: X` can never
+        // silently capture an unbanked device that happens to have `id: X`.
+        let bank_key = |st: &StorageInput| match &st.bank {
+            Some(b) => format!("bank:{b}"),
+            None => format!("solo:{}", st.id),
+        };
         let mut bank_size: std::collections::BTreeMap<String, usize> = Default::default();
         for st in &world.storage {
             *bank_size.entry(bank_key(st)).or_default() += 1;
         }
-        // Normalised per-cabinet load share (fraction of the house a cabinet serves
-        // when its bank self-consumes). Default = equal split; explicit shares are
-        // normalised within the bank so they always sum to 1 (a paralleled pair).
+        // Normalised per-cabinet share of its bank's throughput (paralleled cabinets
+        // load-share both directions in hardware). Default = equal split; explicit
+        // shares are normalised within the bank so they always sum to 1.
         let mut shares = vec![1.0_f64; world.storage.len()];
         {
             let mut by_bank: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
@@ -668,16 +674,30 @@ impl LpPlanner {
             let bank_allows_grid_charge = members.iter().all(|&j| svs[j].allow_grid_charge);
             for t in 0..n {
                 constraints.push(constraint!(bc[t] + bd[t] <= 1));
+                let mut sum_ch = Expression::from(0.0);
+                let mut sum_dis = Expression::from(0.0);
                 for &j in members {
                     constraints.push(constraint!(svs[j].ch[t] <= svs[j].max_ch * bc[t]));
                     constraints.push(constraint!(svs[j].dis[t] <= svs[j].max_dis * bd[t]));
+                    sum_ch += svs[j].ch[t];
+                    sum_dis += svs[j].dis[t];
+                }
+                // Load-share: each member moves exactly its share of whatever the BANK
+                // does, both directions — paralleled cabinets split the work, they don't
+                // elect a worker. Because the normalised shares sum to 1, these `≤` caps
+                // sum to a tight bound and force the proportional split at EVERY activity
+                // level (a slack cap would leave partial-power steps degenerate again).
+                // Deliberately independent of house load / export / PV, so a PV-driven
+                // feed-in spike can't relax one cabinet's cap and re-admit the lopsided
+                // plan. Always feasible: all-zero satisfies every cap; a member pinned by
+                // SoC or power limits simply caps the whole bank's rate — conservative,
+                // and exactly how a bonded pair behaves.
+                for &j in members {
+                    constraints.push(constraint!(svs[j].ch[t] <= svs[j].share * sum_ch.clone()));
+                    constraints.push(constraint!(svs[j].dis[t] <= svs[j].share * sum_dis.clone()));
                 }
                 // Shared PV: the whole bank soaks ONE instantaneous PV, not per cabinet.
                 if !bank_allows_grid_charge {
-                    let mut sum_ch = Expression::from(0.0);
-                    for &j in members {
-                        sum_ch += svs[j].ch[t];
-                    }
                     constraints.push(constraint!(sum_ch <= world.pv[t].max(0.0)));
                 }
             }
@@ -704,21 +724,13 @@ impl LpPlanner {
                 e
             };
             // Gross house load this step (baseload + any managed load draw).
+            // (Banked-cabinet load-sharing is enforced in the bank loop above, as a
+            // proportional split of the bank's own throughput — NOT as a fraction of
+            // house load + export, which a PV feed-in spike would inflate enough to
+            // let one cabinet do all the work again.)
             let mut house_load_t = Expression::from(world.baseload[t]);
             for lv in &lvs {
                 house_load_t += lv.x[t] * loads[lv.idx].power_kw;
-            }
-            // Load-share: a banked cabinet serves at most its share of the house
-            // (+ its share of any export, so a genuine export event still lets both
-            // cabinets push to grid). Keeps the plan from parking one cabinet idle
-            // while the other carries the whole load — paralleled cabinets split it.
-            // `≤` (never `=`): a cabinet at its floor just does less and the grid
-            // covers the rest, so this can never make the balance infeasible.
-            for sv in &svs {
-                if sv.multi {
-                    constraints
-                        .push(constraint!(sv.dis[t] <= sv.share * (house_load_t.clone() + exp)));
-                }
             }
             let mut balance = house_load_t - world.pv[t];
             for sv in &svs {
@@ -829,12 +841,13 @@ fn deadline_step(grid: &Grid, ready_by: chrono::NaiveTime) -> Option<usize> {
 /// Per-device storage variable bundle inside the MILP.
 struct StorageVars {
     id: String,
-    /// Coordination bank id (falls back to the device id for a singleton).
+    /// Namespaced coordination key: `bank:<id>` for a banked device, `solo:<id>`
+    /// for a bank-less one — the namespaces can't collide.
     bank_key: String,
     /// True when this device shares its bank with ≥1 other (bank-coupled +
-    /// load-share capped). A singleton keeps its own per-device mutex instead.
+    /// share-proportioned). A singleton keeps its own per-device mutex instead.
     multi: bool,
-    /// Normalised fraction of the house load this cabinet serves in its bank.
+    /// Normalised fraction of its bank's charge/discharge this cabinet carries.
     share: f64,
     /// Availability-gated power limits (kW), used by the bank coupling.
     max_ch: f64,

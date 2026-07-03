@@ -222,10 +222,12 @@ pub struct StorageInput {
     /// arbitrary vertex (one working, one idle). `None` = independent (its own
     /// singleton bank); single-device behaviour is unchanged.
     pub bank: Option<String>,
-    /// Fraction (0,1] of the house load this cabinet serves when its bank
-    /// discharges to self-consume — paralleled cabinets load-share. `None` = an
-    /// equal split across the bank. Caps each cabinet's share of the served load
-    /// so the plan can't park one cabinet idle while the other carries the house.
+    /// Fraction [0,1] of its bank's charge/discharge this cabinet carries —
+    /// paralleled cabinets load-share both directions in hardware. `None` = an
+    /// equal split. Shares are normalised within the bank (they always sum to 1)
+    /// and force a proportional split of whatever the bank does, so the plan
+    /// can't park one cabinet idle while the other carries the house. `0.0` is
+    /// allowed and parks this member (its peers do the bank's work).
     pub load_share: Option<f64>,
 }
 
