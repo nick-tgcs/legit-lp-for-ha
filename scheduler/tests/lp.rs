@@ -959,6 +959,67 @@ fn bank5_all_zero_shares_park_the_whole_bank() {
 }
 
 #[test]
+fn bank6_share_above_one_is_clamped_at_the_lp_layer() {
+    // Regression (#58 review, Copilot): a share > 1 from a caller that bypasses the
+    // HA-path clamp must still be clamped at the LP layer. cab1=2.0, cab2=1.0 both
+    // clamp to 1.0 → an even 50/50 split, NOT the 2:1 that raw [2,1] would give.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = banked_pair();
+    world.storage[0].load_share = Some(2.0); // out-of-contract; must clamp to 1.0
+    world.storage[1].load_share = Some(1.0);
+    world.grid_import_caps =
+        vec![GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 10.0 }];
+    let out = planner().plan(&world, &[]);
+    let a = &out.storage[0];
+    let b = &out.storage[1];
+    for t in 60..68 {
+        let (da, db) = (a.discharge_kw[t], b.discharge_kw[t]);
+        let tot = da + db;
+        assert!(tot > 0.5, "step {t}: bank supplies the baseload ({tot})");
+        // Clamped → 50/50. Un-clamped [2,1] would make cab1 carry ~2x cab2.
+        assert!(
+            (da - tot * 0.5).abs() <= tot * 0.02 + 1e-6,
+            "step {t}: not an even split — share > 1 wasn't clamped (a={da}, b={db})"
+        );
+    }
+}
+
+#[test]
+fn bank7_non_finite_share_does_not_poison_the_bank() {
+    // Regression (#58 review, Codex P2 + Copilot): `clamp` PRESERVES NaN, so a single
+    // non-finite load_share (a sensor emitting NaN/inf) would make the share-sum NaN,
+    // trip the all-zero fallback, and park the WHOLE bank — valid/default members and
+    // all. A non-finite share is treated as unset (→ equal-split default), so the pair
+    // still carries the load.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = banked_pair();
+    world.storage[0].load_share = Some(f64::NAN); // garbage from a broken sensor
+                                                  // cab2 stays at its default (None). The NaN must not drag cab2 — or itself — to
+                                                  // parked; both should still discharge to cover the zero-import peak.
+    world.grid_import_caps =
+        vec![GridImportCapInput { window: peak, max_kw: 0.0, penalty_aud_per_kwh: 10.0 }];
+    let out = planner().plan(&world, &[]);
+    let a = &out.storage[0];
+    let b = &out.storage[1];
+    let a_peak: f64 = (60..68).map(|t| a.discharge_kw[t]).sum();
+    let b_peak: f64 = (60..68).map(|t| b.discharge_kw[t]).sum();
+    assert!(
+        a_peak > 0.5 && b_peak > 0.5,
+        "a non-finite share poisoned the bank — a cabinet is parked (a={a_peak}, b={b_peak})"
+    );
+}
+
+#[test]
 fn b8_charge_only_ev_without_goals_does_not_charge() {
     // No discharge => no terminal value => no economic reason to charge. A
     // goal-less EV must just sit (charging it would be a pure loss).

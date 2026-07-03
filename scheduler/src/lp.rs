@@ -540,10 +540,10 @@ impl LpPlanner {
             *bank_size.entry(bank_key(st)).or_default() += 1;
         }
         // Normalised per-cabinet share of its bank's throughput (paralleled cabinets
-        // load-share both directions in hardware). An unset share defaults to an equal
-        // weight (1/n), so an all-default bank splits evenly; non-zero shares normalise
-        // to sum to 1. An all-zero bank (every member explicitly parked at 0.0) stays
-        // parked — see the fallback below.
+        // load-share both directions in hardware). An unset — or non-finite — share
+        // defaults to an equal weight (1/n), so an all-default bank splits evenly;
+        // non-zero shares normalise to sum to 1. An all-zero bank (every member
+        // explicitly parked at 0.0) stays parked — see the fallback below.
         let mut shares = vec![1.0_f64; world.storage.len()];
         {
             let mut by_bank: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
@@ -554,8 +554,13 @@ impl LpPlanner {
                 let raw: Vec<f64> = members
                     .iter()
                     .map(|&i| {
+                        // A non-finite share (a sensor emitting NaN/inf) is garbage:
+                        // treat it as unset so it can't poison the bank's share-sum and
+                        // park otherwise-valid members. `clamp` alone PRESERVES NaN
+                        // (NaN.clamp == NaN), so filter to finite before defaulting.
                         world.storage[i]
                             .load_share
+                            .filter(|s| s.is_finite())
                             .unwrap_or(1.0 / members.len() as f64)
                             .clamp(0.0, 1.0)
                     })
