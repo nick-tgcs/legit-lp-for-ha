@@ -545,7 +545,9 @@ impl LpPlanner {
             for members in by_bank.values() {
                 let raw: Vec<f64> = members
                     .iter()
-                    .map(|&i| world.storage[i].load_share.unwrap_or(1.0 / members.len() as f64).max(0.0))
+                    .map(|&i| {
+                        world.storage[i].load_share.unwrap_or(1.0 / members.len() as f64).max(0.0)
+                    })
                     .collect();
                 let sum: f64 = raw.iter().sum();
                 for (k, &i) in members.iter().enumerate() {

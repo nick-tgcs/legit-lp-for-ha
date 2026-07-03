@@ -793,7 +793,10 @@ fn bank1_cabinets_move_together_and_share_the_load() {
     //     thing that was broken (one idle while the other did all the work).
     let a_peak: f64 = a.discharge_kw[40..44].iter().sum();
     let b_peak: f64 = b.discharge_kw[40..44].iter().sum();
-    assert!(a_peak > 0.3 && b_peak > 0.3, "both cabinets discharge across the peak (a={a_peak}, b={b_peak})");
+    assert!(
+        a_peak > 0.3 && b_peak > 0.3,
+        "both cabinets discharge across the peak (a={a_peak}, b={b_peak})"
+    );
     assert!(
         (a_peak - b_peak).abs() < 0.5 * (a_peak + b_peak),
         "peak discharge is shared ~evenly, not lopsided (a={a_peak}, b={b_peak})"
@@ -820,8 +823,16 @@ fn bank2_load_share_caps_each_cabinet_at_its_share_of_the_house() {
     for t in 60..68 {
         assert!(out.grid_kw[t] < 0.1, "step {t}: grid not zeroed in peak ({})", out.grid_kw[t]);
         // The 0.8 kW baseload is split: each cabinet ~0.4 kW (its half), not 0.8/0.
-        assert!(a.discharge_kw[t] > 0.2, "step {t}: cab1 not carrying its share ({})", a.discharge_kw[t]);
-        assert!(b.discharge_kw[t] > 0.2, "step {t}: cab2 not carrying its share ({})", b.discharge_kw[t]);
+        assert!(
+            a.discharge_kw[t] > 0.2,
+            "step {t}: cab1 not carrying its share ({})",
+            a.discharge_kw[t]
+        );
+        assert!(
+            b.discharge_kw[t] > 0.2,
+            "step {t}: cab2 not carrying its share ({})",
+            b.discharge_kw[t]
+        );
     }
 }
 
