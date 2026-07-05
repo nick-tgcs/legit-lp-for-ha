@@ -114,8 +114,18 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Export digest
         run: |
-          mkdir -p "${{ runner.temp }}/digests"
+          # Fail loud at the source: build-push-action should always emit a
+          # sha256:<64-hex> digest here, but an empty/malformed value would
+          # otherwise surface downstream as a confusing bad "@sha256:<x>" ref in
+          # the manifest step. The release gate must never assemble a manifest
+          # from a bad digest.
           digest="${{ steps.build.outputs.digest }}"
+          re='^sha256:[0-9a-f]{64}$'
+          if [[ ! "$digest" =~ $re ]]; then
+            echo "::error::build did not emit a valid sha256 digest for ${{ matrix.arch }} (got '${digest}')"
+            exit 1
+          fi
+          mkdir -p "${{ runner.temp }}/digests"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload digest
         uses: actions/upload-artifact@v7
