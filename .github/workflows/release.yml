@@ -3,13 +3,24 @@
 # develop -> main PR (opened with `make release`, then approved + merged by YOU on
 # GitHub), so the commit this builds passed the full develop gate AND a human
 # review. Merging that PR is a push to main, which triggers this workflow to build
-# the multi-arch add-on image FROM main, push it to GHCR, then tag v<version> and
-# cut the GitHub release — all in CI, no local step.
+# the add-on image FROM main, push it to GHCR, then tag v<version> and cut the
+# GitHub release — all in CI, no local step.
+#
+# Structure (three jobs):
+#   setup   — enforce main-only, read the version, no-op if v<version> is already
+#             tagged (idempotent). Exposes {release, version} to the other jobs.
+#   build   — a native per-arch matrix: amd64 on ubuntu-latest, arm64 on the free
+#             public ubuntu-24.04-arm runner. NO QEMU — each arch compiles on its
+#             own silicon (HiGHS + Rust is far too slow under emulation; the old
+#             single-job QEMU build kept grazing the 60-min cap and finally blew
+#             it on v2026.07.2). Each leg pushes its image BY DIGEST (untagged).
+#   release — assemble the two digests into ONE multi-arch manifest list under the
+#             generic name (`:<version>` + `:latest`), then tag + cut the release.
 #
 # Triggered by a push to main (the release-PR merge), or manually: Actions ->
 # release -> Run workflow on `main` (equivalently `make release-build`).
-# Idempotent: if v<version> is already tagged it no-ops, so a re-run — or a push
-# to main that didn't bump the version — can't double-publish.
+# Idempotent: if v<version> is already tagged the setup gate skips build+release,
+# so a re-run — or a push to main that didn't bump the version — can't double-publish.
 #
 # Version source of truth: addon/config.yaml `version:` — Supervisor pulls
 # image:<version>, so the config version and the GHCR tag move in lockstep.
@@ -17,9 +28,8 @@
 # Why a human merge, not a bot: we deliberately don't let the Actions bot create
 # or approve the release PR — your merge IS the release gate (that was the whole
 # point). A human can also land .github/workflows/ changes on main, which the
-# GITHUB_TOKEN refuses to push. The build itself needs only contents:write (tag +
-# release) and packages:write (GHCR push). `timeout-minutes` caps the QEMU arm64
-# build so a hang fails fast.
+# GITHUB_TOKEN refuses to push. The build needs only contents:write (tag +
+# release) and packages:write (GHCR push). Per-job `timeout-minutes` fail fast.
 name: release
 on:
   push:
@@ -30,10 +40,16 @@ permissions:
   contents: write
   packages: write
 
+env:
+  IMAGE: ghcr.io/nick-tgcs/legit-lp-for-ha
+
 jobs:
-  release:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Releases are built from main only
         if: github.ref != 'refs/heads/main'
@@ -55,39 +71,123 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v4
-        if: steps.ver.outputs.release == 'true'
+
+  # Native per-arch build. Each leg runs on its own architecture (no QEMU) and
+  # pushes the image BY DIGEST only (no tag) — the release job stitches the two
+  # digests into the multi-arch manifest. Cache is scoped per platform so the two
+  # legs don't clobber each other's gha cache.
+  build:
+    needs: setup
+    if: needs.setup.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-        if: steps.ver.outputs.release == 'true'
       - uses: docker/login-action@v4
-        if: steps.ver.outputs.release == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build + push multi-arch image
-        if: steps.ver.outputs.release == 'true'
+      - name: Build + push by digest (${{ matrix.arch }})
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/nick-tgcs/legit-lp-for-ha:${{ steps.ver.outputs.version }}
-            ghcr.io/nick-tgcs/legit-lp-for-ha:latest
+          platforms: ${{ matrix.platform }}
           labels: |
-            io.hass.version=${{ steps.ver.outputs.version }}
+            io.hass.version=${{ needs.setup.outputs.version }}
             org.opencontainers.image.source=https://github.com/nick-tgcs/legit-lp-for-ha
             org.opencontainers.image.licenses=MIT
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Export digest
+        run: |
+          # Fail loud at the source: build-push-action should always emit a
+          # sha256:<64-hex> digest here, but an empty/malformed value would
+          # otherwise surface downstream as a confusing bad "@sha256:<x>" ref in
+          # the manifest step. The release gate must never assemble a manifest
+          # from a bad digest.
+          digest="${{ steps.build.outputs.digest }}"
+          re='^sha256:[0-9a-f]{64}$'
+          if [[ ! "$digest" =~ $re ]]; then
+            echo "::error::build did not emit a valid sha256 digest for ${{ matrix.arch }} (got '${digest}')"
+            exit 1
+          fi
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble both per-arch digests into a single multi-arch manifest list under
+  # the generic name, then tag v<version> and cut the GitHub release. This is the
+  # only job that writes the moving tags (:<version>, :latest) and the git tag.
+  release:
+    needs: [setup, build]
+    if: needs.setup.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create + push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          # Each downloaded file is named for one per-arch push-by-digest sha256.
+          # nullglob so an empty dir yields an empty array, not a literal '*' —
+          # otherwise the count guard below sees one bogus element and passes.
+          shopt -s nullglob
+          refs=()
+          for d in *; do
+            refs+=("${IMAGE}@sha256:${d}")
+          done
+          # We build exactly amd64 + arm64; refuse to publish a partial manifest.
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests (amd64 + arm64), got ${#refs[@]} [${refs[*]:-none}]"
+            exit 1
+          fi
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            "${refs[@]}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
       - name: Tag + GitHub release
-        if: steps.ver.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
-          v='${{ steps.ver.outputs.version }}'
-          git tag "v$v"
-          git push origin "v$v"
-          gh release create "v$v" --target "$GITHUB_SHA" --title "v$v" --generate-notes
-          echo "::notice title=Released::v$v built off main, image on GHCR, tag + release published."
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+          echo "::notice title=Released::v$VERSION built natively (amd64 + arm64), multi-arch manifest on GHCR, tag + release published."

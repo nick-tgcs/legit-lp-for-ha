@@ -54,11 +54,12 @@
    point). CI runs the `validate` workflow on the PR (`pull_request` trigger);
    the required check on `main` is `test` (per `protect-main`).
 3. **You review, approve, and merge it on GitHub.** Merging `main` is a *push to
-   `main`*, which triggers **`release.yml`** to build the multi-arch image (amd64
-   + arm64) off `main`, push it to GHCR as
-   `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest` (with
-   `io.hass.version` stamped), then tag `v<version>` and cut the GitHub release
-   with generated notes.
+   `main`*, which triggers **`release.yml`** to build the image for each arch on a
+   native runner off `main` (amd64 on `ubuntu-latest`, arm64 on the free public
+   `ubuntu-24.04-arm` — no QEMU), assemble the two into one multi-arch manifest,
+   push it to GHCR as `ghcr.io/nick-tgcs/legit-lp-for-ha:<version>` and `:latest`
+   (with `io.hass.version` stamped), then tag `v<version>` and cut the GitHub
+   release with generated notes.
 
 That is it — no local build step, and no bot in the merge path. `release.yml` is
 idempotent: if `v<version>` is already tagged it no-ops, so a re-run (or a push
@@ -109,17 +110,16 @@ exercises the bump rather than just observing it:
   uses the PR's own workflow files, so the version under test is the one that
   executes.
 
-Two actions a PR cannot exercise: `docker/setup-qemu-action` and
-`docker/login-action` only run in `release.yml` (the multi-arch image *push*, on
-`main`), which no PR triggers. Their bumps still auto-merge; the backstop is
-`release.yml`, which builds multi-arch off `main` and fails before it tags if a
-bump broke it. The worst case is a red `release.yml` after the promote merged —
+One action a PR cannot exercise: `docker/login-action` only runs in `release.yml`
+(the image *push*, on `main`), which no PR triggers. Its bumps still auto-merge;
+the backstop is `release.yml`, which builds off `main` and fails before it tags if
+a bump broke it. The worst case is a red `release.yml` after the promote merged —
 `main` has advanced but no image/tag was published (never a *bad* image, just no
 new one); the add-on ships inert and updates are manual, so there is no live
-impact. Fix the bump on `develop` and re-release. Moving the arm64 build to a
-native `ubuntu-24.04-arm` runner would delete the QEMU dependency and let a
-native matrix build exercise the push path on PRs too — a worthwhile follow-up,
-not required for safety.
+impact. Fix the bump on `develop` and re-release. (The arm64 build now runs
+natively on `ubuntu-24.04-arm` instead of under QEMU, so there is no
+`docker/setup-qemu-action` left to bump; the per-arch `docker/build-push-action`
+legs run at their bumped version on every `main` build.)
 
 Why this is safe to fully automate: only PRs authored by `dependabot[bot]`
 self-merge (the actor gate — nothing else does), and they land on `develop`, not
@@ -135,6 +135,11 @@ release is a deliberate one-command step (`make release`) on top.
 - The image is a single multi-arch manifest list under one generic name
   (no `{arch}` template) — the preferred form per the 2026 HA developer docs;
   Supervisor pulls with an explicit platform and resolves the manifest.
+- Each arch builds on a **native runner** (amd64 `ubuntu-latest`, arm64
+  `ubuntu-24.04-arm`) and pushes **by digest**; a final `release` job stitches the
+  digests into the manifest with `docker buildx imagetools create`. This replaced
+  a single QEMU-emulated `--platform amd64,arm64` build that kept grazing — and
+  on `v2026.07.2` finally blew — the 60-min job cap on the Rust + HiGHS compile.
 
 ## First-release checklist (one-time)
 
