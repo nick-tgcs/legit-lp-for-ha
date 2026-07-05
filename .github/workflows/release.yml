@@ -155,11 +155,18 @@ jobs:
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
           # Each downloaded file is named for one per-arch push-by-digest sha256.
+          # nullglob so an empty dir yields an empty array, not a literal '*' —
+          # otherwise the count guard below sees one bogus element and passes.
+          shopt -s nullglob
           refs=()
           for d in *; do
             refs+=("${IMAGE}@sha256:${d}")
           done
-          test "${#refs[@]}" -gt 0 || { echo "::error::no per-arch digests to assemble"; exit 1; }
+          # We build exactly amd64 + arm64; refuse to publish a partial manifest.
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests (amd64 + arm64), got ${#refs[@]} [${refs[*]:-none}]"
+            exit 1
+          fi
           docker buildx imagetools create \
             -t "${IMAGE}:${VERSION}" \
             -t "${IMAGE}:latest" \
