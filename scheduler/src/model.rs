@@ -173,6 +173,13 @@ pub struct WorldState {
     /// inside each window, import above `max_kw` is penalised at `penalty_aud_per_kwh`
     /// per kWh in the LP's cost — soft, so the balance stays feasible. Empty = none.
     pub grid_import_caps: Vec<GridImportCapInput>,
+    /// Resolved peak DEMAND charge for this cycle (distinct from per-kWh pricing):
+    /// the tariff bills the single highest grid-import step (kW) inside its window, so
+    /// the plan is charged `rate_aud_per_kw` per kW ABOVE `anchor_kw` (the month-to-
+    /// date peak already billed), in STAGE-2 cost only — soft, never against comfort.
+    /// `None` = no demand charge modelled (unconfigured, OR a ref didn't resolve this
+    /// cycle — fail-safe: the term is simply dropped, never invented).
+    pub demand_charge: Option<DemandChargeInput>,
 }
 
 /// A resolved windowed grid-import cap. Inside `window`, grid import above `max_kw`
@@ -184,6 +191,20 @@ pub struct GridImportCapInput {
     pub window: Window,
     pub max_kw: f64,
     pub penalty_aud_per_kwh: f64,
+}
+
+/// A resolved peak DEMAND charge (≠ per-kWh energy price). Inside `window` the plan
+/// is charged `rate_aud_per_kw` per kW of the single HIGHEST grid-import step ABOVE
+/// `anchor_kw`. Costed in STAGE-2 only, so peak-shaving never trades off against
+/// must-have comfort and can never make the site balance infeasible (unlike a hard
+/// cap on the peak kW, which an unavoidable draw would render unsolvable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemandChargeInput {
+    pub window: Window,
+    pub rate_aud_per_kw: f64,
+    /// Month-to-date peak already billed this period (kW); the LP pays only for NEW
+    /// peak above this. `0.0` = price the entire in-window peak.
+    pub anchor_kw: f64,
 }
 
 /// One resolved storage device the planner co-optimises, built from config + a
