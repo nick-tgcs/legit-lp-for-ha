@@ -11,7 +11,7 @@ use good_lp::{constraint, variable, variables, Expression, Solution, SolverModel
 
 use crate::model::*;
 use crate::rules::{self, Masks};
-use crate::time::{in_window, window_instances, Grid};
+use crate::time::{window_instances, window_overlaps_step, Grid};
 
 pub struct LpPlanner {
     pub grid_minutes: u32,
@@ -782,7 +782,9 @@ impl LpPlanner {
             let active = world
                 .grid_import_caps
                 .iter()
-                .filter(|cap| in_window(grid.steps[t].time(), &cap.window))
+                .filter(|cap| {
+                    window_overlaps_step(grid.steps[t].time(), self.grid_minutes, &cap.window)
+                })
                 .min_by(|a, b| {
                     a.max_kw
                         .total_cmp(&b.max_kw)
@@ -793,10 +795,14 @@ impl LpPlanner {
                 constraints.push(constraint!(over >= imp - cap.max_kw));
                 cost_expr += over * (cap.penalty_aud_per_kwh * dt_h);
             }
-            // Peak demand: this step's import raises the tracked peak when in-window.
+            // Peak demand: this step raises the tracked peak when it OVERLAPS the window
+            // (not just when its start is in-window — the peak window need not align to the
+            // grid, e.g. opens at 14:55). Bind to NET metered import `imp - exp`, matching
+            // grid_kw (= imp - exp) and how a demand charge is billed at the meter; an
+            // exporting step (net < 0) simply doesn't raise the peak (which is ≥ anchor ≥ 0).
             if let (Some(dc), Some(peak)) = (world.demand_charge.as_ref(), demand_peak) {
-                if in_window(grid.steps[t].time(), &dc.window) {
-                    constraints.push(constraint!(peak >= imp));
+                if window_overlaps_step(grid.steps[t].time(), self.grid_minutes, &dc.window) {
+                    constraints.push(constraint!(peak >= imp - exp));
                 }
             }
             imps.push(imp);

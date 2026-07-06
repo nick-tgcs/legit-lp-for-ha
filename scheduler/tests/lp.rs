@@ -1470,3 +1470,60 @@ fn dc5_demand_window_crossing_midnight_is_honoured() {
     }
     assert!(out.grid_kw[0] > 0.5, "before 23:00 the grid still carries the baseload");
 }
+
+#[test]
+fn dc6_partial_overlap_step_is_priced_when_the_window_is_not_grid_aligned() {
+    // The live peak window opens at 14:55 — NOT aligned to the 15-min grid. The
+    // 14:45–15:00 step OVERLAPS the window (from 14:55 on), so its import must count
+    // toward the peak. A start-time-only in-window test drops that step and UNDER-reports
+    // the peak, letting the battery set the very first peak the feature exists to shave.
+    let now = sydney(2026, 6, 10, 14, 45); // step 0 == [14:45,15:00): partially in-window
+    let window = Window {
+        start: chrono::NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20); // 0.8 kW baseload, no storage
+                                                  // PV covers the load in the grid-ALIGNED in-window steps (15:00–16:00) but NOT in the
+                                                  // partial 14:45–15:00 step — so that partial step is the UNIQUE in-window grid draw.
+    for t in 1..=4 {
+        world.pv[t] = 0.8;
+    }
+    world.demand_charge = Some(DemandChargeInput { window, rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled -> peak reported");
+    // Only the partial 14:45–15:00 step draws (~0.8 kW); the aligned steps are PV-covered.
+    // A start-time check would report ~0 here (partial step excluded) — the bug.
+    assert!(
+        peak_kw > 0.5,
+        "the partial 14:45–15:00 step overlaps the 14:55 window and must raise the peak; \
+         a start-time-only check under-reports it, got {peak_kw}"
+    );
+}
+
+#[test]
+fn dc7_reported_peak_tracks_net_metered_import_not_gross() {
+    // A demand charge bills NET import at the meter (imp − exp), and the panel reports
+    // grid_kw == imp − exp. Bind the peak to net, not gross imp, so demand_peak_kw stays
+    // consistent with grid_kw. Strong PV across the window makes the house net-export, so
+    // the billed peak is the anchor floor (0) — never a gross intermediate flow.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()];
+    for t in 60..68 {
+        world.pv[t] = 3.0; // >> 0.8 kW baseload → net export in the 15:00–17:00 window
+    }
+    world.demand_charge =
+        Some(DemandChargeInput { window: peak_15_17(), rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled");
+    assert!(
+        peak_kw < 0.2,
+        "peak must track NET metered import (≈0 while PV net-exporting), got {peak_kw}"
+    );
+    // Consistency: the reported peak is ≥ the worst NET grid draw the panel shows in-window.
+    let max_net = (60..68).map(|t| out.grid_kw[t]).fold(f64::MIN, f64::max);
+    assert!(
+        peak_kw + 1e-6 >= max_net.max(0.0),
+        "reported peak {peak_kw} is below the worst in-window net grid draw {max_net}"
+    );
+}

@@ -24,6 +24,30 @@ pub fn in_window(t: NaiveTime, w: &Window) -> bool {
     }
 }
 
+/// Does the grid step `[step_start, step_start + step_minutes)` OVERLAP window `w`?
+///
+/// `in_window` tests a single instant (the step's start), which silently drops a step
+/// that only PARTIALLY overlaps the window — e.g. the 14:45–15:00 step against a 14:55
+/// window opening. Demand/peak windows need not align to the grid (the live peak window
+/// opens at 14:55), so overlap — not start-membership — is the correct in-window test
+/// for pricing a step's grid import. A grid-aligned window behaves identically to
+/// `in_window` on the step start, so this only changes the unaligned/boundary cases.
+pub fn window_overlaps_step(step_start: NaiveTime, step_minutes: u32, w: &Window) -> bool {
+    if w.start == w.end {
+        return true; // full-day window
+    }
+    // The step opens inside the window, OR the window opens inside the step.
+    if in_window(step_start, w) {
+        return true;
+    }
+    let s = i64::from(step_start.hour() * 60 + step_start.minute());
+    let e = s + i64::from(step_minutes); // may exceed 1440 when the step crosses midnight
+    let ws = i64::from(w.start.hour() * 60 + w.start.minute());
+    // Is the window's opening minute inside [s, e)? Test the same clock day and its
+    // next-day image, so a step running past midnight still catches an early-morning open.
+    (ws >= s && ws < e) || (ws + 1440 >= s && ws + 1440 < e)
+}
+
 /// The instant of local midnight on `now`'s local date.
 /// On days where 00:00 is skipped/ambiguous (DST corner), takes the earliest
 /// valid instant.
@@ -211,6 +235,31 @@ mod tests {
         assert!(in_window(t(22, 0), &win)); // start inclusive
         assert!(!in_window(t(6, 30), &win)); // end exclusive
         assert!(!in_window(t(12, 0), &win));
+    }
+
+    #[test]
+    fn window_overlaps_step_catches_partial_overlap() {
+        let win = w(14, 55, 16, 0); // opens mid-step, not grid-aligned
+                                    // 14:45–15:00 step overlaps (14:55–15:00), even though its START is out of window.
+        assert!(window_overlaps_step(t(14, 45), 15, &win));
+        assert!(!in_window(t(14, 45), &win), "sanity: a start-only test would drop it");
+        assert!(window_overlaps_step(t(15, 0), 15, &win)); // aligned in-window step
+        assert!(!window_overlaps_step(t(14, 30), 15, &win)); // wholly before
+        assert!(!window_overlaps_step(t(16, 0), 15, &win)); // starts at end (half-open): out
+        assert!(!window_overlaps_step(t(14, 40), 15, &win)); // ends at open (half-open): out
+    }
+
+    #[test]
+    fn window_overlaps_step_handles_midnight_and_full_day() {
+        assert!(window_overlaps_step(t(3, 0), 30, &w(0, 0, 0, 0))); // full day
+        let mid = w(23, 0, 1, 0); // crosses midnight
+        assert!(window_overlaps_step(t(23, 0), 15, &mid));
+        assert!(window_overlaps_step(t(0, 30), 15, &mid));
+        assert!(!window_overlaps_step(t(22, 0), 15, &mid));
+        // window opens mid-step just before midnight: 22:55–23:10 step overlaps 23:05 open
+        assert!(window_overlaps_step(t(22, 55), 15, &w(23, 5, 1, 0)));
+        // a step running past midnight catches an early-morning open: 23:55–00:10 vs 00:05
+        assert!(window_overlaps_step(t(23, 55), 15, &w(0, 5, 2, 0)));
     }
 
     #[test]
