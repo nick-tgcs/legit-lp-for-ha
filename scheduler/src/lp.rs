@@ -11,7 +11,7 @@ use good_lp::{constraint, variable, variables, Expression, Solution, SolverModel
 
 use crate::model::*;
 use crate::rules::{self, Masks};
-use crate::time::{in_window, window_instances, Grid};
+use crate::time::{window_instances, window_overlaps_step, Grid};
 
 pub struct LpPlanner {
     pub grid_minutes: u32,
@@ -64,6 +64,11 @@ pub struct PlanOutput {
     /// screen marked stale. `None` on a normal solve (incl. the global-disabled
     /// hold, which is an intentional state, not a failure).
     pub solver_error: Option<String>,
+    /// The single highest grid-import step (kW) the plan reaches inside the peak
+    /// DEMAND-charge window, when one is modelled this cycle — i.e. what the tariff
+    /// bills. `None` when no demand charge is configured/resolved. The panel turns
+    /// this into the battery's "capping peak demand at X kW" explanation.
+    pub demand_peak_kw: Option<f64>,
 }
 
 /// Per-load variable bundle inside the MILP.
@@ -114,6 +119,7 @@ impl LpPlanner {
                 grid_kw: vec![],
                 storage: vec![],
                 solver_error: None, // global-disabled is an intentional state, not a failure
+                demand_peak_kw: None,
             };
         }
 
@@ -173,7 +179,8 @@ impl LpPlanner {
                 Err(e) => return self.hold_all(loads, format!("solver error: {e}")),
             };
 
-        let SolvedStage { plans: solved_plans, grid_kw, storage, .. } = solved;
+        let SolvedStage { plans: solved_plans, grid_kw, storage, demand_charge_peak_kw, .. } =
+            solved;
         for lp in solved_plans {
             let i = lp.idx;
             let c = &loads[i];
@@ -238,6 +245,7 @@ impl LpPlanner {
             grid_kw,
             storage,
             solver_error: None,
+            demand_peak_kw: demand_charge_peak_kw,
         }
     }
 
@@ -258,6 +266,7 @@ impl LpPlanner {
             grid_kw: vec![],
             storage: vec![],
             solver_error: Some(reason),
+            demand_peak_kw: None,
         }
     }
 
@@ -718,6 +727,13 @@ impl LpPlanner {
         }
 
         // ---- site balance: imp - exp = baseload + Σ pkw·x − pv + Σ(ch − dis) -
+        // Peak DEMAND charge: one var tracks the single highest in-window grid-import
+        // step. Its lower bound is the month-to-date anchor (peak_kw ≥ anchor_kw — today
+        // can hide under a peak the month already banked); the in-window `≥ imp[t]` caps
+        // below force it up to the true peak. Costed rate·(peak − anchor) in stage 2
+        // ONLY (added after the loop). Absent demand charge ⇒ no var (inert).
+        let demand_peak =
+            world.demand_charge.as_ref().map(|dc| vars.add(variable().min(dc.anchor_kw)));
         let mut imps: Vec<Variable> = Vec::with_capacity(n);
         let mut exps: Vec<Variable> = Vec::with_capacity(n);
         for t in 0..n {
@@ -766,7 +782,9 @@ impl LpPlanner {
             let active = world
                 .grid_import_caps
                 .iter()
-                .filter(|cap| in_window(grid.steps[t].time(), &cap.window))
+                .filter(|cap| {
+                    window_overlaps_step(grid.steps[t].time(), self.grid_minutes, &cap.window)
+                })
                 .min_by(|a, b| {
                     a.max_kw
                         .total_cmp(&b.max_kw)
@@ -777,8 +795,27 @@ impl LpPlanner {
                 constraints.push(constraint!(over >= imp - cap.max_kw));
                 cost_expr += over * (cap.penalty_aud_per_kwh * dt_h);
             }
+            // Peak demand: this step raises the tracked peak when it OVERLAPS the window
+            // (not just when its start is in-window — the peak window need not align to the
+            // grid, e.g. opens at 14:55). Bind to NET metered import `imp - exp`, matching
+            // grid_kw (= imp - exp) and how a demand charge is billed at the meter; an
+            // exporting step (net < 0) simply doesn't raise the peak (which is ≥ anchor ≥ 0).
+            if let (Some(dc), Some(peak)) = (world.demand_charge.as_ref(), demand_peak) {
+                if window_overlaps_step(grid.steps[t].time(), self.grid_minutes, &dc.window) {
+                    constraints.push(constraint!(peak >= imp - exp));
+                }
+            }
             imps.push(imp);
             exps.push(exp);
+        }
+
+        // Stage-2 cost of the (new) peak demand: rate · (peak_kw − anchor_kw). The
+        // `− anchor` keeps the modelled cost honest (today pays only ABOVE the month
+        // max); as a constant it doesn't move the argmin, and peak_kw ≥ anchor_kw via
+        // the var's lower bound, so the term is never negative. In `cost_expr` (stage 2)
+        // ONLY — peak-shaving never trades off against a must-have (stage 1 min `unmet`).
+        if let (Some(dc), Some(peak)) = (world.demand_charge.as_ref(), demand_peak) {
+            cost_expr += (peak - dc.anchor_kw) * dc.rate_aud_per_kw;
         }
 
         let objective = if unmet_cap.is_none() { unmet_expr.clone() } else { cost_expr.clone() };
@@ -815,7 +852,9 @@ impl LpPlanner {
                 target_unmet: sv.target_unmet.iter().map(|u| sol.value(*u)).sum(),
             })
             .collect();
-        Ok(SolvedStage { total_unmet, plans, grid_kw, storage })
+        // Peak-demand var solved value (kW) when a demand charge was modelled this solve.
+        let demand_charge_peak_kw = demand_peak.map(|p| sol.value(p));
+        Ok(SolvedStage { total_unmet, plans, grid_kw, storage, demand_charge_peak_kw })
     }
 }
 
@@ -881,6 +920,9 @@ struct SolvedStage {
     plans: Vec<SolvedLoad>,
     grid_kw: Vec<f64>,
     storage: Vec<StoragePlan>,
+    /// Solved value of the peak-demand var (kW) when a demand charge was modelled
+    /// this solve; `None` otherwise. Carried up to `PlanOutput.demand_peak_kw`.
+    demand_charge_peak_kw: Option<f64>,
 }
 
 struct SolvedLoad {

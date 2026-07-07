@@ -14,7 +14,7 @@ use crate::config::{
 use crate::lp::{LoadPlan, StoragePlan};
 use crate::model::{DemandKind, LoadContract, ThresholdDir, Window};
 use crate::rules;
-use crate::status::{PlanBlock, ReasonFact, Reasoning, StepBucket};
+use crate::status::{DemandChargeReport, PlanBlock, ReasonFact, Reasoning, StepBucket};
 use crate::time::{in_window, window_instances, Grid};
 
 fn hm_dt(dt: &DateTime<Tz>) -> String {
@@ -329,6 +329,7 @@ pub fn for_storage(
     action: &str,
     action_actuated: bool,
     grid: &Grid,
+    demand: Option<&DemandChargeReport>,
 ) -> Reasoning {
     let soc_now = plan.soc_kwh.first().copied().unwrap_or(0.0);
     let pct = if plan.capacity_kwh > 0.0 { 100.0 * soc_now / plan.capacity_kwh } else { 0.0 };
@@ -396,6 +397,22 @@ pub fn for_storage(
         }
     }
 
+    // Peak DEMAND charge (site-level): show what the plan is billed on so the user
+    // sees whether the battery is shaving the monthly peak. "not priced" is the honest
+    // read when no demand charge is configured — the diagnosed reason a battery would
+    // otherwise hold through peak while the house imports.
+    inputs.push(match demand {
+        Some(d) => ReasonFact::new(
+            "Peak demand",
+            format!(
+                "cap {:.1} kW · ${:.2}/period @ ${:.0}/kW",
+                d.peak_kw, d.cost_aud, d.rate_aud_per_kw
+            ),
+            None,
+        ),
+        None => ReasonFact::new("Peak demand", "not priced", None),
+    });
+
     // Charge / discharge blocks.
     let charge_on: Vec<bool> = plan.charge_kw.iter().map(|&kw| kw > 1e-3).collect();
     let discharge_on: Vec<bool> = plan.discharge_kw.iter().map(|&kw| kw > 1e-3).collect();
@@ -415,9 +432,24 @@ pub fn for_storage(
     } else {
         match action {
             "charging" => "Charging now (cheap import or surplus solar).".into(),
-            "discharging" => "Discharging now to avoid dear import.".into(),
+            "discharging" => match demand {
+                Some(d) if d.active_now => format!(
+                    "Discharging now — capping peak demand at {:.1} kW ({}–{}).",
+                    d.peak_kw, d.window_start, d.window_end
+                ),
+                _ => "Discharging now to avoid dear import.".into(),
+            },
             _ if has_target => "On track for the target; holding for now.".into(),
-            _ => "Holding — self-arbitraging against price.".into(),
+            // In the peak window, holding means the peak is already at/under the month
+            // anchor (nothing new to shave) — say that instead of the generic arbitrage
+            // line. Outside any demand window (or none configured): the usual copy.
+            _ => match demand {
+                Some(d) if d.active_now => format!(
+                    "Holding — peak demand already capped at {:.1} kW ({}–{}).",
+                    d.peak_kw, d.window_start, d.window_end
+                ),
+                _ => "Holding — self-arbitraging against price.".into(),
+            },
         }
     };
     if !action_actuated {
@@ -618,7 +650,7 @@ loads: []
         let cfg = storage_cfg();
         let grid = Grid::build(sydney(2026, 6, 10, 4, 0), 15, 2).unwrap();
         let plan = storage_plan(2.0, true); // 2 kWh short of target, charging
-        let r = for_storage(&cfg, &plan, "idle", false, &grid);
+        let r = for_storage(&cfg, &plan, "idle", false, &grid, None);
 
         assert!(r.narrative.contains("Short") && r.narrative.contains("advisory"));
         assert!(r.binding.is_some() && r.fix_hint.is_some());
@@ -635,10 +667,54 @@ loads: []
         let cfg = storage_cfg();
         let grid = Grid::build(sydney(2026, 6, 10, 4, 0), 15, 2).unwrap();
         let plan = storage_plan(0.0, true);
-        let r = for_storage(&cfg, &plan, "charging", true, &grid);
+        let r = for_storage(&cfg, &plan, "charging", true, &grid, None);
 
         assert!(r.narrative.contains("Charging"), "narrative: {}", r.narrative);
         assert!(!r.narrative.contains("advisory"), "actuated actions aren't tagged advisory");
         assert!(r.binding.is_none());
+    }
+
+    fn demand_report(active_now: bool) -> DemandChargeReport {
+        DemandChargeReport {
+            peak_kw: 1.2,
+            anchor_kw: 0.0,
+            rate_aud_per_kw: 30.0,
+            cost_aud: 36.0,
+            window_start: "14:55".into(),
+            window_end: "20:00".into(),
+            active_now,
+        }
+    }
+
+    #[test]
+    fn storage_reasoning_names_the_peak_demand_cap_when_discharging_in_window() {
+        let cfg = storage_cfg();
+        let grid = Grid::build(sydney(2026, 6, 10, 15, 0), 15, 2).unwrap();
+        let plan = storage_plan(0.0, false); // discharging, target met
+        let r = for_storage(&cfg, &plan, "discharging", true, &grid, Some(&demand_report(true)));
+
+        assert!(
+            r.narrative.contains("capping peak demand") && r.narrative.contains("14:55"),
+            "narrative names the peak cap + window: {}",
+            r.narrative
+        );
+        assert!(
+            r.inputs.iter().any(|f| f.label == "Peak demand" && f.value.contains("kW")),
+            "a Peak demand input fact is surfaced"
+        );
+    }
+
+    #[test]
+    fn storage_reasoning_marks_peak_not_priced_without_a_demand_charge() {
+        let cfg = storage_cfg();
+        let grid = Grid::build(sydney(2026, 6, 10, 15, 0), 15, 2).unwrap();
+        let plan = storage_plan(0.0, false);
+        let r = for_storage(&cfg, &plan, "idle", false, &grid, None);
+
+        assert!(
+            r.inputs.iter().any(|f| f.label == "Peak demand" && f.value == "not priced"),
+            "peak demand shown as not priced when unconfigured: {:?}",
+            r.inputs
+        );
     }
 }
