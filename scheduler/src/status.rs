@@ -116,6 +116,27 @@ pub struct StorageReport {
     pub reasoning: Reasoning,
 }
 
+/// The site's peak DEMAND charge for this cycle (distinct from per-kWh pricing),
+/// mirrored for the panel so it can explain the battery "capping peak demand at X
+/// kW". `None` on `SolveReport` when no demand charge is configured/resolved.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DemandChargeReport {
+    /// The single highest grid-import step (kW) the plan reaches inside `window` —
+    /// what the tariff bills. Equals `anchor_kw` when the plan fully shaves the peak.
+    pub peak_kw: f64,
+    /// Month-to-date peak already billed (kW); the plan only pays ABOVE this.
+    pub anchor_kw: f64,
+    /// Tariff rate ($/kW) applied to `(peak_kw − anchor_kw)`.
+    pub rate_aud_per_kw: f64,
+    /// Planned NEW demand cost this period (AUD): `rate · max(0, peak_kw − anchor_kw)`.
+    pub cost_aud: f64,
+    /// Peak window bounds as "HH:MM" (for the panel's "14:55–20:00" copy).
+    pub window_start: String,
+    pub window_end: String,
+    /// Is the current step inside the window right now? Drives the live "capping…" copy.
+    pub active_now: bool,
+}
+
 /// Triage level for a per-cycle issue. Serialises lowercase ("critical"/…) so the
 /// panel can class rows and `main.rs` can pick the log level.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -205,6 +226,10 @@ pub struct SolveReport {
     /// Local timestamp (RFC3339) the on-screen plan was actually solved. Equals
     /// `at` for a fresh report; an earlier time when `stale`.
     pub last_solved: String,
+    /// The site's peak DEMAND charge this cycle, when one is modelled — the panel
+    /// uses it to explain the battery covering peak. `None` = no demand charge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demand_charge: Option<DemandChargeReport>,
 }
 
 impl SolveReport {

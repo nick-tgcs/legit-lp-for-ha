@@ -1305,3 +1305,225 @@ fn p4_program_is_all_or_nothing_under_the_price_cap() {
     assert!(runs.is_empty(), "no contiguous block fits under the cap -> program waits");
     assert!(out.plans[0].unmet > 0.0, "the unmet runtime is reported honestly");
 }
+
+// ---- peak DEMAND charge (bill on the highest in-window grid kW) -----------------
+// A demand charge is NOT a per-kWh penalty (the grid_import_caps above punish every
+// peak kWh equally); it prices only the single WORST interval. The battery must
+// pre-charge before the window and discharge through it to shave that one peak.
+
+/// `test_storage` with a chosen starting SoC (kWh).
+fn storage_at(soc_kwh: f64) -> StorageInput {
+    let mut s = test_storage();
+    s.soc_now_kwh = soc_kwh;
+    s
+}
+
+/// 15:00–17:00 (steps 60..68 when `now` == local midnight).
+fn peak_15_17() -> Window {
+    Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+    }
+}
+
+#[test]
+fn dc1_demand_charge_makes_the_battery_cover_peak_under_flat_price() {
+    // The diagnosed bug: under a FLAT ~$0.20 price the battery holds through the peak
+    // (see b4) while the house imports the baseload — yet the tariff bills the single
+    // highest grid kW in the window at ~30x. A demand charge must flip that: discharge
+    // through the window to zero the grid, even with no per-kWh arbitrage signal.
+    let now = sydney(2026, 6, 10, 0, 0); // step t == t*15min; 15:00 == step 60
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()]; // 5 kWh on hand, ±5 kW — ample for 0.8 kW × 2 h
+
+    // No demand charge: flat price → the grid carries the baseload through the peak.
+    let none = planner().plan(&world, &[]);
+    assert!(none.grid_kw[62] > 0.5, "baseline imports the baseload through the peak");
+    assert!(none.demand_peak_kw.is_none(), "no demand charge modelled -> no peak reported");
+
+    // With a $30/kW demand charge (anchor 0): shaving the peak dwarfs the wear + import
+    // of discharging, so the battery must zero (or near-zero) the grid across the window.
+    world.demand_charge =
+        Some(DemandChargeInput { window: peak_15_17(), rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    for t in 60..68 {
+        assert!(out.grid_kw[t] < 0.2, "step {t}: grid not shaved in the peak ({})", out.grid_kw[t]);
+        assert!(
+            b.discharge_kw[t] > 0.4,
+            "step {t}: battery not covering the house ({})",
+            b.discharge_kw[t]
+        );
+    }
+    // Outside the window the charge is inert: the grid still carries the baseload.
+    assert!(out.grid_kw[0] > 0.5, "pre-peak grid unchanged");
+    assert!(out.grid_kw[80] > 0.5, "post-peak grid unchanged");
+    // Reported peak reflects the shaved plan (≈ 0, the grid draw left in the window).
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled -> peak reported");
+    assert!(peak_kw < 0.2, "reported peak is the shaved grid draw, got {peak_kw}");
+}
+
+#[test]
+fn dc2_battery_pre_charges_ahead_of_the_peak_when_it_starts_low() {
+    // Starting near the reserve floor, the battery lacks the energy to cover a 2 h peak.
+    // With grid-charging allowed and a large demand charge, pre-charging ~1.3 kWh at
+    // $0.20 to avoid a ~$24 demand hit is hugely worth it: SoC must CLIMB before the
+    // window, then fall through it.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![storage_at(1.5)]; // just above the 1.0 kWh reserve floor
+    world.demand_charge =
+        Some(DemandChargeInput { window: peak_15_17(), rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(
+        b.soc_kwh[60] > b.soc_kwh[0] + 0.5,
+        "pre-charges ahead of the peak (soc {} -> {})",
+        b.soc_kwh[0],
+        b.soc_kwh[60]
+    );
+    assert!(b.charge_kw[..60].iter().any(|&c| c > 0.1), "charges at some point before the window");
+    for t in 60..68 {
+        assert!(
+            out.grid_kw[t] < 0.2,
+            "step {t}: grid not shaved after pre-charging ({})",
+            out.grid_kw[t]
+        );
+    }
+}
+
+#[test]
+fn dc3_demand_charge_never_discharges_below_the_reserve_floor() {
+    // Fail-SAFE: even a huge demand charge cannot drive the pack below its reserve
+    // floor. A ~9 h window needs ~7 kWh but only ~4 kWh sits above the floor — the
+    // battery flattens the peak as far as its usable energy allows, hits the floor,
+    // and the grid carries the rest (never a floor breach).
+    let now = sydney(2026, 6, 10, 0, 0);
+    let long_peak = Window {
+        start: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()]; // 5 kWh, floor 1 kWh
+    world.demand_charge =
+        Some(DemandChargeInput { window: long_peak, rate_aud_per_kw: 100.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    for (t, s) in b.soc_kwh.iter().enumerate() {
+        assert!(
+            *s >= b.min_soc_kwh - 1e-6,
+            "step {t}: SoC {s} breached the reserve floor {}",
+            b.min_soc_kwh
+        );
+    }
+    // It DID spend its headroom on the peak (not merely held): SoC ends near the floor.
+    assert!(
+        b.soc_kwh[STEPS] < b.min_soc_kwh + 1.0,
+        "battery spent its usable energy shaving the peak, ended at {}",
+        b.soc_kwh[STEPS]
+    );
+}
+
+#[test]
+fn dc4_anchor_suppresses_discharge_when_today_hides_under_the_month_peak() {
+    // The month has already banked a 2 kW peak; today's 0.8 kW baseload can't exceed it,
+    // so there is NO new demand to shave — the battery must hold (not pointlessly cycle),
+    // and the reported peak is pinned to the anchor, at $0 new cost.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()];
+    world.demand_charge =
+        Some(DemandChargeInput { window: peak_15_17(), rate_aud_per_kw: 30.0, anchor_kw: 2.0 });
+    let out = planner().plan(&world, &[]);
+    let b = &out.storage[0];
+    assert!(out.grid_kw[62] > 0.5, "no new peak to shave -> grid still carries the baseload");
+    for t in 60..68 {
+        assert!(
+            b.discharge_kw[t] < 0.1,
+            "step {t}: battery pointlessly discharged under the anchor ({})",
+            b.discharge_kw[t]
+        );
+    }
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled");
+    assert!((peak_kw - 2.0).abs() < 0.2, "reported peak is pinned to the anchor, got {peak_kw}");
+}
+
+#[test]
+fn dc5_demand_window_crossing_midnight_is_honoured() {
+    // `end < start` crosses midnight. now == 22:00 (step 0); window 23:00–01:00 covers
+    // steps 4..12. The battery must shave the grid across the midnight boundary.
+    let now = sydney(2026, 6, 10, 22, 0);
+    let window = Window {
+        start: chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(1, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()];
+    world.demand_charge = Some(DemandChargeInput { window, rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    for t in 4..12 {
+        assert!(
+            out.grid_kw[t] < 0.2,
+            "step {t}: grid not shaved across the midnight window ({})",
+            out.grid_kw[t]
+        );
+    }
+    assert!(out.grid_kw[0] > 0.5, "before 23:00 the grid still carries the baseload");
+}
+
+#[test]
+fn dc6_partial_overlap_step_is_priced_when_the_window_is_not_grid_aligned() {
+    // The live peak window opens at 14:55 — NOT aligned to the 15-min grid. The
+    // 14:45–15:00 step OVERLAPS the window (from 14:55 on), so its import must count
+    // toward the peak. A start-time-only in-window test drops that step and UNDER-reports
+    // the peak, letting the battery set the very first peak the feature exists to shave.
+    let now = sydney(2026, 6, 10, 14, 45); // step 0 == [14:45,15:00): partially in-window
+    let window = Window {
+        start: chrono::NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
+        end: chrono::NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
+    };
+    let mut world = flat_world(now, STEPS, 0.20); // 0.8 kW baseload, no storage
+                                                  // PV covers the load in the grid-ALIGNED in-window steps (15:00–16:00) but NOT in the
+                                                  // partial 14:45–15:00 step — so that partial step is the UNIQUE in-window grid draw.
+    for t in 1..=4 {
+        world.pv[t] = 0.8;
+    }
+    world.demand_charge = Some(DemandChargeInput { window, rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled -> peak reported");
+    // Only the partial 14:45–15:00 step draws (~0.8 kW); the aligned steps are PV-covered.
+    // A start-time check would report ~0 here (partial step excluded) — the bug.
+    assert!(
+        peak_kw > 0.5,
+        "the partial 14:45–15:00 step overlaps the 14:55 window and must raise the peak; \
+         a start-time-only check under-reports it, got {peak_kw}"
+    );
+}
+
+#[test]
+fn dc7_reported_peak_tracks_net_metered_import_not_gross() {
+    // A demand charge bills NET import at the meter (imp − exp), and the panel reports
+    // grid_kw == imp − exp. Bind the peak to net, not gross imp, so demand_peak_kw stays
+    // consistent with grid_kw. Strong PV across the window makes the house net-export, so
+    // the billed peak is the anchor floor (0) — never a gross intermediate flow.
+    let now = sydney(2026, 6, 10, 0, 0);
+    let mut world = flat_world(now, STEPS, 0.20);
+    world.storage = vec![test_storage()];
+    for t in 60..68 {
+        world.pv[t] = 3.0; // >> 0.8 kW baseload → net export in the 15:00–17:00 window
+    }
+    world.demand_charge =
+        Some(DemandChargeInput { window: peak_15_17(), rate_aud_per_kw: 30.0, anchor_kw: 0.0 });
+    let out = planner().plan(&world, &[]);
+    let peak_kw = out.demand_peak_kw.expect("demand charge modelled");
+    assert!(
+        peak_kw < 0.2,
+        "peak must track NET metered import (≈0 while PV net-exporting), got {peak_kw}"
+    );
+    // Consistency: the reported peak is ≥ the worst NET grid draw the panel shows in-window.
+    let max_net = (60..68).map(|t| out.grid_kw[t]).fold(f64::MIN, f64::max);
+    assert!(
+        peak_kw + 1e-6 >= max_net.max(0.0),
+        "reported peak {peak_kw} is below the worst in-window net grid draw {max_net}"
+    );
+}

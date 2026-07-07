@@ -16,7 +16,7 @@ use crate::lp::LpPlanner;
 use crate::model::*;
 use crate::profile::Profiles;
 use crate::reasoning;
-use crate::status::{Alert, LoadReport, Severity, SolveReport, StorageReport};
+use crate::status::{Alert, DemandChargeReport, LoadReport, Severity, SolveReport, StorageReport};
 use crate::time::{in_window, local_midnight, Grid};
 
 pub struct Cycle {
@@ -255,6 +255,39 @@ fn grid_import_cap_from_resolved(
         _ => Err(format!(
             "grid_import_caps[{idx}] unresolved (window/max_kw/penalty); peak grid-avoidance skipped this cycle"
         )),
+    }
+}
+
+/// Decide the peak DEMAND charge from its live-resolved parts. Pure (no HA), so the
+/// fail-loud-but-safe policy is unit-testable without a mock cycle. `Ok` = a usable
+/// term; `Err(diagnostic)` = skip it this cycle, never invent one: either a part
+/// didn't resolve, or a magnitude came back invalid (negative OR non-finite — a
+/// miswired entity can report `NaN`/`inf`, which would poison the LP). `anchor` is
+/// `None` ONLY when no `anchor_kw` was configured (⇒ 0, price the whole peak); a
+/// CONFIGURED anchor that didn't read this cycle counts as unresolved (skip, don't
+/// silently assume 0 — that would forge a cheaper charge than the tariff states).
+fn demand_charge_from_resolved(
+    window: Option<Window>,
+    rate: Option<f64>,
+    anchor: Option<f64>,
+    anchor_configured: bool,
+) -> Result<DemandChargeInput, String> {
+    let valid = |v: f64| v.is_finite() && v >= 0.0;
+    let anchor_kw = if anchor_configured { anchor } else { Some(0.0) };
+    match (window, rate, anchor_kw) {
+        (Some(window), Some(rate), Some(anchor_kw)) => {
+            if valid(rate) && valid(anchor_kw) {
+                Ok(DemandChargeInput { window, rate_aud_per_kw: rate, anchor_kw })
+            } else {
+                Err(format!(
+                    "demand_charge resolved to an invalid magnitude (rate={rate}, anchor={anchor_kw}); expected finite and >= 0, skipped this cycle"
+                ))
+            }
+        }
+        _ => Err(
+            "demand_charge unresolved (window/rate/anchor); peak-demand shaving skipped this cycle"
+                .into(),
+        ),
     }
 }
 
@@ -1008,6 +1041,31 @@ impl Cycle {
             }
         }
 
+        // ---- peak demand charge (bill on the highest in-window grid kW) ----
+        // Resolve live. Fail LOUD but SAFE: an unresolved demand charge is SKIPPED
+        // this cycle (with a diagnostic), never invented — like the caps it is a cost
+        // preference, not a safety gate, so skipping only forgoes peak-demand shaving;
+        // it can never make a device act. (Failing "closed" would mean guessing a
+        // tariff rate, which the no-hardcoding rule forbids.)
+        let demand_charge = match &g.pricing.demand_charge {
+            None => None,
+            Some(dc) => {
+                let window = resolve_window(ha, &dc.window, &mut diags).await;
+                let rate = resolve(ha, &dc.rate_aud_per_kw, &mut diags).await;
+                let (anchor_configured, anchor) = match &dc.anchor_kw {
+                    Some(a) => (true, resolve(ha, a, &mut diags).await),
+                    None => (false, None),
+                };
+                match demand_charge_from_resolved(window, rate, anchor, anchor_configured) {
+                    Ok(t) => Some(t),
+                    Err(diag) => {
+                        diags.push(diag);
+                        None
+                    }
+                }
+            }
+        };
+
         let world = WorldState {
             now,
             global_enabled,
@@ -1018,6 +1076,7 @@ impl Cycle {
             baseload,
             storage: storage_gated,
             grid_import_caps,
+            demand_charge,
         };
         let out = self.planner.plan_with_preview(&world, &contracts, preview);
         // Advisory storage trajectory for the panel: a second, DISPLAY-ONLY solve at
@@ -1083,6 +1142,23 @@ impl Cycle {
 
         // Triaged alerts: the human-facing layer above the raw `diags` bag.
         let alerts = derive_alerts(&out.solver_error, &diags, &out.plans, preview, self.dry_run);
+
+        // Site peak-demand summary for the panel: what the plan is billed on (the
+        // solved in-window peak kW), the tariff, the NEW cost above the month anchor,
+        // and whether the window is live right now. `Some` iff the LP modelled a
+        // demand charge this cycle (resolved from the registry) AND solved a peak.
+        let demand_charge_report = match (&world.demand_charge, out.demand_peak_kw) {
+            (Some(dc), Some(peak_kw)) => Some(DemandChargeReport {
+                peak_kw,
+                anchor_kw: dc.anchor_kw,
+                rate_aud_per_kw: dc.rate_aud_per_kw,
+                cost_aud: (peak_kw - dc.anchor_kw).max(0.0) * dc.rate_aud_per_kw,
+                window_start: dc.window.start.format("%H:%M").to_string(),
+                window_end: dc.window.end.format("%H:%M").to_string(),
+                active_now: in_window(grid.steps[0].time(), &dc.window),
+            }),
+            _ => None,
+        };
 
         SolveReport {
             at: now.to_rfc3339(),
@@ -1154,7 +1230,16 @@ impl Cycle {
                         .storage
                         .iter()
                         .find(|s| s.id == b.id)
-                        .map(|cfg| reasoning::for_storage(cfg, b, action, action_actuated, &grid))
+                        .map(|cfg| {
+                            reasoning::for_storage(
+                                cfg,
+                                b,
+                                action,
+                                action_actuated,
+                                &grid,
+                                demand_charge_report.as_ref(),
+                            )
+                        })
                         .unwrap_or_default();
                     StorageReport {
                         id: b.id.clone(),
@@ -1210,6 +1295,7 @@ impl Cycle {
             // loop only when a solve fails); so the on-screen plan IS this `at`.
             stale: false,
             last_solved: now.to_rfc3339(),
+            demand_charge: demand_charge_report,
         }
     }
 
@@ -1457,8 +1543,9 @@ fn patch_rates(mut d: Demand, rates: &Rates) -> Demand {
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_alerts, diag_is_actionable, diag_scope, gate_storage_for_actuation,
-        grid_import_cap_from_resolved, reads_as_climate, storage_action_actuated,
+        demand_charge_from_resolved, derive_alerts, diag_is_actionable, diag_scope,
+        gate_storage_for_actuation, grid_import_cap_from_resolved, reads_as_climate,
+        storage_action_actuated,
     };
     use crate::lp::LoadPlan;
     use crate::model::{LoadId, ServiceCall, StorageControl, StorageDirection, StorageInput};
@@ -1527,6 +1614,42 @@ mod tests {
             [(None, Some(0.0), Some(1.0)), (Some(w), None, Some(1.0)), (Some(w), Some(0.0), None)]
         {
             assert!(grid_import_cap_from_resolved(3, parts.0, parts.1, parts.2)
+                .unwrap_err()
+                .contains("unresolved"));
+        }
+    }
+
+    #[test]
+    fn demand_charge_resolution_is_fail_loud_but_safe() {
+        use crate::model::Window;
+        use chrono::NaiveTime;
+        let w = Window {
+            start: NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(20, 0, 0).unwrap(),
+        };
+        // Happy path: window + rate + a configured anchor all resolved → a usable term.
+        let ok = demand_charge_from_resolved(Some(w), Some(30.0), Some(2.0), true).unwrap();
+        assert_eq!((ok.rate_aud_per_kw, ok.anchor_kw), (30.0, 2.0));
+        // No anchor configured ⇒ anchor defaults to 0 (price the whole peak), still Ok.
+        let no_anchor = demand_charge_from_resolved(Some(w), Some(30.0), None, false).unwrap();
+        assert_eq!(no_anchor.anchor_kw, 0.0);
+        // Invalid magnitude — negative OR non-finite (a miswired entity can report
+        // NaN/inf) → skip loud, never clamped or passed through to poison the LP.
+        for (rate, anchor) in [(-1.0, 0.0), (30.0, -2.0), (f64::NAN, 0.0), (30.0, f64::INFINITY)] {
+            assert!(
+                demand_charge_from_resolved(Some(w), Some(rate), Some(anchor), true)
+                    .unwrap_err()
+                    .contains("invalid magnitude"),
+                "rate={rate} anchor={anchor} must be rejected as invalid"
+            );
+        }
+        // Any unresolved part → skip. A CONFIGURED anchor that didn't read this cycle
+        // (last case) is unresolved — never silently assumed 0 (that would forge a
+        // cheaper charge than the tariff states).
+        for parts in
+            [(None, Some(30.0), Some(0.0)), (Some(w), None, Some(0.0)), (Some(w), Some(30.0), None)]
+        {
+            assert!(demand_charge_from_resolved(parts.0, parts.1, parts.2, true)
                 .unwrap_err()
                 .contains("unresolved"));
         }

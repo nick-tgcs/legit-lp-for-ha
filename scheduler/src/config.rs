@@ -168,6 +168,33 @@ pub struct PricingConfig {
     /// export valuation vary per step instead of flat-lining the current value.
     /// The slot value field (mapped via `import_per_kwh`) IS the export price.
     pub feedin_forecast: Option<ForecastConfig>,
+    /// Optional peak DEMAND charge (distinct from the per-kWh `import`/`feedin`
+    /// prices). Absent = the site has no demand charge. See [`DemandChargeConfig`].
+    pub demand_charge: Option<DemandChargeConfig>,
+}
+
+/// A peak DEMAND charge (distinct from per-kWh energy pricing). Some tariffs bill the
+/// single HIGHEST grid-import power (kW) reached inside a peak `window` over the
+/// billing period — a cost that can dwarf the per-kWh energy charge and is invisible
+/// to an energy-only objective. Modelled in the MILP as one `peak_kw ≥ import[t]` for
+/// every in-window step (and `≥ anchor_kw`), costed `rate_aud_per_kw · (peak_kw −
+/// anchor_kw)` in STAGE-2 ONLY — so shaving the peak never trades off against
+/// must-have comfort (stage 1) and the site balance can never go infeasible. Every
+/// magnitude is a `ValueRef` (literal or live entity); no engine default
+/// (no-hardcoding rule) — a present block with a missing field is a parse error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DemandChargeConfig {
+    /// The billing window the peak is measured over (literal "HH:MM" bounds, or
+    /// entity-refs — e.g. the `input_datetime` peak start/end helpers). `end < start`
+    /// crosses midnight.
+    pub window: WindowCfg,
+    /// Tariff rate ($/kW) applied to the peak demand — literal or entity-ref.
+    /// Required (no engine default; the tariff mechanics are the user's to state).
+    pub rate_aud_per_kw: ValueRef,
+    /// Month-to-date peak demand already billed this period (kW) — literal or
+    /// entity-ref. The plan pays only for NEW demand ABOVE this, so today can hide
+    /// under a peak the month already banked. Omit = `0` (price the whole peak).
+    pub anchor_kw: Option<ValueRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -625,6 +652,27 @@ fn validate(cfg: &RegistryConfig) -> Result<(), SchedulerError> {
             if !p.is_finite() || p < 0.0 {
                 return err(format!(
                     "grid_import_caps[{i}]: penalty_aud_per_kwh must be finite and >= 0, got {p}"
+                ));
+            }
+        }
+    }
+    // Peak demand charge: validate the literal window bounds AND literal magnitudes
+    // now (entity-ref magnitudes are checked live each cycle in cycle.rs). A negative
+    // or non-finite rate/anchor is a config error, mirroring the grid_import_caps
+    // checks — never something to clamp (which would forge a tariff the user never wrote).
+    if let Some(dc) = &cfg.global.pricing.demand_charge {
+        dc.window.validate()?;
+        if let Some(r) = dc.rate_aud_per_kw.as_literal() {
+            if !r.is_finite() || r < 0.0 {
+                return err(format!(
+                    "pricing.demand_charge: rate_aud_per_kw must be finite and >= 0, got {r}"
+                ));
+            }
+        }
+        if let Some(a) = dc.anchor_kw.as_ref().and_then(ValueRef::as_literal) {
+            if !a.is_finite() || a < 0.0 {
+                return err(format!(
+                    "pricing.demand_charge: anchor_kw must be finite and >= 0, got {a}"
                 ));
             }
         }
@@ -1335,6 +1383,92 @@ loads: []
     fn rejects_predictive_without_rates() {
         let r = mutate_example("change_per_hour: 1.5", "unused_field_xx: 1.5");
         assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("predictive")));
+    }
+
+    // ---- peak demand charge (bill on the highest in-window grid kW) ----
+
+    fn dc_yaml(dc_block: &str) -> String {
+        format!(
+            "
+global:
+  enabled_entity: input_boolean.x
+  pricing:
+    import_entity: sensor.p
+    demand_charge:
+{dc_block}
+loads: []
+"
+        )
+    }
+
+    #[test]
+    fn demand_charge_parses_and_round_trips() {
+        // Entity-ref window + entity-ref rate + entity-ref anchor: the whole peak-demand
+        // wiring a real tariff would use, all live (no-hardcoding).
+        let cfg = parse(&dc_yaml(
+            "      window: { start: { entity: input_datetime.peak_power_start_time }, \
+                    end: { entity: input_datetime.peak_power_end_time } }\n\
+             \x20     rate_aud_per_kw: { entity: input_number.peak_demand_rate }\n\
+             \x20     anchor_kw: { entity: sensor.month_peak_demand_kw }\n",
+        ))
+        .expect("demand_charge parses + validates");
+        let dc = cfg.global.pricing.demand_charge.as_ref().expect("demand_charge present");
+        assert_eq!(dc.window.start.source(), Some("input_datetime.peak_power_start_time"));
+        assert!(matches!(dc.rate_aud_per_kw, ValueRef::Entity { .. }));
+        assert!(matches!(dc.anchor_kw, Some(ValueRef::Entity { .. })));
+        // The UI owns the registry: the block survives a serialize/parse round-trip.
+        let round = parse(&serialize_registry(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg, round);
+    }
+
+    #[test]
+    fn demand_charge_anchor_is_optional() {
+        // Omitting anchor_kw is allowed (⇒ price the whole peak); window + rate are not.
+        let cfg = parse(&dc_yaml(
+            "      window: { start: \"14:55\", end: \"20:00\" }\n\
+             \x20     rate_aud_per_kw: 12.5\n",
+        ))
+        .expect("demand_charge without an anchor parses");
+        let dc = cfg.global.pricing.demand_charge.as_ref().unwrap();
+        assert_eq!(dc.rate_aud_per_kw.as_literal(), Some(12.5));
+        assert!(dc.anchor_kw.is_none(), "anchor omitted -> None (priced from 0)");
+    }
+
+    #[test]
+    fn demand_charge_requires_window_and_rate() {
+        // No-hardcoding: a PRESENT demand_charge block with a missing required field is a
+        // hard parse error, never a silent assumed value.
+        for missing in ["window", "rate_aud_per_kw"] {
+            let full = "      window: { start: \"14:55\", end: \"20:00\" }\n\
+                        \x20     rate_aud_per_kw: 12.5\n";
+            let broken = full.replace(&format!("{missing}:"), &format!("{missing}_typo:"));
+            let r = parse(&dc_yaml(&broken));
+            assert!(r.is_err(), "omitting {missing} must be a parse error, got {r:?}");
+        }
+    }
+
+    #[test]
+    fn demand_charge_rejects_negative_or_bad_literals() {
+        // A negative literal rate/anchor, or a malformed window literal, is a config
+        // error caught at parse — not silently clamped (which would forge a tariff).
+        let base = "      window: { start: \"14:55\", end: \"20:00\" }\n\
+                    \x20     rate_aud_per_kw: 12.5\n\
+                    \x20     anchor_kw: 2\n";
+        for (field, from, bad) in [
+            ("rate_aud_per_kw", "rate_aud_per_kw: 12.5", "rate_aud_per_kw: -1"),
+            ("anchor_kw", "anchor_kw: 2", "anchor_kw: -3"),
+        ] {
+            let r = parse(&dc_yaml(&base.replace(from, bad)));
+            assert!(
+                matches!(&r, Err(SchedulerError::Config(m)) if m.contains(field) && m.contains(">= 0")),
+                "negative {field} must be rejected, got {r:?}"
+            );
+        }
+        let r = parse(&dc_yaml(
+            "      window: { start: \"25:99\", end: \"20:00\" }\n\
+             \x20     rate_aud_per_kw: 12.5\n",
+        ));
+        assert!(matches!(r, Err(SchedulerError::Config(m)) if m.contains("bad window time")));
     }
 
     // ---- Guard A: the no-hardcoding rule, enforced in the engine itself ----
