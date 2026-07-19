@@ -33,7 +33,7 @@ predicates = "3"
 insta = "1"
 proptest = "1"
 tempfile = "3"
-jsonschema = { version = "0.47.0", default-features = false }
+jsonschema = { version = "0.48.1", default-features = false }
 tower = "0.5.3"
 regex = "1.12.4"
 reqwest = "0.12"
