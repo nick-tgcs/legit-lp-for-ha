@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2.85.5
+      - uses: taiki-e/install-action@v2.85.9
         with:
           tool: cargo-audit
       - run: cd scheduler && cargo audit
@@ -81,7 +81,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: scheduler
-      - uses: taiki-e/install-action@v2.85.5
+      - uses: taiki-e/install-action@v2.85.9
         with:
           tool: cargo-tarpaulin
       - run: make coverage
